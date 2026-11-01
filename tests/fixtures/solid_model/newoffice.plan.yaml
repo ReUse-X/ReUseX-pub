@@ -42,6 +42,9 @@
 #   +105), x-east-kitchen (-45 / +25), p-bath-printer (+50 / 0), x-ewing-
 #   west (0 / +45), x-south (0 / -40). Treat those as +-0.1 m; re-measuring
 #   them on the reference cloud is reusex-gjjb.
+#   Checked again on the reference v2 (m-3265-3451 moved the second
+#   west-end visit 0.48 m): the west walls (x-west-n, x-west-n-pier,
+#   x-west-s, p-mr1-*) moved 0-15 mm, so no plan change.
 #   Coordinates quoted in the comments below ("old axis", a/b, face
 #   values) are in the April (initial-pose) frame, before this re-fit.
 #

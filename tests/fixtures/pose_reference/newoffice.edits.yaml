@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Povl Filip Sonne-Frederiksen
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# NewOffice pose reference: the edits -- DRAFT v1, maintainer review pending (reusex-rcv.1.8).
+# NewOffice pose reference: the edits -- DRAFT v2, maintainer review pending (reusex-rcv.1.8).
 #
 # The provenance half of the NewOffice pose reference (docs/guides/pose-reference-authoring.md);
 # newoffice.trajectory.tum next to it is the frozen result. Written with the drift-correction loop
@@ -41,25 +41,28 @@
 # The g-* anchors are guards: all-DoF anchors at the poses of the no-edit solve (loops rejected,
 # --manhattan --manhattan-max-angle 30) on 3 nodes of every 12-segment chunk no move names, so each
 # move is measured against the rest as that solve has it and cannot drag the trajectory. The nodes
-# 2060-2109 and 2266-2297 (the walks into and out of the first storage visit) carry no guard: the
-# storage move fought them (g-2086 off 30 mm, g-2269 off 40 mm). All moves read honoured in --watch;
-# plain optimize --edits reads m-716-817 NOT HONOURED by the older block-RMS rule (10.1 mm against a
-# 10.0 mm bound; reusex-wwr).
+# 2060-2109, 2266-2297, 3230-3264 and 3452-3560 (the walks into and out of the moved visits) carry
+# no guard: the moves fought them (g-2086 off 30 mm, g-2269 40, g-3215 42, g-3497 70). All moves
+# read honoured in --watch; plain optimize --edits reads m-716-817 and m-3265-3451 NOT HONOURED by
+# the older block-RMS rule (10.1 mm against a 10.0 mm bound; 22 mm across a 136-frame block bent
+# 18 mm, realised 98% / 83%; reusex-wwr).
+# v2 (review of v1, PR #115 image 20): the second west-end visit 3265-3451 sat 0.45-0.5 m short
+# along the office (m-3265-3451); v1 had read its walls as the entrance door and vestibule.
 #
 # Frame: world. "plan u / v" in the notes = world rotated by -50.864 deg (the plan's display frame,
 # u along the long facade); the renders are drawn in it.
 #
 # Result (rux analyze drift, defaults: frame step 1, depth stride 8, 12 segments; crossings against
-# newoffice.plan.yaml as committed for stored / initial / optimize, against the re-fitted plan for
-# the Manhattan rows):
+# newoffice.plan.yaml as committed before the re-fit for stored / initial / optimize, against the
+# re-fitted plan for the Manhattan rows):
 #                                 initial      stored = optimize  optimize      loops rejected  this
-#                                 (start)      without loops      (with loops)  + Manhattan     (DRAFT)
+#                                 (start)      without loops      (with loops)  + Manhattan     (DRAFT v2)
 #   noise floor                   6.1 mm       6.0 mm             6.1 mm        6.1 mm          6.1 mm
-#   pass-to-pass median (p90)     10.1 (35.1)  9.9 (33.6)         10.4 (36.1)   10.1 (34.0)     10.1 (33.9) = 1.66x floor
-#   frames above the flag         52           22                 37            23              19
-#   segment-pair median           19.3 mm      19.1 mm            22.0 mm       18.7 mm         18.0 mm
-#   worst segment pair (*)        89.5 mm      39.0 mm            106.8 mm      114.7 mm        115.0 mm
-#   through-wall steps (**)       9 of 50      9 of 50            17 of 59      10 of 50        10 of 50
+#   pass-to-pass median (p90)     10.1 (35.1)  9.9 (33.6)         10.4 (36.1)   10.1 (34.0)     10.1 (33.8) = 1.66x floor
+#   frames above the flag         52           22                 37            23              18
+#   segment-pair median           19.3 mm      19.1 mm            22.0 mm       18.7 mm         18.2 mm
+#   worst segment pair (*)        89.5 mm      39.0 mm            106.8 mm      114.7 mm        117.2 mm
+#   through-wall steps (**)       9 of 50      9 of 50            17 of 59      10 of 50        6 of 50
 #   doubled-wall patches          0.35         0.33               0.39          0.34            0.35
 #   floor modes, west..kitchen    -1.25..-1.30 -1.29..-1.43       -1.02..-1.31  -1.25..-1.30    -1.25..-1.30
 # Manhattan deviation per segment (wall-band point normals, the prior's 4-phi estimator, heading of
@@ -67,15 +70,16 @@
 #   segment      0     1     2     3     4     5     6     7     8     9     10    11   |med| max
 #   initial    +0.53 -0.09 -0.19 +0.11 +0.26 -0.17 -0.22 +0.20 -0.10 -0.30 +0.96 -0.35  0.21 0.96
 #   stored     +0.79 -0.37 -0.45 -0.38 +0.18 +0.15 -0.00 +0.08 +0.30 -0.29 +0.58 -0.41  0.33 0.79
-#   this       -0.46 -0.45 -0.52 -0.24 -0.40 +0.07 -0.20 +0.64 -0.06 +0.27 +0.25 -0.36  0.32 0.64
+#   this       -0.40 -0.51 -0.48 -0.17 -0.31 +0.11 -0.15 +0.66 -0.07 +0.04 +0.25 -0.31  0.28 0.66
 # Every segment is within 1 deg of the grid in every pose set; the per-segment spread is at the
 # estimator's noise (0.1-0.3 deg between runs of the same solve with different guards).
 # (*) the two faces of p-bath-printer (0.10-0.15 m, printer room | bathroom lobby), seen by seg 7 from
 #     the lobby and by seg 5 from the printer room, inside the 0.15 m pair gate once the bathroom's two
 #     visits agree (cut by node range, pairmap). The 2x-floor worst-pair bound cannot be met on a
 #     scan with thin walls seen from both sides (the same finding as house2).
-# (**) every remaining crossing is a plan error, not drift: 4 on p-wc-south at s 3.3-3.5 m = the
-#     accessible WC 3's door, which the plan did not draw (images 2568-2569 walk through its door
+# (**) every crossing left in v1 was a plan error, not drift: 4 on p-wc-south at s 3.3-3.5 m = the
+#     accessible WC 3's door, which the plan did not draw (counted against the re-fitted plan,
+#     which has it, v2 shows the 6 below) (images 2568-2569 walk through its door
 #     frame, 3185-3187 inside WC 3; the re-fitted plan adds o-wc3-door), and 6 on p-storage-glass at
 #     s 1.8-2.2 m = the storage door, drawn 0.2-0.5 m off (reusex-g75; images 2107-2109).
 #
@@ -83,7 +87,7 @@
 #  - pass-to-pass stays at 1.66x the floor (target 1.5x). Plateau shown: the segment-ICP suggestions
 #    predict <= 4 mm on their own segment: pasted on the loop-free base (seg 5, then seg 3) they moved
 #    pass-to-pass 9.6 -> 9.5 -> 9.5 mm with the cross-segment median unchanged, and a move of the
-#    whole capture segment cannot follow a room (the three moves below are room visits). Each room
+#    whole capture segment cannot follow a room (the four moves below are room visits). Each room
 #    fit below halves its block's residual and changes the pooled median by < 0.2 mm. The residual is spread
 #    over the open office (chairs and desks moved between passes) and furniture against walls.
 #  - the doubled-wall share does not move (0.33-0.35 in every solve): furniture, shelving and
@@ -91,8 +95,6 @@
 #  - the storage room's absolute position rests on the third, 17-frame visit 3062-3086 and the wall
 #    thickness the plan measured on the initial poses; its two long visits alone could sit 0.1 m
 #    either way.
-#  - the entrance end (plan u -3.0 vs -2.4, images 3385/3387): two surfaces seen by different passes,
-#    read as the glass entrance door and the vestibule beyond it, not drift; not edited.
 schema: reusex.pose_edits.v1
 frame: world
 edits:
@@ -133,6 +135,22 @@ edits:
       storage room, second visit (images 4033-4035: the boxes from the doorway). The joint
       fit with m-2110-2265 (see there); after both, the three storage visits draw the room's walls on
       one line (south wall plan v -16.85; after_storage_by_visit.png).
+  - id: m-3265-3451
+    kind: move
+    nodes: [3265, 3451]
+    delta: {matrix: [0.999943, -0.010629, 0.001277, 0.305149, 0.010634, 0.999937, -0.003726, 0.414204, -0.001237, 0.003739, 0.999992, -0.026835, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.005, rot_deg: 0.1}
+    note: >-
+      west end, second visit to meeting rooms 1 and 2 and the entrance (3265-3451; colour images
+      3334-3336 meeting room 2, 3385-3387 the entrance door; maintainer review of PR #115, image
+      20). Its walls sat 0.45-0.5 m short of the first visit's (1-333) and of 3452-4053 along the
+      office's long axis (plan u): meeting room 2's west wall at u -2.9 against -2.45, meeting
+      room 1's east wall at 1.6 against 2.2. The walk from the bathroom (3230-3264) runs 20 m along
+      the corridor, where walls parallel to it fix nothing along it. A planar point-to-plane ICP
+      restricted to the west end (plan u -4..4) from a +0.45 m start: 11.7 -> 9.5 mm, +0.475 m u,
+      -0.5 deg (from a zero start it stops in a local minimum at -0.1 m). After it the walls of
+      the three visits coincide (west_rooms_before/after.png). Guards on the walks into and out of
+      it (3230-3264, 3452-3560) are left out: they fought the move (g-3215 off 42 mm, g-3497 70 mm).
   - id: g-59
     kind: anchor
     node: 59
@@ -295,40 +313,40 @@ edits:
     pose: {matrix: [0.598458, 0.122293, 0.791766, 2.546743, 0.758201, 0.232799, -0.609045, 3.970781, -0.258804, 0.964805, 0.046597, 0.274588, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
-  - id: g-3036
+  - id: g-3014
     kind: anchor
-    node: 3036
-    pose: {matrix: [-0.744295, -0.428122, 0.512579, 23.479478, 0.487054, 0.177174, 0.855212, 11.138078, -0.456950, 0.886184, 0.076649, 0.186312, 0.000000, 0.000000, 0.000000, 1.000000]}
+    node: 3014
+    pose: {matrix: [0.497890, 0.179267, 0.848510, 19.407161, 0.796892, 0.291439, -0.529175, 13.067646, -0.342152, 0.939642, 0.002248, 0.219494, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
-  - id: g-3171
+  - id: g-3100
     kind: anchor
-    node: 3171
-    pose: {matrix: [0.834669, 0.548572, -0.048951, 16.026550, -0.063989, 0.008314, -0.997916, 18.566393, -0.547022, 0.836062, 0.042042, 0.163943, 0.000000, 0.000000, 0.000000, 1.000000]}
+    node: 3100
+    pose: {matrix: [-0.695373, -0.518030, 0.498097, 17.941045, 0.419818, 0.269721, 0.866605, 12.928162, -0.583274, 0.811724, 0.029921, 0.120525, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
-  - id: g-3318
+  - id: g-3184
     kind: anchor
-    node: 3318
-    pose: {matrix: [0.615287, 0.373235, -0.694347, 0.095984, -0.565144, -0.405221, -0.718615, 0.950907, -0.549577, 0.834560, -0.038396, 0.147535, 0.000000, 0.000000, 0.000000, 1.000000]}
+    node: 3184
+    pose: {matrix: [-0.788163, -0.521142, -0.327430, 16.376604, -0.234081, -0.238202, 0.942585, 18.940848, -0.569215, 0.819555, 0.065753, 0.174429, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
-  - id: g-3457
+  - id: g-3588
     kind: anchor
-    node: 3457
-    pose: {matrix: [0.174731, -0.037450, 0.983904, 3.766146, 0.865255, -0.471053, -0.171590, 1.587835, 0.469897, 0.881310, -0.049904, 0.610336, 0.000000, 0.000000, 0.000000, 1.000000]}
+    node: 3588
+    pose: {matrix: [0.035653, -0.117178, -0.992471, 12.816950, -0.836700, 0.539576, -0.093763, 13.762964, 0.546501, 0.833743, -0.078806, 0.658791, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
-  - id: g-3565
+  - id: g-3645
     kind: anchor
-    node: 3565
-    pose: {matrix: [-0.902210, 0.394462, -0.174405, 12.395253, -0.216736, -0.065054, 0.974060, 10.429921, 0.372884, 0.916607, 0.144186, 0.640999, 0.000000, 0.000000, 0.000000, 1.000000]}
+    node: 3645
+    pose: {matrix: [-0.961832, -0.268724, -0.051635, 10.058316, -0.055426, 0.006534, 0.998441, 15.393955, -0.267967, 0.963195, -0.021179, 0.263182, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
-  - id: g-3675
+  - id: g-3701
     kind: anchor
-    node: 3675
-    pose: {matrix: [-0.090453, -0.044330, -0.994914, 7.222584, -0.952790, -0.286895, 0.099406, 14.604389, -0.289842, 0.956936, -0.016287, 0.329171, 0.000000, 0.000000, 0.000000, 1.000000]}
+    node: 3701
+    pose: {matrix: [0.968399, 0.179799, 0.172846, 4.881764, 0.163729, 0.064483, -0.984396, 13.319529, -0.188139, 0.981588, 0.033007, 0.361886, 0.000000, 0.000000, 0.000000, 1.000000]}
     sigma: {trans_m: 0.01, rot_deg: 0.2}
     note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
   - id: g-3773

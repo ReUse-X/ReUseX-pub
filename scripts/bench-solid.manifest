@@ -34,13 +34,13 @@ office_corridor    fixture    tests/fixtures/solid_model/two_rooms.plan.json -  
 # (reusex-m53); the reference turns the trajectory 1.03 deg against the
 # initial poses (the Manhattan gauge), so a copy on the stored or initial
 # poses is turned ~1 deg against this plan and scores far lower: expected.
-# (2026-11-01, chain storeys,classify,walls,openings: wall recall 0.59 /
-# precision 0.42, rms 0.135 m, thickness err 0.043 m, openings 0.66 / 0.57
-# (IoU 0.46) -- the old plan on its own initial-pose copy: 0.63 / 0.46, rms
-# 0.056 m, openings 0.68 / 0.69; the old plan on the reference copy: rms
-# 0.294 m, openings 0.62 / 0.52. The rms is driven by x-west-n /
-# x-west-n-pier and x-east, whose detected axes moved more than their cloud
-# faces did; re-measuring them is reusex-gjjb.)
+# (2026-11-01, reference DRAFT v2, chain storeys,classify,walls,openings:
+# wall recall 0.67 / precision 0.42, rms 0.107 m, thickness err 0.082 m,
+# openings 0.50 / 0.48 (IoU 0.41); on DRAFT v1 0.59 / 0.42, rms 0.135 m,
+# openings 0.66 / 0.57 -- the old plan on its own initial-pose copy: 0.63 /
+# 0.46, rms 0.056 m, openings 0.68 / 0.69; the old plan on the reference
+# copy: rms 0.294 m. Re-measuring the walls whose detected axes moved more
+# than their cloud faces did is reusex-gjjb.)
 # Before 2026-11-01 the recipe was the initial poses
 # (`UPDATE sensor_frames SET transform = initial_transform`): the plan was
 # drawn on the April cloud, built from them. A fresh `import rtabmap` of

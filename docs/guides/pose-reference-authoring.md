@@ -386,7 +386,14 @@ listing the camera runs inside each room (plan box -> contiguous node runs)
 and fitting each *visit* (6-DoF point-to-plane ICP against all frames more
 than 30 nodes away), then looking at a cut coloured by visit. Three visits
 became moves: the closed office's first visit (37.5 -> 14.5 mm) and the two
-long storage-room visits, fitted together (48.6 -> 19.7 mm).
+long storage-room visits, fitted together (48.6 -> 19.7 mm). A fourth came
+from the review (v2): the second west-end visit 3265-3451 sat 0.45-0.5 m
+short along the office, after a 20 m walk down the corridor, where walls
+parallel to the walk fix nothing along it. v1 had read its walls as the
+entrance door and a vestibule. The ICP from a zero start stopped at -0.1 m
+(a local minimum); from a +0.45 m start, read off the cut, it found +0.475 m.
+Colour a cut by node range around every doubled wall, and start a fit from
+the offset the cut shows.
 
 **3. Two visits that each want the other one moved need a third witness.**
 The storage room's two long visits each fitted 0.15-0.2 m onto the other,
@@ -399,7 +406,8 @@ the two together as one block, then write one move per contiguous range.
 **4. A guard next to a move is a constraint against it.** The storage move
 was fought (`NOT HONOURED`, then `g-2086` and `g-2269` off 30-40 mm) by the
 guards on the kitchen walks just before and after the visit: the odometry
-over the door threshold carries the error. Leave the walk into and out of a
+over the door threshold carries the error (the west-end move the same way,
+g-3215 / g-3497). Leave the walk into and out of a
 moved visit out of the guard list; then every edit read honoured.
 
 **5. Re-derive a fit on the current base.** On the loop-free solve the
@@ -418,17 +426,17 @@ The re-fitted plan adds the WC 3 door.
 
 | | initial (start) | stored = optimize without loops | optimize (with loops) | DRAFT reference |
 |---|---|---|---|---|
-| pass-to-pass median (p90) | 10.1 (35.1) mm | 9.9 (33.6) mm | 10.4 (36.1) mm | 10.1 (33.9) mm, 1.66x the floor |
-| frames above the flag | 52 | 22 | 37 | 19 |
-| segment-pair median | 19.3 mm | 19.1 mm | 22.0 mm | 18.0 mm |
+| pass-to-pass median (p90) | 10.1 (35.1) mm | 9.9 (33.6) mm | 10.4 (36.1) mm | 10.1 (33.8) mm, 1.66x the floor |
+| frames above the flag | 52 | 22 | 37 | 18 |
+| segment-pair median | 19.3 mm | 19.1 mm | 22.0 mm | 18.2 mm |
 | floor, west wing .. kitchen | -1.25..-1.30 m | -1.29..-1.43 m | -1.02..-1.31 m | -1.25..-1.30 m |
-| segment heading, median / max | 0.21 / 0.96 deg | 0.33 / 0.79 deg | -- | 0.32 / 0.64 deg |
+| segment heading, median / max | 0.21 / 0.96 deg | 0.33 / 0.79 deg | -- | 0.28 / 0.66 deg |
 
 The bead's 1.5x-floor target was not reached; the plateau is in the edits
 header (suggestions predict <= 4 mm and move the pooled median <= 0.1 mm;
 each room fit halves its own residual and moves the pooled median < 0.2 mm;
 what is left is furniture moved between passes). The worst segment pair
-(115 mm) is again the two faces of a thin wall, p-bath-printer, seen from
+(117 mm) is again the two faces of a thin wall, p-bath-printer, seen from
 the lobby and from the printer room.
 
 **Re-fitting the plan.** A rigid 2D fit of the start's wall points onto the
