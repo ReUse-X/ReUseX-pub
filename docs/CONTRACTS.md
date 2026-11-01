@@ -108,7 +108,32 @@ above the offset watermark.  The one table without a FK constraint
 
 **Re-import guard.** Importing the same `source_path` a second time creates a
 second scan by design (e.g. re-processing after editing the RTABMap DB).
-A `WARN` is logged; the import is not blocked.
+A `WARN` is logged; the import is not blocked. Each scan's `provenance`
+records the session's node count and first / last stamp (`fingerprint`) and
+the file's content fingerprint (`file_fingerprint`,
+`core/file_fingerprint.hpp`).
+
+**Append mode** (`rux import rtabmap --append`, job stage `import_rtabmap`
+with `append_session: true` -- the default for the job; reusex-y2lg.30).
+Several RTAB-Map sessions go into one project one by one, without
+rtabmap-reprocess; each starts **detached** where its own map put it:
+
+- a session the project already holds (same `fingerprint` or
+  `file_fingerprint`) is refused (`io::DuplicateSessionError`, nothing
+  written; ruxd answers 409);
+- RTAB-Map's raw odometry of the new session is replaced by `odometry_init`
+  edges from the imported poses (`core::rebuild_odometry`, reusex-y2lg.16,
+  reusex-33j);
+- the odometry link to the previous session is cut in the working pose
+  edits (a `reject_edge` `detach-<a>-<b>`, project setting
+  `pose_edits.working`), so optimize does not bridge it from the initial
+  poses; the session's default block is `detached`;
+- a pose version `import` is recorded (`pose_versions`).
+
+The job stage `import_rtabmap` reads `path` (absolute, or relative to the
+project's directory and confined to it like `import_ifc`'s) and
+`append_session`; it writes one `pipeline_log` row of its own besides the
+importer's `import` row.
 
 **Pose graph.** `rux import rtabmap` stores **every** link in the RTABMap
 database's link table (not just its optimized graph's) into
@@ -158,6 +183,39 @@ training views) keep using `aligned` panoramas only. No storey is stored per
 panorama: the storey is derived from the pose with `core::which_storey` (see
 `storeys`).
 
+### Editor writes: blocks, block transform, odometry rebuild, pose versions (rux graph blocks / block-transform / init --rebuild-odometry / versions)
+
+<!-- No backticks in this heading: not a pipeline stage. -->
+
+The scan-repair editor's writes (reusex-y2lg; ruxd `/posegraph/...`). Core
+only: `core/pose_blocks.hpp`, `core/pose_repair.hpp`,
+`core/pose_versions.hpp`, `core/working_pose_edits.hpp`.
+
+| | |
+|---|---|
+| Consumes | `sensor_frames` (poses, `initial_transform`, `scan_id`, `timestamp`), `pose_graph_edges`, `pose_blocks` |
+| Produces | `pose_blocks` (the block list); `sensor_frames.transform` / `initial_transform` (block transform); `pose_graph_edges` odometry rows (`odometry_init`, rebuild and every re-seed); project settings `pose_edits.working` (holds, detach cuts) and `pose_versions.current`; one `pose_versions` row per step |
+| Checks   | blocks partition each session's posed frames (no overlap, no gap, no block across sessions); a transform needs a non-empty selection and a rigid delta; undo / redo refuse when there is nothing to go to |
+
+- **Blocks** are stored per project; without stored blocks every session is
+  one block, every session after the first `detached`. Detach writes a
+  `reject_edge` edit for the odometry link at the joint and rejects the
+  stored row; `rebuild_odometry` keeps such a joint cut.
+- **Block transform** (`mode: reseed`, default): every posed frame's
+  `initial_transform := transform`, then the moved poses go into both, and
+  the odometry of every consecutive in-session pair is re-derived from the
+  new seed (imported rows replaced, confirmed / user-rejected rows and
+  detached joints kept; reusex-xmt). The move fades out over `blend_frames`
+  at a joint to an attached neighbour (smoothstep, rotation slerped) and is
+  rigid at a session boundary or a detached joint. `mode: local` changes
+  only the selection's `transform`. A preview writes nothing.
+- **Pose versions** snapshot every frame's `transform` / `initial_transform`,
+  the whole `pose_graph_edges` table (ids, measurements, statuses, metrics)
+  and the working edits; restoring one writes them back byte-identically,
+  except that frames (and their edges) imported after the version was taken
+  are left alone. A live state that is no version yet is recorded first
+  (`baseline` / `external`), so a restore never loses it.
+
 ### `graph_init` (`rux graph init`)
 
 Snapshot each frame's current pose into `sensor_frames.initial_transform` and
@@ -167,7 +225,10 @@ odometry edge with a measurement. On a graph that already has odometry, a
 plain run only fills gaps: frames without a snapshot and consecutive in-scan
 pairs without odometry (e.g. a newly imported scan). `--force` re-snapshots
 every frame and replaces the `auto` `odometry_init` edges; confirmed and
-rejected edges are kept.
+rejected edges are kept. `--rebuild-odometry` (`core::rebuild_odometry`,
+see "Editor writes" above) replaces the odometry of every in-session pair
+from the initial poses, imported RTAB-Map rows included, and records a pose
+version.
 
 | | |
 |---|---|
