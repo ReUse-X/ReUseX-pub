@@ -504,7 +504,9 @@ and deleted the shims. `include/geometry/` now holds only the real
   storey (house1's north block, +0.75 m) on the band grid; band rooms
   measure the wall band from each cell's own floor, and the spaces stage
   gives every space its own measured `z_floor` / `z_ceiling`
-  (`measure_space_heights()`, reusex-546). A split level stays one storey
+  (`measure_space_heights()`, reusex-546) and its sloped ceiling planes
+  from the classified ceiling planes over it (`fit_sloped_ceilings()`,
+  `src/segmentation/sloped_ceilings.cpp`). A split level stays one storey
 - `spaces.hpp`: `polygonise_spaces()` (W4.2) — band rooms as space
   polygons: CGAL arrangement of the wall faces (+ the interior outline)
   labelled by the band grid, raster fallback where the walls do not close
@@ -556,7 +558,10 @@ and deleted the shims. `include/geometry/` now holds only the real
   wall footprints, down to the storey below) plus a roof, a space volume;
   split levels (reusex-546): one slab / roof region per floor / ceiling
   level of the spaces, walls from the lowest adjacent floor to the highest
-  adjacent ceiling;
+  adjacent ceiling; sloped ceilings (reusex-546): space prisms clipped by
+  their `ceiling_planes`, wall tops following the ceilings beside them
+  (gable / knee walls, elevation extruded across the thickness), roof
+  slabs following the slope;
   each `ElementSolid` has a world mesh and the IFC-ready extrusion profile.
   Stored by the `solids` stage (`rux create solids`, after spaces) as the
   meshes `solid_walls` / `solid_slabs` / `solid_spaces`, the element index
@@ -747,7 +752,12 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   (`core/report_cover.hpp`: a frame or panorama + region, or the upload);
   the BEK 496 Sagsdata fields are project settings
   `sagsdata/<project id>/<field>` (`core/sagsdata.hpp`), shared by ruxd and
-  `write_report_data`
+  `write_report_data`. Schema v39 adds sloped ceilings and wall tops
+  (reusex-546): `spaces.ceiling_planes` and `walls.top_profile`, JSON text
+  ('' = flat; `core/sloped_ceiling.hpp`: `ceiling_at()` = min(z_ceiling,
+  planes), `wall_top_at()`, checks and codecs), written by the spaces
+  stage's `fit_sloped_ceilings()` and by imports; solid-model JSON
+  `model_version` 2 carries them (a flat model is still written as 1)
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)

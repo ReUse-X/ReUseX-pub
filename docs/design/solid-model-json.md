@@ -34,7 +34,7 @@ and `scripts/bench-solid.sh` runs that over a manifest of fixtures.
 | Metrics | `libs/reusex/include/reconstruction/solid_metrics.hpp` (`compare_solid_models`, `fit_report`) |
 | CLI | `rux analyze solid` (`apps/rux/src/analyze/solid.cpp`), `rux render --plan`, `rux edit plan --import`/`--export` -- every one of these takes either extension |
 | Bench | `scripts/bench-solid.sh`, `scripts/bench-solid.manifest`, `scripts/bench-solid-compare.py` |
-| Fixtures | `tests/fixtures/solid_model/`: hand-written synthetic plans (`*.json`), and references authored on our own scans as hand-written, commented YAML (`newoffice.plan.yaml`, a DRAFT) -- never round-tripped through a writer, which would drop the comments |
+| Fixtures | `tests/fixtures/solid_model/`: hand-written synthetic plans (`*.json`; `attic.plan.json` is the version-2 one: a 35 deg attic with knee and gable walls, and a flat-centre room with sloped sides), and references authored on our own scans as hand-written, commented YAML (`newoffice.plan.yaml`, a DRAFT) -- never round-tripped through a writer, which would drop the comments |
 | Authoring | [`docs/guides/solid-model-reference-authoring.md`](../guides/solid-model-reference-authoring.md) (`rux edit plan`, `rux render --plan`) |
 
 ## No ground truth
@@ -160,6 +160,37 @@ presentation details like key order in a hand-edited file.
   the outer ring, and holes neither overlap nor touch each other. Rings are
   stored open: a ring whose last point repeats its first (GeoJSON style) is
   accepted and the repeated point dropped, so it is never written back.
+- **Sloped ceilings** (`model_version` 2, reusex-546). A space may carry
+  `ceiling_planes`: `[{"at": [x, y, z], "slope": [dz/dx, dz/dy]}, ...]`,
+  each a plane through `at` with that gradient, in the level frame. The
+  ceiling at (x, y) is the **lowest** of `z_ceiling` and the planes
+  (`core::ceiling_at()`), so `z_ceiling` is the flat part or the ridge and
+  the planes cut it:
+
+  ```yaml
+  # An attic room, ridge along x at y = 2, 35 deg pitch, 1.15 m knee walls:
+  z_ceiling: 2.6          # above the ridge (2.55): no flat part
+  ceiling_planes:
+    - {at: [0, 0, 1.15], slope: [0, 0.7002]}    # rises north from the south knee wall
+    - {at: [0, 4, 1.15], slope: [0, -0.7002]}   # rises south from the north knee wall
+  # A mono pitch (house1's south block): one plane, z_ceiling at its high end.
+  # A flat centre with sloped sides: z_ceiling is the flat part.
+  ```
+
+  A minimum of planes is a concave ceiling: pitched, mono-pitch, mansard and
+  "flat centre, sloped sides" rooms are all one; a dormer (a ceiling that
+  rises again inside the room) is not, and stays approximated. A plane is at
+  most 80 deg steep, and the ceiling must not drop below `z_floor` at a
+  vertex of the outer ring (its minimum over the footprint lies on one).
+  Without `ceiling_planes` the ceiling is flat at `z_ceiling`, as in
+  version 1.
+- **Sloped wall tops** (`model_version` 2). A wall may carry `top`:
+  `[[s, z], ...]`, its top along the axis (s from the first endpoint,
+  strictly increasing; z in the level frame, above `z_base`), held constant
+  past its ends and capped at `z_base + height` (`core::wall_top_at()`). A
+  gable wall under the attic above is `[[0, 1.15], [2, 2.5504], [4, 1.15]]`
+  with `height` its peak; a side wall under a mono pitch is two points; a
+  knee wall needs none (its top is flat at `height`).
 - **Openings** sit in their host wall's face: `s_start` < `s_end` measured
   along the host axis from its first endpoint, `z_sill` < `z_head` in the
   level frame. `kind` is `door`, `window` or `opening`.
@@ -184,7 +215,11 @@ a number that overflows a double), an unknown key (a typo must not silently
 become a default), a wrong type, a non-finite number, an integer outside
 `int`, a missing `model_version` or a version other than 1, a zero-length
 wall axis, a space polygon that breaks the ring and hole rules above, an
-opening with `s_end <= s_start` or `z_head <= z_sill`, a reference to a wall,
+opening with `s_end <= s_start` or `z_head <= z_sill`, a ceiling plane that
+is steeper than 80 deg, has an unknown key or takes the ceiling below
+`z_floor` at a vertex, a wall `top` with fewer than 2 points, an s that does
+not increase or a z at or below `z_base`, `ceiling_planes` or `top` in a
+version-1 document, a reference to a wall,
 space or storey the document does not contain, and a duplicate `guid` or
 storey `idx`.
 
@@ -197,7 +232,16 @@ element, so `JSON -> records -> JSON` is a fixed point (tested in
 `model_version` is bumped on any change a version-1 reader would
 misinterpret (a renamed or re-meant field). Adding an optional field is also
 a bump, because the reader is strict about unknown keys. The reader accepts
-exactly `io::kSolidModelJsonVersion`.
+1 up to `io::kSolidModelJsonVersion` (2).
+
+| Version | Adds |
+|---|---|
+| 1 | storeys, walls, wall joins, spaces, space boundaries, openings, plane classes, scene relations |
+| 2 | a space's `ceiling_planes`, a wall's `top` (sloped ceilings and wall tops, reusex-546) |
+
+The writer emits the **lowest** version that holds the model: a model with
+no sloped ceiling and no sloped wall top is written as version 1, byte for
+byte as before, so a version-1 build still reads it.
 
 ## Metrics
 
@@ -240,7 +284,7 @@ storey at all (no storeys, walls or spaces) covers everything.
 |---|---|---|
 | `room_count_error` | detected spaces - reference spaces (signed) | 0 |
 | `room_iou_mean` | mean over reference spaces of the 2D IoU with the detected space matched to it; unmatched = 0 | higher |
-| `space_floor_err_mean_m` / `space_ceiling_err_mean_m` | mean \|detected - reference\| `z_floor` (`z_ceiling`) over the matched spaces, both in world z at the detected polygon's vertex mean: whether split levels and per-space ceilings are found | lower |
+| `space_floor_err_mean_m` / `space_ceiling_err_mean_m` | mean \|detected - reference\| `z_floor` (`z_ceiling`) over the matched spaces, both in world z at the detected polygon's vertex mean: whether split levels and per-space ceilings are found. When either space of a pair has `ceiling_planes`, its ceiling error is the mean \|difference\| of the two ceiling surfaces (`core::ceiling_at()`) over a 32 x 32 grid on the plan both polygons cover, so a sloped ceiling is scored against the surface, not one height (the detected planes are mapped into the reference level frame like the polygons) | lower |
 | `wall_recall` / `wall_precision` | matched / reference walls, matched / detected walls | higher |
 | `wall_position_rms_m` | RMS of matched detected walls' endpoint distances to the reference axis line; face to face when exactly one of the pair is drawn on a face (thickness -1; see Matching) | lower |
 | `wall_thickness_err_mean_m` / `_p95_m` | \|detected - reference\| thickness over matched walls whose thickness is known (> 0) and measured (`assumed` false) on both sides; mean and nearest-rank P95. Pairs left out for `assumed` are counted in `counts.thickness_assumed_excluded`, scored pairs in `counts.thickness_pairs` | lower |

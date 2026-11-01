@@ -33,6 +33,20 @@ namespace reusex::core {
 /// A 2D point in a storey's level frame [m].
 using PlanPoint = std::array<double, 2>;
 
+/// One plane of a sloped ceiling (reusex-546), in the storey's level frame:
+/// z(x, y) = at[2] + slope[0] * (x - at[0]) + slope[1] * (y - at[1]).
+/// A point on the plane plus its gradient, so an authored plan can say "2.38 m
+/// at the facade, rising 0.17 m per m northwards". A ceiling cannot be
+/// vertical, so the gradient is finite (the JSON reader caps it at 80 deg).
+struct CeilingPlane {
+  std::array<double, 3> at{0.0, 0.0, 0.0}; ///< a point on the plane [m]
+  std::array<double, 2> slope{0.0, 0.0};   ///< dz/dx, dz/dy [m/m]
+
+  [[nodiscard]] double z_at(double x, double y) const {
+    return at[2] + slope[0] * (x - at[0]) + slope[1] * (y - at[1]);
+  }
+};
+
 /// One storey: a floor level and the frame its elements are expressed in.
 struct StoreyRecord {
   int64_t id = -1;
@@ -67,6 +81,12 @@ struct WallRecord {
   int face_a_points = 0, face_b_points = 0;
   double co_visibility = -1.0;
   int axis_family = -1;
+  /// Sloped top (reusex-546; gable and knee walls under a sloped ceiling):
+  /// (s, z) points, s along the axis from (x0, y0) strictly increasing, z in
+  /// the level frame. The top at s is the profile interpolated linearly
+  /// (held constant past its ends), capped at z_base + height. Empty: the
+  /// top is flat at z_base + height.
+  std::vector<PlanPoint> top;
   std::string source = "detected";
   bool locked = false;
   double confidence = -1.0;
@@ -98,6 +118,12 @@ struct SpaceRecord {
   std::string kind = "unknown"; ///< room | corridor | open_plan | unknown
   SpacePolygon polygon;
   double z_floor = 0.0, z_ceiling = 0.0;
+  /// Sloped ceiling (reusex-546): the ceiling at (x, y) is the lowest of
+  /// z_ceiling and these planes, so a pitched (attic) ceiling, a mono-pitch
+  /// one and a flat centre with sloped sides are all z_ceiling (the flat
+  /// part, or the ridge) cut by the sloped planes. Empty: flat at z_ceiling.
+  /// core::ceiling_at() evaluates it.
+  std::vector<CeilingPlane> ceiling_planes;
   /// Derived quantities; -1 = not computed.
   double area = -1.0, perimeter = -1.0, volume = -1.0, compactness = -1.0;
   int room_label = -1; ///< label in the "rooms" cloud, -1 if none
