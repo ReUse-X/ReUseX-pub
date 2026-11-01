@@ -441,7 +441,9 @@ The shell lives in `rux_qt_lib` (`AppShell`, `ProjectSession`,
 binaries carry no Qt client code. Hidden dev flag:
 `rux -p x.rux --quit-after-ms N`.
 The Qt client's workspaces are Start, Oversigt (`DatabaseWorkspace`,
-read-only), 3D (`Viewer3DWorkspace`), Rediger (`EditWorkspace`: `GraphPanel`,
+read-only), Ressourcer (`ResourcesWorkspace`, read-only: survey parts by
+type with their `sys:view` photo, filters, a detail page; Qt-free half
+`rux_qt/resource_list.hpp`), 3D (`Viewer3DWorkspace`), Rediger (`EditWorkspace`: `GraphPanel`,
 `EdgeListPanel`, the match editor `PairImages` / `MatchCanvas` over the 3D
 overlay — ORB matches between A and B, edited by hand, fitted with
 `slam/frame_pair_matches.hpp` to place B — and the pair strip), Pipeline
@@ -458,7 +460,7 @@ passes `StageExecutorOptions::local_user()`; the Qt Pipeline
 list hides `annotate`, `import_speckle` and `import_ifc`), and "Kopiér som
 rux-kommando" (`rux_qt/cli_command.hpp`) is round-trip tested against the real
 CLI (`tests/unit/rux_app/test_cli_command_roundtrip.cpp`, via
-`rux::set_stage_params_sink`). `RUX_QT_PAGE=oversigt|3d|rediger|pipeline|log`
+`rux::set_stage_params_sink`). `RUX_QT_PAGE=oversigt|ressourcer|3d|rediger|pipeline|log`
 lands the smoke run on that page (`database` is still accepted as an alias
 for `oversigt`; `posegraf` is gone).
 `rux-qt-gallery` (`apps/rux/qt`) renders pages of the native Qt client

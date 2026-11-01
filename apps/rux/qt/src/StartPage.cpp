@@ -330,6 +330,7 @@ QWidget *StartPage::make_summary() {
   for (const auto &c : s.clouds)
     biggest = std::max(biggest, c.point_count);
   const int scans = static_cast<int>(s.sensor_frames.scans.size());
+  const auto &survey = session_.survey_counts();
   struct Kpi {
     QString label, value, hint;
   };
@@ -350,9 +351,25 @@ QWidget *StartPage::make_summary() {
                                   s.meshes.front().face_count)))},
       {"Panoramaer", QString::number(s.panoramic_images.total_count),
        QString("%1 koblet til billeder").arg(s.panoramic_images.matched_count)},
-      {"Ressourcer", QString::number(s.materials.size()), "materialepas"},
-      {"Komponenter", QString::number(s.components.total_count),
-       QString("%1 typer").arg(s.components.count_by_type.size())},
+      // Resources are survey parts (one passport each), not the material
+      // passport table, and their types are survey types (reusex-3vuu).
+      {"Ressourcer", format_count(static_cast<qulonglong>(survey.parts)),
+       survey.parts == 0
+           ? QString("kør rux create survey")
+           : QString("i %1 %2%3")
+                 .arg(survey.types)
+                 .arg(survey.types == 1 ? "type" : "typer")
+                 .arg(survey.dismissed > 0
+                          ? QString(" · %1 fejlmarkeret").arg(survey.dismissed)
+                          : QString())},
+      {"Typer", QString::number(survey.types),
+       s.components.total_count > 0
+           ? QString("%1 bygningskomponenter")
+                 .arg(format_count(
+                     static_cast<qulonglong>(s.components.total_count)))
+           : QString("%1 materialepas")
+                 .arg(format_count(
+                     static_cast<qulonglong>(s.materials.size())))},
   };
   auto *grid = new QGridLayout;
   grid->setSpacing(t.px("--space-3"));
@@ -371,6 +388,13 @@ QWidget *StartPage::make_summary() {
     emit navigate_requested(static_cast<int>(Workspace::database));
   });
   row->addWidget(go);
+  if (survey.parts > 0) {
+    auto *res = button("Se ressourcer", "secondary");
+    connect(res, &QPushButton::clicked, this, [this] {
+      emit navigate_requested(static_cast<int>(Workspace::resources));
+    });
+    row->addWidget(res);
+  }
   auto *other = button("Åbn et andet projekt…", "secondary");
   connect(other, &QPushButton::clicked, this, &StartPage::browse_requested);
   row->addWidget(other);
