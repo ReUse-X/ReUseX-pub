@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "reusex/core/space_identity.hpp"
+#include "reusex/core/sloped_ceiling.hpp"
 
 #include "reusex/core/guid.hpp"
 #include "reusex/core/space_polygon.hpp"
@@ -242,6 +243,13 @@ reframe_spaces(std::vector<SpaceRecord> &spaces,
     const double zc = (m * Eigen::Vector4d(c[0], c[1], s.z_ceiling, 1.0)).z();
     s.z_floor = zf;
     s.z_ceiling = zc;
+    // Sloped ceilings (reusex-546) move with the space.
+    std::array<double, 16> rm{};
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        rm[static_cast<std::size_t>(4 * i + j)] = m(i, j);
+    for (auto &pl : s.ceiling_planes)
+      pl = map_ceiling_plane(pl, rm);
     s.storey = to->idx;
     ++r.moved;
   }

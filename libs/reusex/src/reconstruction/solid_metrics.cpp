@@ -4,6 +4,7 @@
 
 #include "reusex/reconstruction/solid_metrics.hpp"
 #include "reusex/core/logging.hpp"
+#include "reusex/core/sloped_ceiling.hpp"
 #include "reusex/geometry/level_frame.hpp"
 #include "reusex/geometry/point_mesh_distance.hpp"
 
@@ -266,6 +267,66 @@ double area_of(const PolygonWithHoles &p) {
   return a;
 }
 
+bool in_ring(const std::vector<core::PlanPoint> &r, double x, double y) {
+  bool in = false;
+  for (std::size_t i = 0, j = r.size() - 1; i < r.size(); j = i++) {
+    const auto &a = r[i], &b = r[j];
+    if ((a[1] > y) != (b[1] > y) &&
+        x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0])
+      in = !in;
+  }
+  return in;
+}
+
+bool in_space(const core::SpaceRecord &s, double x, double y) {
+  if (s.polygon.outer.size() < 3 || !in_ring(s.polygon.outer, x, y))
+    return false;
+  for (const auto &h : s.polygon.holes)
+    if (h.size() >= 3 && in_ring(h, x, y))
+      return false;
+  return true;
+}
+
+/// Mean |detected - reference| ceiling height over the plan the two spaces
+/// share, sampled on a grid of at most ~32 x 32 points: a sloped ceiling
+/// (reusex-546) is scored against the surface, not one height. A flat pair
+/// gives exactly |z_ceiling - z_ceiling|. With no sample in both (a sliver
+/// overlap) the detected polygon's vertex mean is used.
+double ceiling_error(const core::SpaceRecord &d, const core::SpaceRecord &f) {
+  if (d.ceiling_planes.empty() && f.ceiling_planes.empty())
+    return std::abs(d.z_ceiling - f.z_ceiling);
+  double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+  for (const auto &p : d.polygon.outer) {
+    x0 = std::min(x0, p[0]);
+    y0 = std::min(y0, p[1]);
+    x1 = std::max(x1, p[0]);
+    y1 = std::max(y1, p[1]);
+  }
+  constexpr int kGrid = 32;
+  double sum = 0.0;
+  int n = 0;
+  for (int i = 0; i < kGrid; ++i)
+    for (int j = 0; j < kGrid; ++j) {
+      const double x = x0 + (x1 - x0) * (i + 0.5) / kGrid;
+      const double y = y0 + (y1 - y0) * (j + 0.5) / kGrid;
+      if (!in_space(d, x, y) || !in_space(f, x, y))
+        continue;
+      sum += std::abs(core::ceiling_at(d, x, y) - core::ceiling_at(f, x, y));
+      ++n;
+    }
+  if (n > 0)
+    return sum / n;
+  double cx = 0.0, cy = 0.0;
+  for (const auto &p : d.polygon.outer) {
+    cx += p[0];
+    cy += p[1];
+  }
+  const double k =
+      static_cast<double>(std::max<std::size_t>(d.polygon.outer.size(), 1));
+  return std::abs(core::ceiling_at(d, cx / k, cy / k) -
+                  core::ceiling_at(f, cx / k, cy / k));
+}
+
 void compare_spaces(const core::SolidModel &det, const core::SolidModel &ref,
                     SolidModelReport &r) {
   r.reference_spaces = ref.spaces.size();
@@ -315,8 +376,7 @@ void compare_spaces(const core::SolidModel &det, const core::SolidModel &ref,
   for (const auto &m : matches) {
     floor_err +=
         std::abs(det.spaces[m.det].z_floor - ref.spaces[m.ref].z_floor);
-    ceiling_err +=
-        std::abs(det.spaces[m.det].z_ceiling - ref.spaces[m.ref].z_ceiling);
+    ceiling_err += ceiling_error(det.spaces[m.det], ref.spaces[m.ref]);
   }
   r.space_floor_err_mean_m = floor_err / static_cast<double>(matches.size());
   r.space_ceiling_err_mean_m =
@@ -630,6 +690,13 @@ core::SolidModel to_reference_frames(const core::SolidModel &det,
     }
     m.z_floor = (T * Eigen::Vector3d(cx, cy, sp.z_floor)).z();
     m.z_ceiling = (T * Eigen::Vector3d(cx, cy, sp.z_ceiling)).z();
+    // Sloped ceiling planes move with the polygon (reusex-546).
+    std::array<double, 16> tm{};
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        tm[static_cast<std::size_t>(4 * i + j)] = T.matrix()(i, j);
+    for (auto &pl : m.ceiling_planes)
+      pl = core::map_ceiling_plane(pl, tm);
     auto map_ring = [&](std::vector<core::PlanPoint> &ring) {
       for (auto &q : ring) {
         const Eigen::Vector3d p = T * Eigen::Vector3d(q[0], q[1], sp.z_floor);

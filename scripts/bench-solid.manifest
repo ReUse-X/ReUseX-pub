@@ -34,7 +34,7 @@ office_corridor    fixture    tests/fixtures/solid_model/two_rooms.plan.json -  
 # (2026-10-17, main 840cf8dc, chain storeys..spaces: room IoU 0.874 / +2,
 # wall rms 0.054 m, openings 0.62 / 0.70 -- vs the legacy unregenerated
 # copy 0.893 / +1, 0.141 m, 0.24 / 0.30.)
-newoffice         local      tests/fixtures/solid_model/newoffice.plan.yaml -                                               $REUSEX_NEWOFFICE_RUX storeys,classify,walls,openings
+newoffice         local      tests/fixtures/solid_model/newoffice.plan.yaml -                                               $REUSEX_NEWOFFICE_RUX storeys,classify,walls,openings,rooms,spaces
 # s3dis_area1      local      $REUSEX_S3DIS_DIR/area1.plan.json             -                                               $REUSEX_S3DIS_DIR/area1.rux storeys,walls,spaces,openings
 # house1 / house2 (scan archive, see reusex-yf4.3): authored references
 # committed (DRAFT, maintainer review pending), scans not. Point the variables
@@ -60,11 +60,14 @@ newoffice         local      tests/fixtures/solid_model/newoffice.plan.yaml -   
 # 0.076 m, openings 0.56 / 0.18 (IoU 0.40) -- the stored-pose copy against the
 # same plan: 0.464 / -1, 0.29 / 0.27, 0.319 m, openings 0 / 0.)
 # The local rows run storeys -> classify -> walls (WP3, reusex-z1v.5.7) ->
-# openings (WP5, reusex-z1v.7.5), so they score the wall metrics
+# openings (WP5, reusex-z1v.7.5) -> rooms -> spaces (since reusex-546: the
+# space metrics, room IoU and the floor / ceiling errors, are then the build
+# under test's, not those of whatever spaces the copied project held), so
+# they score the wall metrics
 # (wall_recall / wall_precision / wall_position_rms_m /
 # wall_thickness_err_mean_m / _p95_m) and the opening line: opening_recall /
 # opening_precision / opening_iou_mean (a match: rectangle IoU >= 0.5 in the
 # reference wall's face, `rux analyze solid --opening-iou`), gated by
 # bench-solid-compare.py.
-house1            local      tests/fixtures/solid_model/house1.plan.yaml    -                                               $REUSEX_HOUSE1_RUX storeys,classify,walls,openings
-house2            local      tests/fixtures/solid_model/house2.plan.yaml    -                                               $REUSEX_HOUSE2_RUX storeys,classify,walls,openings
+house1            local      tests/fixtures/solid_model/house1.plan.yaml    -                                               $REUSEX_HOUSE1_RUX storeys,classify,walls,openings,rooms,spaces
+house2            local      tests/fixtures/solid_model/house2.plan.yaml    -                                               $REUSEX_HOUSE2_RUX storeys,classify,walls,openings,rooms,spaces

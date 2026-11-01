@@ -16,6 +16,7 @@
 #include "core/resource_templates.hpp"
 #include "reusex/core/buildups.hpp"
 #include "reusex/core/pose_graph.hpp"
+#include "reusex/core/sloped_ceiling.hpp"
 #include "reusex/core/space_polygon.hpp"
 
 #include <Eigen/Geometry>
@@ -442,9 +443,11 @@ class ProjectDB::Impl {
   bool hasSurveyMass = false;
   /// report_assets exists (v38).
   bool hasReportAssetsTable = false;
+  /// spaces.ceiling_planes and walls.top_profile exist (v39).
+  bool hasSlopedColumns = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 38;
+  static constexpr int LATEST_SCHEMA_VERSION = 39;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -576,6 +579,8 @@ class ProjectDB::Impl {
     hasPartDismissedColumn = columnExists("survey_parts", "dismissed");
     hasSurveyMass = surveyMassSchemaPresent();
     hasReportAssetsTable = tableExists("report_assets");
+    hasSlopedColumns = columnExists("spaces", "ceiling_planes") &&
+                       columnExists("walls", "top_profile");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -911,6 +916,10 @@ class ProjectDB::Impl {
 
     if (current < 38) {
       migrateToV38();
+    }
+
+    if (current < 39) {
+      migrateToV39();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -3907,7 +3916,7 @@ class ProjectDB::Impl {
       "seen_share, face_a_points, face_b_points, co_visibility, axis_family, "
       "source, locked, confidence, metadata";
 
-  static core::WallRecord readWall(sqlite3_stmt *s) {
+  static core::WallRecord readWall(sqlite3_stmt *s, bool sloped) {
     core::WallRecord r;
     r.id = sqlite3_column_int64(s, 0);
     r.guid = column_text(s, 1);
@@ -3933,20 +3942,33 @@ class ProjectDB::Impl {
     r.locked = sqlite3_column_int(s, 21) != 0;
     r.confidence = sqlite3_column_double(s, 22);
     r.metadata = column_text(s, 23);
+    if (sloped) {
+      try {
+        r.top = core::decode_wall_top(column_text(s, 24));
+      } catch (const std::exception &e) {
+        throw std::runtime_error("wall " + r.guid + ": " + e.what());
+      }
+    }
     return r;
+  }
+
+  /// kWallColumns, plus top_profile when the table has it (v39).
+  std::string wallColumns() const {
+    return std::string(kWallColumns) +
+           (hasSlopedColumns ? ", top_profile" : "");
   }
 
   std::vector<core::WallRecord> listWalls() const {
     std::vector<core::WallRecord> out;
     if (!hasWallsTable)
       return out;
-    const std::string sql = std::string("SELECT ") + kWallColumns +
-                            " FROM walls ORDER BY storey, id;";
+    const std::string sql =
+        "SELECT " + wallColumns() + " FROM walls ORDER BY storey, id;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "walls");
     StmtGuard guard(s);
     int rc;
     while ((rc = sqlite3_step(s)) == SQLITE_ROW)
-      out.push_back(readWall(s));
+      out.push_back(readWall(s, hasSlopedColumns));
     if (rc != SQLITE_DONE)
       throw std::runtime_error("walls: " + std::string(sqlite3_errmsg(db)));
     return out;
@@ -3956,13 +3978,13 @@ class ProjectDB::Impl {
     if (!hasWallsTable)
       return std::nullopt;
     const std::string sql =
-        std::string("SELECT ") + kWallColumns + " FROM walls WHERE guid = ?;";
+        "SELECT " + wallColumns() + " FROM walls WHERE guid = ?;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "wall_by_guid");
     StmtGuard guard(s);
     bind_text(s, 1, guid);
     if (sqlite3_step(s) != SQLITE_ROW)
       return std::nullopt;
-    return readWall(s);
+    return readWall(s, hasSlopedColumns);
   }
 
   std::vector<core::WallJoinRecord> listWallJoins() const {
@@ -4003,6 +4025,8 @@ class ProjectDB::Impl {
                                     " has invalid source '" + r.source + "'");
       if (!guids.insert(r.guid).second)
         throw std::invalid_argument("save_walls: duplicate guid " + r.guid);
+      if (const auto bad = core::check_wall_top(r); !bad.empty())
+        throw std::invalid_argument("save_walls: wall " + r.guid + ": " + bad);
     }
 
     Savepoint sp(db, "save_walls");
@@ -4055,10 +4079,10 @@ class ProjectDB::Impl {
         "INSERT INTO walls (guid, storey, x0, y0, x1, y1, z_base, height, "
         "thickness, thickness_ci_lo, thickness_ci_hi, lean_deg, is_external, "
         "assumed, seen_share, face_a_points, face_b_points, co_visibility, "
-        "axis_family, source, locked, confidence, metadata, run_id) "
+        "axis_family, source, locked, confidence, metadata, run_id, "
+        "top_profile) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, "
-        "?, ?, ?);",
+        "?, ?, ?, ?, ?);",
         "save_walls");
     StmtGuard guard(ins);
     size_t written = 0;
@@ -4101,6 +4125,7 @@ class ProjectDB::Impl {
         sqlite3_bind_int(ins, 24, runId);
       else
         sqlite3_bind_null(ins, 24);
+      bind_text(ins, 25, core::encode_wall_top(r.top));
       if (sqlite3_step(ins) != SQLITE_DONE)
         throw std::runtime_error("save_walls: insert of wall " + r.guid +
                                  " failed: " + sqlite3_errmsg(db));
@@ -4630,6 +4655,26 @@ class ProjectDB::Impl {
     reusex::info("Migration to schema version 38 complete");
   }
 
+  void migrateToV39() {
+    reusex::info("Migrating database to schema version 39");
+    // Sloped ceilings and wall tops (reusex-546): a space's ceiling planes
+    // (core::SpaceRecord::ceiling_planes) and a wall's top profile
+    // (core::WallRecord::top), each as JSON text; '' = none, so every row
+    // already stored keeps its flat ceiling and top.
+    Savepoint sp(db, "migrate_v39");
+    if (tableExists("spaces") && !columnExists("spaces", "ceiling_planes"))
+      execOrThrow("ALTER TABLE spaces ADD COLUMN ceiling_planes TEXT NOT NULL "
+                  "DEFAULT '';");
+    if (tableExists("walls") && !columnExists("walls", "top_profile"))
+      execOrThrow("ALTER TABLE walls ADD COLUMN top_profile TEXT NOT NULL "
+                  "DEFAULT '';");
+    insertSchemaVersion(39,
+                        "Solid model: sloped ceilings (spaces."
+                        "ceiling_planes) and wall tops (walls.top_profile)");
+    sp.release();
+    reusex::info("Migration to schema version 39 complete");
+  }
+
   // ── Spaces (v35) ─────────────────────────────────────────────────────────
 
   static constexpr const char *kSpaceColumns =
@@ -4637,7 +4682,7 @@ class ProjectDB::Impl {
       "perimeter, volume, compactness, room_label, source, locked, "
       "confidence, metadata";
 
-  static core::SpaceRecord readSpace(sqlite3_stmt *s) {
+  static core::SpaceRecord readSpace(sqlite3_stmt *s, bool sloped) {
     core::SpaceRecord r;
     r.id = sqlite3_column_int64(s, 0);
     r.guid = column_text(s, 1);
@@ -4670,20 +4715,33 @@ class ProjectDB::Impl {
     r.locked = sqlite3_column_int(s, 14) != 0;
     r.confidence = sqlite3_column_double(s, 15);
     r.metadata = column_text(s, 16);
+    if (sloped) {
+      try {
+        r.ceiling_planes = core::decode_ceiling_planes(column_text(s, 17));
+      } catch (const std::exception &e) {
+        throw std::runtime_error("space " + r.guid + ": " + e.what());
+      }
+    }
     return r;
+  }
+
+  /// kSpaceColumns, plus ceiling_planes when the table has it (v39).
+  std::string spaceColumns() const {
+    return std::string(kSpaceColumns) +
+           (hasSlopedColumns ? ", ceiling_planes" : "");
   }
 
   std::vector<core::SpaceRecord> listSpaces() const {
     std::vector<core::SpaceRecord> out;
     if (!hasSpacesTable)
       return out;
-    const std::string sql = std::string("SELECT ") + kSpaceColumns +
-                            " FROM spaces ORDER BY storey, id;";
+    const std::string sql =
+        "SELECT " + spaceColumns() + " FROM spaces ORDER BY storey, id;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "spaces");
     StmtGuard guard(s);
     int rc;
     while ((rc = sqlite3_step(s)) == SQLITE_ROW)
-      out.push_back(readSpace(s));
+      out.push_back(readSpace(s, hasSlopedColumns));
     if (rc != SQLITE_DONE)
       throw std::runtime_error("spaces: " + std::string(sqlite3_errmsg(db)));
     return out;
@@ -4693,13 +4751,13 @@ class ProjectDB::Impl {
     if (!hasSpacesTable)
       return std::nullopt;
     const std::string sql =
-        std::string("SELECT ") + kSpaceColumns + " FROM spaces WHERE guid = ?;";
+        "SELECT " + spaceColumns() + " FROM spaces WHERE guid = ?;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "space_by_guid");
     StmtGuard guard(s);
     bind_text(s, 1, guid);
     if (sqlite3_step(s) != SQLITE_ROW)
       return std::nullopt;
-    return readSpace(s);
+    return readSpace(s, hasSlopedColumns);
   }
 
   std::vector<core::SpaceBoundaryRecord> listSpaceBoundaries() const {
@@ -4739,6 +4797,8 @@ class ProjectDB::Impl {
         r.source != "imported")
       throw std::invalid_argument(where + " has invalid source '" + r.source +
                                   "'");
+    if (const auto bad = core::check_ceiling_planes(r); !bad.empty())
+      throw std::invalid_argument(where + ": " + bad);
     try {
       return core::encode_space_polygon(r.polygon);
     } catch (const std::invalid_argument &e) {
@@ -4757,7 +4817,7 @@ class ProjectDB::Impl {
         "z_floor = ?, z_ceiling = ?, area = ?, perimeter = ?, volume = ?, "
         "compactness = ?, room_label = ?, source = ?, locked = ?, "
         "confidence = ?, metadata = ?, run_id = CASE WHEN ? THEN ? ELSE "
-        "run_id END WHERE guid = ?;",
+        "run_id END, ceiling_planes = ? WHERE guid = ?;",
         who);
     StmtGuard guard(up);
     sqlite3_bind_int(up, 1, r.storey);
@@ -4784,7 +4844,8 @@ class ProjectDB::Impl {
       sqlite3_bind_int(up, 17, runId);
     else
       sqlite3_bind_null(up, 17);
-    bind_text(up, 18, r.guid);
+    bind_text(up, 18, core::encode_ceiling_planes(r.ceiling_planes));
+    bind_text(up, 19, r.guid);
     if (sqlite3_step(up) != SQLITE_DONE)
       throw std::runtime_error(std::string(who) + ": update of space " +
                                r.guid + " failed: " + sqlite3_errmsg(db));
@@ -4882,8 +4943,8 @@ class ProjectDB::Impl {
         db,
         "INSERT INTO spaces (guid, storey, name, kind, polygon, z_floor, "
         "z_ceiling, area, perimeter, volume, compactness, room_label, source, "
-        "locked, confidence, metadata, run_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "locked, confidence, metadata, run_id, ceiling_planes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         "save_spaces");
     StmtGuard guard(ins);
     size_t written = 0, skipped = 0, replaced = 0;
@@ -4942,6 +5003,7 @@ class ProjectDB::Impl {
         sqlite3_bind_int(ins, 17, runId);
       else
         sqlite3_bind_null(ins, 17);
+      bind_text(ins, 18, core::encode_ceiling_planes(r.ceiling_planes));
       if (sqlite3_step(ins) != SQLITE_DONE)
         throw std::runtime_error("save_spaces: insert of space " + r.guid +
                                  " failed: " + sqlite3_errmsg(db));

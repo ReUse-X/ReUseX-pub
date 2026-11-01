@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ReUse-X/ReUseX/docs/design/solid-model-reference.schema.json",
   "title": "ReUseX solid-model document",
-  "description": "A typed building model (storeys, walls, spaces, openings) in one JSON document, model_version 1. The same format holds an authored reference plan and a model detected by the pipeline. Prose, conventions and examples: docs/design/solid-model-json.md. Reader: io::solid_model_from_json (libs/reusex/src/io/solid_model_json.cpp), which also enforces the cross-references this schema cannot (an opening's wall, a boundary's space, unique guids and storey idx).",
+  "description": "A typed building model (storeys, walls, spaces, openings) in one JSON document, model_version 1 or 2 (2 adds a space's ceiling_planes and a wall's top, reusex-546; a document that uses neither is written as 1). The same format holds an authored reference plan and a model detected by the pipeline. Prose, conventions and examples: docs/design/solid-model-json.md. Reader: io::solid_model_from_json (libs/reusex/src/io/solid_model_json.cpp), which also enforces the cross-references this schema cannot (an opening's wall, a boundary's space, unique guids and storey idx).",
   "type": "object",
   "required": ["model_version"],
   "additionalProperties": false,
   "properties": {
     "$schema": {"type": "string"},
-    "model_version": {"const": 1},
+    "model_version": {"enum": [1, 2]},
     "units": {"const": "m"},
     "name": {"type": "string"},
     "description": {"type": "string"},
@@ -93,6 +93,12 @@
         "face_points": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
         "co_visibility": {"type": "number"},
         "axis_family": {"type": "integer"},
+        "top": {
+          "description": "model_version 2. Sloped top: [s, z] points, s along the axis from its first endpoint, strictly increasing, z in the level frame above z_base. The top at s is this polyline (held constant past its ends) capped at z_base + height. Absent: flat at z_base + height.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/point2"},
+          "minItems": 2
+        },
         "source": {"$ref": "#/$defs/source"},
         "locked": {"type": "boolean"},
         "confidence": {"type": "number"},
@@ -131,6 +137,19 @@
         },
         "z_floor": {"type": "number"},
         "z_ceiling": {"type": "number"},
+        "ceiling_planes": {
+          "description": "model_version 2. Sloped ceiling: the ceiling at (x, y) is the lowest of z_ceiling and these planes (z = at[2] + slope[0] (x - at[0]) + slope[1] (y - at[1]), level frame). At most 80 deg steep; the ceiling must not drop below z_floor at a vertex of the outer ring.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "slope"],
+            "additionalProperties": false,
+            "properties": {
+              "at": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+              "slope": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
+            }
+          }
+        },
         "area": {"type": "number"},
         "perimeter": {"type": "number"},
         "volume": {"type": "number"},
