@@ -461,7 +461,8 @@ face of a one-sided wall; level frame),
 `thickness_ci_lo` / `thickness_ci_hi` (−1 when assumed), `lean_deg`,
 `is_external`, `assumed`, `seen_share` (−1 n/a), `face_a_points` /
 `face_b_points`, `co_visibility` (−1 for a one-sided wall), `axis_family`,
-`metadata` (`{"low_seen_share": true}` below `min_seen_share`). `storey` is the
+`metadata` (`{"low_seen_share": true}` below `min_seen_share`; `"regularised"`
+below). `storey` is the
 storey's `idx`, not a foreign key, as for `plane_classes`: re-run `walls` after
 `storeys`. Not every vertical sheet is a wall: a short one standing behind
 a perpendicular wall's seen face (a window reveal) and a group of walls
@@ -470,6 +471,24 @@ up to `free_min_top_m` (a column, a cupboard, a desk screen) are left out
 (reusex-1pi). `wall_joins` rows name two walls (by row id in the table, by GUID
 in the API) and where each meets the other (`start`, `end` or along its
 `path`); they go with their walls.
+
+Plan regularisation (`reconstruction/plan_regularise.hpp`,
+`regularise_walls`, reusex-z1v.12; keys `plan_*`, on by default, off with
+`--no-plan-regularise`): before the rows are written, over all storeys at
+once, walls of one storey that continue each other (overlap along the axis at
+most `plan_max_overlap_m`, gap at most `plan_collinear_gap_m`) with a face
+seen from the same side within `plan_collinear_m` share one line, and walls of
+adjacent storeys that overlap by `plan_stack_min_overlap_m` with a same-side
+face within `plan_stack_m` share one line (`plan_stack`). A line is the
+length-weighted mean of its faces on its better-seen side; each wall moves
+that face there, its thickness unchanged. Two walls of one storey standing
+side by side (overlapping) never share a line, however close. Optional:
+`plan_grid_deg` turns walls onto the project's Manhattan grid (off by default:
+it turns whole storeys onto each other), `plan_round_m` rounds each line's
+offset. Corner and tee ends follow the moved lines. A moved wall's `metadata`
+keeps what was measured: `{"regularised": {"rules": ["collinear" | "stack" |
+"grid" | "round" | "join"], "offset_delta_m", "angle_delta_deg", "measured":
+{"x0", "y0", "x1", "y1"}}}`.
 
 Identity: a re-detected wall keeps the GUID of the stored wall of the same
 storey that it lies on — parallel within `guid_match_angle_deg` (10°), each
@@ -520,7 +539,19 @@ sweeps), `is_external` (the host wall's, until spaces exist),
 at most 0.7, raised by agreeing evidence: labels, the instance, glass, camera
 path crossings) and `metadata` (the evidence: fill, jambs, local levels,
 label shares, crossings, glass share, the leaf and `swing` left | right seen
-from the side it opens to). The host is named by GUID, not by a foreign key:
+from the side it opens to). Openings are found against each wall's
+measured axis (`geometry::measured_walls()`: the `"regularised"."measured"`
+metadata of the walls stage) and then put onto the stored, regularised axis
+(`openings_onto_walls()`). Window alignment (`regularise_openings`,
+reusex-z1v.12; keys `plan_*`, on by default, off with `--no-plan-regularise`):
+windows of different storeys on one facade line (hosts parallel within
+`plan_angle_deg`, centres within `plan_facade_m` of it) whose centres lie
+within `plan_column_m` along it, at most one per storey, share the column's
+mean centre and median width; the windows of one storey whose sills (heads)
+lie within `plan_row_m` share the median. A snap that would push a window off
+its wall or onto another opening is skipped. A moved opening's `metadata`
+gets `"regularised": {"rules": ["column" | "row"], "measured": {"s_start",
+"s_end", "z_sill", "z_head"}}`. The host is named by GUID, not by a foreign key:
 a `walls` re-run replaces its rows but keeps their GUIDs, so the openings
 (and a locked one) survive it; an opening whose host is gone is left out of
 `io::load_solid_model` until `openings` runs again.

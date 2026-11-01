@@ -15,6 +15,7 @@
 #include <reusex/core/opening_identity.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
 #include <reusex/reconstruction/openings.hpp>
+#include <reusex/reconstruction/plan_regularise.hpp>
 
 #include <optional>
 #include <string>
@@ -30,6 +31,9 @@ struct OpeningStageOptions {
   /// GUID matching against the stored openings (keys guid_match_m,
   /// guid_min_overlap).
   core::OpeningIdentityOptions identity;
+  /// Window alignment across and within storeys before the openings are
+  /// stored (keys plan_*).
+  geometry::OpeningRegulariseOptions plan;
 };
 
 /// One parameter of the openings stage.

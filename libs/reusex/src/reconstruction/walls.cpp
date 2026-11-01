@@ -9,6 +9,7 @@
 #include "reusex/utils/tolerances.hpp"
 
 #include <fmt/format.h>
+#include <nlohmann/json.hpp>
 
 #include <Eigen/Geometry>
 
@@ -1941,8 +1942,20 @@ wall_records(const WallGraph &graph, const core::StoreyRecord &storey) {
     w.co_visibility = g.co_visibility;
     w.axis_family = g.family;
     w.source = "detected";
+    nlohmann::json meta = nlohmann::json::object();
     if (g.low_seen)
-      w.metadata = R"({"low_seen_share":true})";
+      meta["low_seen_share"] = true;
+    if (const auto &r = g.regularised; r.applied)
+      meta["regularised"] = {{"rules", r.rules},
+                             {"offset_delta_m", r.offset_delta_m},
+                             {"angle_delta_deg", r.angle_delta_deg},
+                             {"measured",
+                              {{"x0", r.measured_a.x()},
+                               {"y0", r.measured_a.y()},
+                               {"x1", r.measured_b.x()},
+                               {"y1", r.measured_b.y()}}}};
+    if (!meta.empty())
+      w.metadata = meta.dump();
     walls.push_back(std::move(w));
   }
   std::vector<core::WallJoinRecord> joins;

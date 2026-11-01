@@ -23,6 +23,8 @@ using json = nlohmann::json;
   +[](OpeningStageOptions &o) -> decltype(auto) { return (o.openings.f); }
 #define IDENT(f)                                                               \
   +[](OpeningStageOptions &o) -> decltype(auto) { return (o.identity.f); }
+#define PLAN(f)                                                                \
+  +[](OpeningStageOptions &o) -> decltype(auto) { return (o.plan.f); }
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
@@ -171,6 +173,27 @@ const std::vector<OpeningParameter> &opening_parameter_table() {
        "Leaf points lie at least this share of the door's width from the "
        "hinge.",
        OPEN(leaf_min_radius_share), 0.0, 1.0},
+      // --- plan regularisation (geometry::OpeningRegulariseOptions)
+      {"plan_regularise", "--no-plan-regularise", "Align windows",
+       "Windows over each other on one facade share their horizontal "
+       "position and width across storeys; windows of one storey share "
+       "sill and head heights; the measured values are kept in the "
+       "metadata.",
+       PLAN(plan_regularise), std::nullopt, std::nullopt},
+      {"plan_angle_deg", "--plan-angle", "Facade angle [deg]",
+       "Two windows' walls are one facade only when parallel within this ...",
+       PLAN(plan_angle_deg), 0.0, 44.0},
+      {"plan_facade_m", "--plan-facade", "Facade line [m]",
+       "... and the windows lie within this of one facade line.",
+       PLAN(plan_facade_m), 0.0, 2.0},
+      {"plan_column_m", "--plan-column", "Window column [m]",
+       "Windows of different storeys whose centres lie within this along "
+       "the facade are one column: they share position and width.",
+       PLAN(plan_column_m), 0.0, 2.0},
+      {"plan_row_m", "--plan-row", "Window row [m]",
+       "Windows of one storey whose sills (heads) lie within this share "
+       "one sill (head) height.",
+       PLAN(plan_row_m), 0.0, 1.0},
       // --- identity (core::OpeningIdentityOptions)
       {"guid_match_m", "--guid-match", "Same opening within [m]",
        "A re-detected opening keeps the GUID of the stored one in the same "
@@ -185,6 +208,7 @@ const std::vector<OpeningParameter> &opening_parameter_table() {
 
 #undef OPEN
 #undef IDENT
+#undef PLAN
 
 const std::vector<ParameterDescriptor> &opening_stage_parameters() {
   static const std::vector<ParameterDescriptor> descriptors = [] {
