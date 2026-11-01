@@ -57,6 +57,14 @@ apps/rux/qt/
 │   ├── workspaces.hpp        page order, names, palette aliases
 │   ├── DatabaseWorkspace.hpp Q2/Oversigt: ProjectTree + stack, read-only
 │   │                         (pose-graph edits moved to Rediger)
+│   ├── ResourcesWorkspace.hpp Ressourcer: survey parts grouped by type
+│   │                         (sys:view thumbnail, room, storey, condition,
+│   │                         potential), search + storey/room filters, a
+│   │                         detail page per resource; read-only
+│   ├── ResourceImageLoader.hpp off-thread sys:view decode: region-cropped
+│   │                         thumbnails, the detail photo with its region
+│   ├── resource_list.hpp     Qt-free: filters, grouping, template choice,
+│   │                         key lookup, storey by room, crop math
 │   ├── FrameBrowser.hpp      A/B sides, ImagePane, filmstrip
 │   ├── FrameImageLoader.hpp  off-thread decode (own read-only ProjectDBs)
 │   ├── PanoramaViewer.hpp    Oversigt's panorama: off-thread decode to
@@ -141,6 +149,17 @@ note are one elided line each, so neither takes height from the canvases.
 smokes the workspace in the real binary (`posegraf` is gone, not an alias).
 The overlay has no ΔT fields: B is moved by the box widget, the keys, the
 match editor or ICP-forfin, and its header reads out the move.
+
+The Ressourcer pages (reusex-3vuu; shoot with `--project` <copy of a
+project with a survey, e.g. Sygehusgrunden>): `ressourcer` (the list),
+`ressourcer-filter` (storey + search, `RUX_RESOURCE_STOREY` /
+`RUX_RESOURCE_QUERY`, default "Etage 1" / "kontor"), `ressource-detalje`
+(the first radiator, or `RUX_RESOURCE_CODE`) and `ressource-vindue` (the
+first window). The gallery also waits for `ResourceImageLoader::busy()`.
+The detail page shows the template the page opens with
+(`default_template`: remembered per project in QSettings, else the newest
+user-made template, else the screening seed). `RUX_QT_PAGE=ressourcer`
+smokes it in the real binary.
 
 The app shell's gallery pages: `start`, `start-readonly`, `start-empty`,
 `start-error`, `shell-empty`, `shell-project`, `palette-open` (query "pro"),

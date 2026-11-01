@@ -35,6 +35,7 @@ class EditWorkspace;
 class Inspector;
 class PipelineLogView;
 class PipelineWorkspace;
+class ResourcesWorkspace;
 class Viewer3DWorkspace;
 class ViewSettings;
 class NavRail;
@@ -76,6 +77,7 @@ class AppShell : public QWidget {
   void open_project(const QString &path, bool read_only = false);
 
   DatabaseWorkspace *database() const { return database_; }
+  ResourcesWorkspace *resources() const { return resources_; }
   Viewer3DWorkspace *viewer() const { return viewer_; }
   EditWorkspace *edit() const { return edit_; }
   /// The pending pose-graph edits, shared by Oversigt and Rediger.
@@ -129,6 +131,7 @@ class AppShell : public QWidget {
   QStackedWidget *stack_ = nullptr;
   StartPage *start_ = nullptr;
   DatabaseWorkspace *database_ = nullptr;
+  ResourcesWorkspace *resources_ = nullptr;
   Viewer3DWorkspace *viewer_ = nullptr;
   EditWorkspace *edit_ = nullptr;
   EdgeEditor *edges_ = nullptr;

@@ -34,6 +34,8 @@ const std::vector<PageEntry> &page_entries() {
       {"Start", "forside velkomst start"},
       {"Oversigt", "database db tabeller billeder frames databaseviewer data "
                    "oversigt panoramaer"},
+      {"Ressourcer", "ressourcer kortlægning materialer bygningsdele typer "
+                     "survey resources materialepas"},
       {"3D", "punktsky viewer vtk mesh scene"},
       {"Rediger", "posegraf pose graph kanter loop closure graf rediger edit "
                   "icp løkkelukning"},
@@ -79,11 +81,11 @@ std::optional<EditPane> parse_edit_pane(std::string_view key) {
 }
 
 int smoke_page_index(std::string_view name) {
-  static constexpr std::string_view kNames[] = {"start",   "oversigt", "3d",
-                                                "rediger", "pipeline", "log"};
+  static constexpr std::string_view kNames[] = {
+      "start", "oversigt", "ressourcer", "3d", "rediger", "pipeline", "log"};
   if (name == "database")
     return 1;
-  for (int i = 0; i < 6; ++i)
+  for (int i = 0; i < 7; ++i)
     if (kNames[i] == name)
       return i;
   return -1;

@@ -4,8 +4,9 @@
 #pragma once
 
 // The shell's pages, in nav-rail order, and the placeholder every workspace
-// shows until its phase lands. Rail order: Start, Oversigt, 3D, Rediger,
-// Pipeline, Log (Oversigt is Workspace::database). A placeholder is a designed
+// shows until its phase lands. Rail order: Start, Oversigt, Ressourcer, 3D,
+// Rediger, Pipeline, Log (Oversigt is Workspace::database). A placeholder is
+// a designed
 // empty state: what the workspace will do, and the rux commands that do it
 // today.
 
@@ -23,12 +24,13 @@ namespace rux::qt {
 enum class Workspace : int {
   start = 0,
   database,
+  resources,
   viewer3d,
   edit,
   pipeline,
   log,
 };
-inline constexpr int kWorkspaceCount = 6;
+inline constexpr int kWorkspaceCount = 7;
 
 struct WorkspaceInfo {
   Workspace id;

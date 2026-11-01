@@ -39,7 +39,8 @@ add_library(rux_qt_core STATIC
     src/core/graph_view.cpp
     src/core/pair_alignment.cpp
     src/core/match_editor.cpp
-    src/core/element_filter.cpp)
+    src/core/element_filter.cpp
+    src/core/resource_list.cpp)
 target_include_directories(rux_qt_core PUBLIC include)
 target_compile_features(rux_qt_core PUBLIC cxx_std_20)
 
