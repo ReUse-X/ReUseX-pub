@@ -147,6 +147,23 @@ const std::vector<SpaceParameter> &space_parameter_table() {
        SPACE(height_min_cells), 1.0, kInf},
       {"height_min_share", "--height-min-share", "Sampled share",
        "... and in this share of its area.", SPACE(height_min_share), 0.0, 1.0},
+      // --- sloped ceilings (fit_sloped_ceilings, reusex-546)
+      {"fit_ceiling_planes", "--no-sloped-ceilings", "Sloped ceilings",
+       "Fit each space's sloped ceiling planes from the classified ceiling "
+       "planes over it; off, every ceiling stays flat.",
+       SPACE(fit_ceiling_planes), std::nullopt, std::nullopt},
+      {"ceiling_min_tilt_deg", "--ceiling-min-tilt", "Sloped from [deg]",
+       "A ceiling plane tilted at least this much is a sloped-ceiling "
+       "candidate ...",
+       SPACE(ceiling_min_tilt_deg), 0.0, 89.0},
+      {"ceiling_max_tilt_deg", "--ceiling-max-tilt", "Sloped up to [deg]",
+       "... and at most this much.", SPACE(ceiling_max_tilt_deg), 0.0, 89.0},
+      {"ceiling_min_cells", "--ceiling-min-cells", "Sloped plane cells",
+       "A candidate needs inliers in this many 0.1 m cells of the space ...",
+       SPACE(ceiling_min_cells), 1.0, kInf},
+      {"ceiling_min_gain", "--ceiling-min-gain", "Sloped plane gain",
+       "... and must cut the ceiling model's error by this share.",
+       SPACE(ceiling_min_gain), 0.0, 1.0},
       // --- identity (core::SpaceIdentityOptions)
       {"guid_match_m", "--guid-match", "Same space within [m]",
        "A re-detected space keeps the GUID of the stored one of its storey "

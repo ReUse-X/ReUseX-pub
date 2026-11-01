@@ -1593,6 +1593,31 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
   } catch (const std::invalid_argument &e) {
     return StageResult::failure(e.what());
   }
+  // Sloped ceilings (reusex-546): the classified ceiling planes over each
+  // space. Optional inputs: without planes / plane_classes every ceiling
+  // stays flat.
+  if (so.spaces.fit_ceiling_planes) {
+    if (!db.has_point_cloud("planes") || !db.has_plane_classes("planes")) {
+      info("spaces: no 'planes' cloud with plane classes (run `rux create "
+           "planes` and `rux create classify`); ceilings stay flat");
+    } else {
+      auto planes = db.point_cloud_label("planes");
+      std::vector<int> labels, label_storeys;
+      for (const auto &pc : db.plane_classes("planes"))
+        if (pc.role == "ceiling") {
+          labels.push_back(pc.plane_label);
+          label_storeys.push_back(pc.storey);
+        }
+      if (planes->size() != cloud->size())
+        warn("spaces: the 'planes' cloud has {} points but 'cloud' {}; "
+             "ceilings stay flat (re-run `rux create planes`)",
+             planes->size(), cloud->size());
+      else
+        geometry::fit_sloped_ceilings(sp.spaces, storeys, *cloud, *normals,
+                                      *planes, labels, label_storeys,
+                                      so.spaces);
+    }
+  }
   info("spaces: {} matched a stored space ({} locked, kept as stored), {} "
        "new GUID(s)",
        ids.matched, ids.locked_matched, ids.minted);
@@ -1663,18 +1688,24 @@ concat_solids(const std::vector<geometry::ElementSolid> &elements,
       voids.push_back({{"guid", v.guid},
                        {"kind", v.kind},
                        {"profile", profile_json(v.profile)}});
-    index.push_back({{"guid", e.source_guid},
-                     {"type", geometry::to_string(e.type)},
-                     {"storey", e.storey},
-                     {"predefined", e.predefined},
-                     {"part", e.part},
-                     {"closed", e.closed},
-                     {"volume", e.volume},
-                     {"faces", {f0, e.mesh.polygons.size()}},
-                     {"vertices", {v0, pts.size()}},
-                     {"profile", profile_json(e.profile)},
-                     {"voids", std::move(voids)},
-                     {"voids_failed", e.voids_failed}});
+    json entry = {{"guid", e.source_guid},
+                  {"type", geometry::to_string(e.type)},
+                  {"storey", e.storey},
+                  {"predefined", e.predefined},
+                  {"part", e.part},
+                  {"closed", e.closed},
+                  {"volume", e.volume},
+                  {"faces", {f0, e.mesh.polygons.size()}},
+                  {"vertices", {v0, pts.size()}},
+                  {"profile", profile_json(e.profile)},
+                  {"voids", std::move(voids)},
+                  {"voids_failed", e.voids_failed}};
+    // Sloped ceilings / wall tops (reusex-546), only when there are any.
+    if (!e.clip_planes.empty())
+      entry["clip_planes"] = e.clip_planes;
+    if (!e.top.empty())
+      entry["top"] = e.top;
+    index.push_back(std::move(entry));
   }
   pcl::toPCLPointCloud2(all, out.cloud);
   return out;

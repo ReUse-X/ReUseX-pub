@@ -179,6 +179,22 @@ struct SpacesOptions {
   /// 2.29 m against a 2.92 m ceiling); its lowered-ceiling WCs 9-18 %.
   int height_min_cells = 20;
   double height_min_share = 0.05;
+
+  // --- Sloped ceilings (fit_sloped_ceilings(), reusex-546) -----------------
+  /// Fit each space's sloped ceiling planes from the classified ceiling
+  /// planes over it. Off: every ceiling stays flat at its measured height.
+  bool fit_ceiling_planes = true;
+  /// A ceiling plane tilted between these [deg] is a sloped-ceiling
+  /// candidate. house1's mono pitch is ~9.5 deg; flatter ones are drift on a
+  /// flat ceiling.
+  double ceiling_min_tilt_deg = 5.0;
+  double ceiling_max_tilt_deg = 60.0;
+  /// A candidate must have inliers in this many 0.1 m cells of the space
+  /// (and in height_min_share of it) ...
+  int ceiling_min_cells = 20;
+  /// ... and cut the L1 error of the ceiling model over the space's ceiling
+  /// observations by at least this share to be taken.
+  double ceiling_min_gain = 0.3;
 };
 
 /// What polygonise_spaces() did on one storey.
@@ -237,12 +253,12 @@ struct SpaceHeightStats {
 /// median of its ceiling samples (SpacesOptions::height_*), and the space's
 /// z_floor / z_ceiling are the medians over its cells -- so area-weighted,
 /// not point-weighted, and robust to furniture tops and ceiling lamps. A
-/// sloped ceiling gives its footprint median, as the reference plans record
-/// it. With fewer than height_min_cells sampled cells (or height_min_share
-/// of its area) a space keeps the storey's height; its floor then takes the
-/// median of its cells' floor levels (RoomGrid::floor_z) when the storey is
-/// split. Volumes are recomputed (area x height) and the sample counts go into
-/// the metadata
+/// sloped ceiling gives its footprint median here; fit_sloped_ceilings()
+/// then replaces it with the ceiling planes and their cap. With fewer than
+/// height_min_cells sampled cells (or height_min_share of its area) a space
+/// keeps the storey's height; its floor then takes the median of its cells'
+/// floor levels (RoomGrid::floor_z) when the storey is split. Volumes are
+/// recomputed (area x height) and the sample counts go into the metadata
 /// ("z_floor_cells", "z_ceiling_cells").
 ///
 /// @param grids   The band-rooms grids the spaces were polygonised from.
@@ -252,5 +268,40 @@ SpaceHeightStats measure_space_heights(
     std::vector<core::SpaceRecord> &spaces, const std::vector<RoomGrid> &grids,
     const std::vector<core::StoreyRecord> &storeys, const Cloud &cloud,
     const CloudN &normals, const SpacesOptions &options = {});
+
+/// What fit_sloped_ceilings() did.
+struct SlopedCeilingStats {
+  int candidates = 0;    ///< ceiling planes tilted within the bounds
+  int spaces_sloped = 0; ///< spaces that took at least one plane
+  int planes = 0;        ///< planes taken, over all spaces
+};
+
+/// Sloped ceilings (reusex-546): give each space the tilted ceiling planes
+/// that explain its ceiling. Candidates are the planes of @p plane_labels
+/// (the "planes" cloud, index-aligned with @p cloud) listed in
+/// @p ceiling_labels (role ceiling; @p ceiling_storeys their storey, -1 any)
+/// whose fit in the storey's level frame is tilted between
+/// ceiling_min_tilt_deg and ceiling_max_tilt_deg. Over each space's polygon,
+/// rasterised at 0.1 m, every cell's ceiling observation is the 80th
+/// percentile of the candidate inliers and of the horizontal points at
+/// least height_ceiling_min_m above its floor in it. The ceiling model is
+/// min(cap, planes) (core::ceiling_at): starting flat, the candidate (with
+/// inliers in at least ceiling_min_cells cells and height_min_share of the
+/// space) that lowers the model's L1 error most is taken while it lowers it
+/// by at least ceiling_min_gain; the cap is re-fitted each time (on a 2 cm
+/// grid, or none: the highest point of the planes over the space). A plane
+/// that would take the ceiling within 0.1 m of the floor at a polygon
+/// vertex is dropped. A space that takes a plane gets ceiling_planes,
+/// z_ceiling = the cap, its volume integrated over the raster, and
+/// "ceiling_fit" in its metadata; the others are left as they are, and so
+/// are locked spaces.
+/// @throws std::invalid_argument when cloud, normals and labels sizes differ
+///         or ceiling_labels and ceiling_storeys do.
+SlopedCeilingStats fit_sloped_ceilings(
+    std::vector<core::SpaceRecord> &spaces,
+    const std::vector<core::StoreyRecord> &storeys, const Cloud &cloud,
+    const CloudN &normals, const CloudL &plane_labels,
+    const std::vector<int> &ceiling_labels,
+    const std::vector<int> &ceiling_storeys, const SpacesOptions &options = {});
 
 } // namespace reusex::geometry

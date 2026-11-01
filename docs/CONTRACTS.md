@@ -595,8 +595,8 @@ rooms -> spaces**.
 | | |
 |---|---|
 | Consumes | `cloud`, `normals`, `storeys`, `rooms` (band) |
-| Optional | `walls` (without it every space is its raster outline), `openings` (the door cuts of the rebuilt grid) |
-| Produces | `spaces`, `space_boundaries` (tables, schema v35: one row per space with a stable GUID, one per bounding wall stretch) |
+| Optional | `walls` (without it every space is its raster outline), `openings` (the door cuts of the rebuilt grid), `planes` + `plane_classes` (the sloped-ceiling candidates; without them every ceiling stays flat) |
+| Produces | `spaces`, `space_boundaries` (tables, schema v35: one row per space with a stable GUID, one per bounding wall stretch; `spaces.ceiling_planes`, schema v39) |
 | Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
 | Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; the rebuilt grid's room ids match `rooms` (checked by the stage) |
 
@@ -608,7 +608,18 @@ median floor / ceiling sample, `geometry::measure_space_heights`, so a split
 level or a lowered ceiling shows; the storey's when fewer than
 `height_min_cells` / `height_min_share` of its cells were sampled or
 `measure_heights` is off; the sampled cell counts are in `metadata` as
-`z_floor_cells` / `z_ceiling_cells`), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
+`z_floor_cells` / `z_ceiling_cells`), `ceiling_planes` (sloped ceilings,
+reusex-546, `geometry::fit_sloped_ceilings`: the `plane_classes` rows of
+role `ceiling` tilted between `ceiling_min_tilt_deg` (5) and
+`ceiling_max_tilt_deg` (60), fitted in the storey's level frame, that the
+space's ceiling observations -- 0.1 m cells of its polygon, the 80th
+percentile of the candidates' inliers and the horizontal points above
+`height_ceiling_min_m` -- take greedily while each cuts the L1 error of
+min(cap, planes) by `ceiling_min_gain`; then `z_ceiling` is the fitted cap:
+the flat part, or the highest point of the planes over the space, and
+`volume` is integrated under the sloped ceiling; the fit is in `metadata` as
+`ceiling_fit`; `fit_ceiling_planes` off, or no candidate, leaves the ceiling
+flat; a locked space keeps its own), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
 `rooms` label it was made from), `confidence` (the share of its area that
 comes from wall-bounded faces, the rest is raster) and `metadata` (that share
 and the furniture holes). A boundary names its space by row (it goes with
@@ -651,7 +662,16 @@ storey's slab bottom, and each ceiling level a roof region; a detected,
 unlocked wall runs from the floor level of the lowest space beside it to
 the ceiling level of the highest (`walls_follow_spaces`), so a wall between
 two levels covers both. A storey whose spaces all sit at its own heights is
-built as one slab and one roof, as before. A
+built as one slab and one roof, as before. Sloped ceilings (reusex-546): a
+space with `ceiling_planes` is its prism clipped below each plane; a wall
+with a `top` (a reference, a manual wall), or a detected unlocked wall
+beside such a space, gets a sloped top -- for the detected one the highest
+ceiling of the spaces beside it at each point of its axis, every bend kept
+(gable and knee walls) -- and is its elevation extruded across its
+thickness; the roof over a sloped space (and the walls whose top follows it)
+is the layer between its ceiling and the ceiling raised by
+`slab_thickness_m`, on whichever storey the space is (the flat roof stays
+on the top storey). A
 wall of unknown thickness (`-1`, its axis is the seen face) grows
 `unknown_wall_thickness_m` away from the space it faces; wall ends at a
 corner or tee run on to the far face of the wall they meet.
@@ -673,7 +693,10 @@ largest first), `closed` (`CGAL::is_closed`), `volume`, `faces` / `vertices`
 (`[first, count]` in the mesh), `profile` (`outer`, `holes`, `depth`,
 `placement`: the IFC-ready extrusion, local -> world, 4x4 row-major) and, for a
 wall, `voids` (each opening cut: `guid`, `kind`, `profile`) and
-`voids_failed`. A type with no element leaves no mesh (a stale one is
+`voids_failed`; a space with a sloped ceiling also has `clip_planes` (world
+`[a, b, c, d]`, the kept side a x + b y + c z + d <= 0) and a wall with a
+sloped top `top` (`[x, z]` in its profile's placement frame); their
+`profile` is then the bounding extrusion. A type with no element leaves no mesh (a stale one is
 deleted). The `solids` render layer and the Qt 3D workspace's "Solider
 (typede)" row draw the three meshes.
 
