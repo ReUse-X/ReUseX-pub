@@ -445,9 +445,11 @@ class ProjectDB::Impl {
   bool hasReportAssetsTable = false;
   /// spaces.ceiling_planes and walls.top_profile exist (v39).
   bool hasSlopedColumns = false;
+  /// pose_blocks and pose_versions exist (v40).
+  bool hasPoseRepairTables = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 39;
+  static constexpr int LATEST_SCHEMA_VERSION = 40;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -581,6 +583,8 @@ class ProjectDB::Impl {
     hasReportAssetsTable = tableExists("report_assets");
     hasSlopedColumns = columnExists("spaces", "ceiling_planes") &&
                        columnExists("walls", "top_profile");
+    hasPoseRepairTables =
+        tableExists("pose_blocks") && tableExists("pose_versions");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -920,6 +924,10 @@ class ProjectDB::Impl {
 
     if (current < 39) {
       migrateToV39();
+    }
+
+    if (current < 40) {
+      migrateToV40();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -4675,6 +4683,47 @@ class ProjectDB::Impl {
     reusex::info("Migration to schema version 39 complete");
   }
 
+  void migrateToV40() {
+    reusex::info("Migrating database to schema version 40");
+    // Scan-repair editor (reusex-y2lg): the trajectory split into named
+    // blocks (pose_blocks, reusex-y2lg.1) and the pose versions every repair
+    // step writes, so each one can be undone (pose_versions, reusex-y2lg.21).
+    // A version's frames / edges blobs are packed by core/pose_versions.cpp.
+    Savepoint sp(db, "migrate_v40");
+    execOrThrow(R"(
+      CREATE TABLE IF NOT EXISTS pose_blocks (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT    NOT NULL DEFAULT '',
+        first_node INTEGER NOT NULL,
+        last_node  INTEGER NOT NULL,
+        scan_id    INTEGER NOT NULL DEFAULT 0,
+        detached   INTEGER NOT NULL DEFAULT 0,
+        CHECK (first_node <= last_node)
+      );
+      CREATE TABLE IF NOT EXISTS pose_versions (
+        id          INTEGER PRIMARY KEY,
+        parent_id   INTEGER,
+        kind        TEXT    NOT NULL,
+        label       TEXT    NOT NULL DEFAULT '',
+        author      TEXT    NOT NULL DEFAULT '',
+        created_at  TEXT    NOT NULL
+                    DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        metrics     TEXT    NOT NULL DEFAULT '{}',
+        frame_count INTEGER NOT NULL DEFAULT 0,
+        edge_count  INTEGER NOT NULL DEFAULT 0,
+        frames      BLOB    NOT NULL,
+        edges       BLOB    NOT NULL,
+        edits       TEXT
+      );
+    )");
+    insertSchemaVersion(40, "Scan-repair editor: pose_blocks (trajectory "
+                            "blocks) and pose_versions (undoable pose "
+                            "snapshots)");
+    sp.release();
+    hasPoseRepairTables = true;
+    reusex::info("Migration to schema version 40 complete");
+  }
+
   // ── Spaces (v35) ─────────────────────────────────────────────────────────
 
   static constexpr const char *kSpaceColumns =
@@ -5701,7 +5750,11 @@ class ProjectDB::Impl {
     // Missing row / NULL / short blob: nothing was ever written here.
     if (!readSensorFramePoseBlob(nodeId, m))
       return false;
+    return isUsablePose(m);
+  }
 
+  /// has_sensor_frame_pose()'s test on a pose already read.
+  static bool isUsablePose(const std::array<double, 16> &m) {
     // NaN/Inf survive a round-trip through the BLOB and would poison every
     // downstream matrix product without ever throwing.
     for (double v : m)
@@ -9779,6 +9832,34 @@ std::vector<std::pair<int, int>> ProjectDB::sensor_frame_ids_with_scan() const {
   return impl_->getSensorFrameIdsWithScan();
 }
 
+std::vector<ProjectDB::PosedFrame> ProjectDB::posed_frames() const {
+  const std::string sql =
+      std::string("SELECT node_id, COALESCE(scan_id, 0), timestamp, "
+                  "transform, ") +
+      (impl_->hasInitialTransform ? "initial_transform" : "NULL") +
+      " FROM sensor_frames ORDER BY node_id;";
+  sqlite3_stmt *s = prepare_or_throw(impl_->db, sql.c_str(), "posed_frames");
+  StmtGuard guard(s);
+  std::vector<PosedFrame> out;
+  while (sqlite3_step(s) == SQLITE_ROW) {
+    const auto pose = Impl::optionalBlob<16>(s, 3);
+    if (!pose || !Impl::isUsablePose(*pose))
+      continue;
+    PosedFrame f;
+    f.node_id = sqlite3_column_int(s, 0);
+    f.scan_id = sqlite3_column_int(s, 1);
+    f.timestamp = sqlite3_column_type(s, 2) == SQLITE_NULL
+                      ? -1.0
+                      : sqlite3_column_double(s, 2);
+    f.transform = *pose;
+    f.initial = Impl::optionalBlob<16>(s, 4);
+    if (f.initial && !core::pose_graph::is_rigid_transform(*f.initial))
+      f.initial.reset();
+    out.push_back(f);
+  }
+  return out;
+}
+
 cv::Mat ProjectDB::sensor_frame_image(int nodeId) const {
   return impl_->getSensorFrameImage(nodeId);
 }
@@ -11576,6 +11657,262 @@ std::vector<ProjectDB::ReportPdfRecord> ProjectDB::list_report_pdfs() const {
     out.push_back(std::move(rec));
   }
   return out;
+}
+
+// --- Trajectory blocks and pose versions (schema v40) ---
+
+namespace {
+void requirePoseRepair(bool has, const char *who) {
+  if (!has)
+    throw std::runtime_error(std::string(who) +
+                             ": project schema predates v40 (open it "
+                             "read-write once to migrate)");
+}
+std::vector<std::uint8_t> columnBytes(sqlite3_stmt *s, int col) {
+  const auto *b =
+      reinterpret_cast<const std::uint8_t *>(sqlite3_column_blob(s, col));
+  const int n = sqlite3_column_bytes(s, col);
+  return b && n > 0 ? std::vector<std::uint8_t>(b, b + n)
+                    : std::vector<std::uint8_t>{};
+}
+std::string columnText(sqlite3_stmt *s, int col) {
+  const auto *t = reinterpret_cast<const char *>(sqlite3_column_text(s, col));
+  return t ? std::string(t) : std::string();
+}
+void bindBytes(sqlite3_stmt *s, int idx, const std::vector<std::uint8_t> &v) {
+  // A zero-length blob, not NULL, for an empty vector (NOT NULL columns).
+  sqlite3_bind_blob(s, idx,
+                    v.empty() ? "" : static_cast<const void *>(v.data()),
+                    static_cast<int>(v.size()), SQLITE_TRANSIENT);
+}
+} // namespace
+
+std::vector<ProjectDB::PoseBlockRecord> ProjectDB::pose_blocks() const {
+  if (!impl_->hasPoseRepairTables)
+    return {};
+  sqlite3_stmt *s = prepare_or_throw(
+      impl_->db,
+      "SELECT id, name, first_node, last_node, scan_id, detached FROM "
+      "pose_blocks ORDER BY first_node, id;",
+      "pose_blocks");
+  StmtGuard guard(s);
+  std::vector<PoseBlockRecord> out;
+  while (sqlite3_step(s) == SQLITE_ROW) {
+    PoseBlockRecord b;
+    b.id = sqlite3_column_int(s, 0);
+    b.name = columnText(s, 1);
+    b.first_node = sqlite3_column_int(s, 2);
+    b.last_node = sqlite3_column_int(s, 3);
+    b.scan_id = sqlite3_column_int(s, 4);
+    b.detached = sqlite3_column_int(s, 5) != 0;
+    out.push_back(std::move(b));
+  }
+  return out;
+}
+
+void ProjectDB::replace_pose_blocks(
+    const std::vector<PoseBlockRecord> &blocks) {
+  impl_->checkWritable();
+  requirePoseRepair(impl_->hasPoseRepairTables, "replace_pose_blocks");
+  for (const auto &b : blocks)
+    if (b.first_node > b.last_node)
+      throw std::invalid_argument(fmt::format(
+          "replace_pose_blocks: block '{}' has first_node {} > last_node {}",
+          b.name, b.first_node, b.last_node));
+  auto sorted = blocks;
+  std::stable_sort(
+      sorted.begin(), sorted.end(),
+      [](const auto &a, const auto &b) { return a.first_node < b.first_node; });
+  Savepoint sp(impl_->db, "replace_pose_blocks");
+  impl_->execOrThrow("DELETE FROM pose_blocks;");
+  sqlite3_stmt *s = prepare_or_throw(
+      impl_->db,
+      "INSERT INTO pose_blocks (id, name, first_node, last_node, scan_id, "
+      "detached) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+      "replace_pose_blocks");
+  StmtGuard guard(s);
+  int id = 0;
+  for (const auto &b : sorted) {
+    sqlite3_reset(s);
+    sqlite3_bind_int(s, 1, ++id);
+    sqlite3_bind_text(s, 2, b.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(s, 3, b.first_node);
+    sqlite3_bind_int(s, 4, b.last_node);
+    sqlite3_bind_int(s, 5, b.scan_id);
+    sqlite3_bind_int(s, 6, b.detached ? 1 : 0);
+    if (sqlite3_step(s) != SQLITE_DONE)
+      throw std::runtime_error("replace_pose_blocks: " +
+                               std::string(sqlite3_errmsg(impl_->db)));
+  }
+  sp.release();
+}
+
+int64_t ProjectDB::add_pose_version(const PoseVersionRecord &record,
+                                    const PoseVersionSnapshot &snapshot) {
+  impl_->checkWritable();
+  requirePoseRepair(impl_->hasPoseRepairTables, "add_pose_version");
+  if (record.kind.empty())
+    throw std::invalid_argument("add_pose_version: empty kind");
+  sqlite3_stmt *s = prepare_or_throw(
+      impl_->db,
+      "INSERT INTO pose_versions (parent_id, kind, label, author, metrics, "
+      "frame_count, edge_count, frames, edges, edits) VALUES (?1, ?2, ?3, "
+      "?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+      "add_pose_version");
+  StmtGuard guard(s);
+  if (record.parent_id > 0)
+    sqlite3_bind_int64(s, 1, record.parent_id);
+  else
+    sqlite3_bind_null(s, 1);
+  sqlite3_bind_text(s, 2, record.kind.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(s, 3, record.label.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(s, 4, record.author.c_str(), -1, SQLITE_TRANSIENT);
+  const std::string metrics =
+      record.metrics_json.empty() ? "{}" : record.metrics_json;
+  sqlite3_bind_text(s, 5, metrics.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(s, 6, record.frame_count);
+  sqlite3_bind_int(s, 7, record.edge_count);
+  bindBytes(s, 8, snapshot.frames);
+  bindBytes(s, 9, snapshot.edges);
+  if (snapshot.edits)
+    sqlite3_bind_text(s, 10, snapshot.edits->c_str(), -1, SQLITE_TRANSIENT);
+  else
+    sqlite3_bind_null(s, 10);
+  if (sqlite3_step(s) != SQLITE_DONE)
+    throw std::runtime_error("add_pose_version: " +
+                             std::string(sqlite3_errmsg(impl_->db)));
+  return sqlite3_last_insert_rowid(impl_->db);
+}
+
+namespace {
+constexpr const char *kPoseVersionColumns =
+    "id, COALESCE(parent_id, 0), kind, label, author, created_at, metrics, "
+    "frame_count, edge_count";
+ProjectDB::PoseVersionRecord readPoseVersion(sqlite3_stmt *s) {
+  ProjectDB::PoseVersionRecord r;
+  r.id = sqlite3_column_int64(s, 0);
+  r.parent_id = sqlite3_column_int64(s, 1);
+  r.kind = columnText(s, 2);
+  r.label = columnText(s, 3);
+  r.author = columnText(s, 4);
+  r.created_at = columnText(s, 5);
+  r.metrics_json = columnText(s, 6);
+  r.frame_count = sqlite3_column_int(s, 7);
+  r.edge_count = sqlite3_column_int(s, 8);
+  return r;
+}
+} // namespace
+
+std::vector<ProjectDB::PoseVersionRecord> ProjectDB::pose_versions() const {
+  if (!impl_->hasPoseRepairTables)
+    return {};
+  const std::string sql = std::string("SELECT ") + kPoseVersionColumns +
+                          " FROM pose_versions ORDER BY id;";
+  sqlite3_stmt *s = prepare_or_throw(impl_->db, sql.c_str(), "pose_versions");
+  StmtGuard guard(s);
+  std::vector<PoseVersionRecord> out;
+  while (sqlite3_step(s) == SQLITE_ROW)
+    out.push_back(readPoseVersion(s));
+  return out;
+}
+
+std::optional<ProjectDB::PoseVersionRecord>
+ProjectDB::pose_version(int64_t id) const {
+  if (!impl_->hasPoseRepairTables)
+    return std::nullopt;
+  const std::string sql = std::string("SELECT ") + kPoseVersionColumns +
+                          " FROM pose_versions WHERE id = ?;";
+  sqlite3_stmt *s = prepare_or_throw(impl_->db, sql.c_str(), "pose_version");
+  StmtGuard guard(s);
+  sqlite3_bind_int64(s, 1, id);
+  if (sqlite3_step(s) != SQLITE_ROW)
+    return std::nullopt;
+  return readPoseVersion(s);
+}
+
+std::optional<ProjectDB::PoseVersionSnapshot>
+ProjectDB::pose_version_snapshot(int64_t id) const {
+  if (!impl_->hasPoseRepairTables)
+    return std::nullopt;
+  sqlite3_stmt *s = prepare_or_throw(
+      impl_->db, "SELECT frames, edges, edits FROM pose_versions WHERE id = ?;",
+      "pose_version_snapshot");
+  StmtGuard guard(s);
+  sqlite3_bind_int64(s, 1, id);
+  if (sqlite3_step(s) != SQLITE_ROW)
+    return std::nullopt;
+  PoseVersionSnapshot snap;
+  snap.frames = columnBytes(s, 0);
+  snap.edges = columnBytes(s, 1);
+  if (sqlite3_column_type(s, 2) != SQLITE_NULL)
+    snap.edits = columnText(s, 2);
+  return snap;
+}
+
+void ProjectDB::replace_pose_graph_edges(std::span<const PoseGraphEdge> edges) {
+  impl_->checkWritable();
+  impl_->requireV28PoseGraph("replace_pose_graph_edges");
+  Savepoint sp(impl_->db, "replace_pose_graph_edges");
+  impl_->execOrThrow("DELETE FROM pose_graph_edges;");
+  sqlite3_stmt *s = prepare_or_throw(impl_->db, R"(
+      INSERT INTO pose_graph_edges
+        (id, from_node_id, to_node_id, edge_type, residual, weight, transform,
+         information, source, status, created_at, seed_disagreement_m,
+         seed_disagreement_deg, deviation_m, deviation_deg)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+              ?15);)",
+                                     "replace_pose_graph_edges");
+  StmtGuard guard(s);
+  for (const auto &e : edges) {
+    sqlite3_reset(s);
+    sqlite3_clear_bindings(s);
+    if (e.id > 0)
+      sqlite3_bind_int64(s, 1, e.id);
+    else
+      sqlite3_bind_null(s, 1);
+    sqlite3_bind_int(s, 2, e.from_node_id);
+    sqlite3_bind_int(s, 3, e.to_node_id);
+    sqlite3_bind_text(s, 4, e.edge_type.c_str(), -1, SQLITE_TRANSIENT);
+    Impl::bindNanAsNull(s, 5, e.residual);
+    Impl::bindNanAsNull(s, 6, e.weight);
+    if (e.transform)
+      sqlite3_bind_blob(s, 7, e.transform->data(), 16 * sizeof(double),
+                        SQLITE_TRANSIENT);
+    if (e.information)
+      sqlite3_bind_blob(s, 8, e.information->data(), 36 * sizeof(double),
+                        SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 9, e.source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 10, e.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 11, e.created_at.c_str(), -1, SQLITE_TRANSIENT);
+    Impl::bindOptionalDouble(s, 12, e.seed_disagreement_m);
+    Impl::bindOptionalDouble(s, 13, e.seed_disagreement_deg);
+    Impl::bindOptionalDouble(s, 14, e.deviation_m);
+    Impl::bindOptionalDouble(s, 15, e.deviation_deg);
+    if (sqlite3_step(s) != SQLITE_DONE)
+      throw std::runtime_error("replace_pose_graph_edges: " +
+                               std::string(sqlite3_errmsg(impl_->db)));
+  }
+  sp.release();
+}
+
+void ProjectDB::clear_initial_pose(int nodeId) {
+  impl_->checkWritable();
+  if (!impl_->hasInitialTransform)
+    throw std::runtime_error("clear_initial_pose: project schema predates "
+                             "v28; open it read-write once to migrate");
+  sqlite3_stmt *s = prepare_or_throw(
+      impl_->db,
+      "UPDATE sensor_frames SET initial_transform = NULL WHERE node_id = ?;",
+      "clear_initial_pose");
+  StmtGuard guard(s);
+  sqlite3_bind_int(s, 1, nodeId);
+  if (sqlite3_step(s) != SQLITE_DONE)
+    throw std::runtime_error("clear_initial_pose: " +
+                             std::string(sqlite3_errmsg(impl_->db)));
+  if (sqlite3_changes(impl_->db) == 0)
+    throw std::runtime_error("clear_initial_pose: no sensor frame with "
+                             "node_id " +
+                             std::to_string(nodeId));
 }
 
 // --- Report assets (schema v38) ---
