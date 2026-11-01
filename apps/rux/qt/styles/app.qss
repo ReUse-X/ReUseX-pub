@@ -1343,3 +1343,114 @@ QPlainTextEdit#logTail {
   border-radius: var(--radius-md);
   padding: var(--space-2);
 }
+
+/* ------------------------------------------------ Ressourcer (3vuu) --- */
+
+#resourceScroll, #resourceList, #resourceFacts, #resourceFactsBody,
+#resourceDetail, #resourceGroup {
+  background: var(--color-surface);
+}
+QLabel#groupTitle {
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text);
+  background: transparent;
+}
+QLabel#groupCount {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  background: transparent;
+  padding-bottom: var(--space-1);
+}
+QFrame#resourceRows {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+QPushButton#resourceRow {
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  padding: 0;
+  text-align: left;
+}
+#resourceHead {
+  background: transparent;
+}
+QPushButton#resourceRow:hover {
+  background: var(--color-surface-sunken);
+}
+QPushButton#resourceRow:focus {
+  background: var(--color-accent-muted);
+}
+QPushButton#resourceRow QLabel {
+  background: transparent;
+}
+QLabel#rowCode {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+QLabel#rowStar {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-star);
+}
+QLabel#rowName {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+}
+QPushButton#resourceRow[dismissed="true"] QLabel#rowName {
+  color: var(--color-text-faint);
+}
+QLabel#rowRoom {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+QLabel#rowMuted {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+QLabel#rowChevron {
+  font-size: var(--font-size-xl);
+  color: var(--color-text-faint);
+}
+
+QLabel#detailCode {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  background: transparent;
+}
+QLabel#detailType {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-accent-deep);
+  background: transparent;
+}
+QLabel#detailTitle {
+  font-family: var(--font-display);
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text);
+  background: transparent;
+}
+QLabel#detailWhere {
+  font-size: var(--font-size-md);
+  color: var(--color-text-muted);
+  background: transparent;
+}
+QLabel#detailValue {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background: transparent;
+}
+QLabel#detailValueMuted {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-faint);
+  background: transparent;
+}

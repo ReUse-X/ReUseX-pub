@@ -17,6 +17,7 @@
 #include <rux_qt/FrameImageLoader.hpp>
 #include <rux_qt/MatchCanvas.hpp>
 #include <rux_qt/PairOverlay.hpp>
+#include <rux_qt/ResourceImageLoader.hpp>
 #include <rux_qt/Theme.hpp>
 #include <rux_qt/background.hpp>
 #include <rux_qt/fonts.hpp>
@@ -192,7 +193,9 @@ int main(int argc, char **argv) {
     int idle = 0;
     while (idle < 2 && settle.elapsed() < 30000) {
       pump(2, 10);
-      idle = FrameImageLoader::busy() == 0 && background_work_in_flight() == 0
+      idle = FrameImageLoader::busy() == 0 &&
+                     ResourceImageLoader::busy() == 0 &&
+                     background_work_in_flight() == 0
                  ? idle + 1
                  : 0;
     }

@@ -21,6 +21,7 @@
 #include <rux_qt/PipelineWorkspace.hpp>
 #include <rux_qt/ProjectSession.hpp>
 #include <rux_qt/RecentProjects.hpp>
+#include <rux_qt/ResourcesWorkspace.hpp>
 #include <rux_qt/SceneView.hpp>
 #include <rux_qt/TableBrowser.hpp>
 #include <rux_qt/Theme.hpp>
@@ -291,6 +292,53 @@ AppShell *make_3d(const PageContext &ctx, const QString &colour = "cloud") {
 }
 
 QWidget *make_3d_page(const PageContext &ctx) { return make_3d(ctx); }
+
+// ---- Ressourcer (reusex-3vuu)
+
+AppShell *make_resources(const PageContext &ctx) {
+  auto *shell = sized(make_shell(ctx, Open::project));
+  shell->show_page(Workspace::resources);
+  return shell;
+}
+
+QWidget *make_resources_page(const PageContext &ctx) {
+  return make_resources(ctx);
+}
+
+/// Filtered: the first storey that has resources, and a search word.
+QWidget *make_resources_filter(const PageContext &ctx) {
+  auto *shell = make_resources(ctx);
+  const QString storey = qEnvironmentVariable("RUX_RESOURCE_STOREY", "Etage 1");
+  shell->resources()->set_storey_filter(storey);
+  shell->resources()->set_query(
+      qEnvironmentVariable("RUX_RESOURCE_QUERY", "kontor"));
+  return shell;
+}
+
+/// The detail page of $RUX_RESOURCE_CODE, else of the first resource whose
+/// type or designation contains @p what.
+AppShell *make_resource_detail(const PageContext &ctx, const QString &what) {
+  auto *shell = make_resources(ctx);
+  QString code = qEnvironmentVariable("RUX_RESOURCE_CODE");
+  if (code.isEmpty()) {
+    const QStringList hits = shell->resources()->find_codes(what);
+    code = hits.isEmpty() ? QString() : hits.front();
+  }
+  if (code.isEmpty() || !shell->resources()->open_resource(code))
+    std::fprintf(stderr, "ressource-detalje: no resource matches '%s'\n",
+                 qPrintable(code.isEmpty() ? what : code));
+  else
+    std::fprintf(stderr, "ressource-detalje: %s\n", qPrintable(code));
+  return shell;
+}
+
+QWidget *make_resource_detail_page(const PageContext &ctx) {
+  return make_resource_detail(ctx, "radiator");
+}
+
+QWidget *make_resource_window(const PageContext &ctx) {
+  return make_resource_detail(ctx, "vindue");
+}
 
 /// Rooms with their legend, and a picked point in the inspector.
 QWidget *make_3d_pick(const PageContext &ctx) {
@@ -1728,6 +1776,19 @@ void register_shell_pages() {
                  make_shell_empty});
   register_page(
       {"shell-project", "Skallen med projekt på 3D", make_shell_project});
+  register_page({"ressourcer",
+                 "Ressourcer: listen pr. type med foto, rum og tilstand",
+                 make_resources_page});
+  register_page({"ressourcer-filter",
+                 "Ressourcer filtreret på etage og søgning "
+                 "(RUX_RESOURCE_STOREY, RUX_RESOURCE_QUERY)",
+                 make_resources_filter});
+  register_page({"ressource-detalje",
+                 "Ressource: detaljesiden for en radiator (eller "
+                 "RUX_RESOURCE_CODE)",
+                 make_resource_detail_page});
+  register_page({"ressource-vindue", "Ressource: detaljesiden for et vindue",
+                 make_resource_window});
   register_page({"db-frames",
                  "Database: A/B-billeder med mærkater og filmstrimmel",
                  make_db_frames});
