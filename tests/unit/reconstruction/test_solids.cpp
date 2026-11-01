@@ -6,8 +6,12 @@
 // out of it, a slab, a space volume -- each closed, with the volume known in
 // closed form.
 
+#include <reusex/core/sloped_ceiling.hpp>
 #include <reusex/core/solid_model.hpp>
+#include <reusex/io/solid_model_json.hpp>
 #include <reusex/reconstruction/solids.hpp>
+
+#include "../../support/source_dir.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -470,4 +474,169 @@ TEST_CASE("Solids_FlatStorey_SpaceHeightsNearTheStoreyKeepIt",
   const auto p = z_range(r.walls[0]);
   CHECK_THAT(p.first, WithinAbs(0.0, 1e-6));
   CHECK_THAT(p.second, WithinAbs(2.6, 1e-6));
+}
+
+// ---------------------------------------------------------------------------
+// Sloped ceilings and wall tops (reusex-546), on the synthetic attic plan
+// (tests/fixtures/solid_model/attic.plan.json): a 35 deg pitched attic room
+// with 1.15 m knee walls and gable walls, and a room with a flat centre
+// (2.2 m) and sloped sides.
+
+namespace {
+
+core::SolidModel attic_plan() {
+  return io::solid_model_from_file(test_support::source_dir() / "tests" /
+                                   "fixtures" / "solid_model" /
+                                   "attic.plan.json");
+}
+
+const ElementSolid &space_solid(const geometry::SolidsResult &r,
+                                const std::string &guid) {
+  for (const auto &s : r.spaces)
+    if (s.source_guid == guid)
+      return s;
+  FAIL("no space solid " << guid);
+  return r.spaces.front();
+}
+
+/// The ceiling height of @p s integrated over its (rectangular) polygon,
+/// minus the floor: the volume a clipped prism must have.
+double rect_volume(const core::SpaceRecord &s) {
+  double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const auto &p : s.polygon.outer) {
+    x0 = std::min(x0, p[0]);
+    y0 = std::min(y0, p[1]);
+    x1 = std::max(x1, p[0]);
+    y1 = std::max(y1, p[1]);
+  }
+  const int n = 2000;
+  double v = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const double y = y0 + (y1 - y0) * (i + 0.5) / n;
+    v += (core::ceiling_at(s, 0.5 * (x0 + x1), y) - s.z_floor) * (y1 - y0) / n;
+  }
+  return v * (x1 - x0);
+}
+
+} // namespace
+
+TEST_CASE("Solids_SlopedCeiling_SpaceIsCutByItsPlanes",
+          "[reconstruction][solids][sloped]") {
+  const auto m = attic_plan();
+  const auto r = build_solids(m);
+  CHECK(r.not_closed == 0);
+  const ElementSolid attic = space_solid(r, "s-attic");
+  REQUIRE(attic.closed);
+  CHECK_THAT(attic.volume, WithinAbs(rect_volume(m.spaces[0]), 1e-3));
+  CHECK(attic.clip_planes.size() == 2);
+  // Under the knee-wall slope and under the ridge.
+  CHECK(side(attic, 3, 0.5, 1.45) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(attic, 3, 0.5, 1.55) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(attic, 3, 2.0, 2.50) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(attic, 3, 2.0, 2.58) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(attic, 3, 3.5, 1.45) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(attic, 3, 3.5, 1.55) == CGAL::ON_UNBOUNDED_SIDE);
+
+  const ElementSolid flat = space_solid(r, "s-flat-centre");
+  REQUIRE(flat.closed);
+  CHECK_THAT(flat.volume, WithinAbs(rect_volume(m.spaces[1]), 1e-3));
+  CHECK(side(flat, 8, 2.0, 2.15) == CGAL::ON_BOUNDED_SIDE); // flat centre
+  CHECK(side(flat, 8, 2.0, 2.25) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(flat, 8, 0.5, 1.30) == CGAL::ON_BOUNDED_SIDE); // sloped side
+  CHECK(side(flat, 8, 0.5, 1.40) == CGAL::ON_UNBOUNDED_SIDE);
+}
+
+TEST_CASE("Solids_SlopedCeiling_GableWallFollowsItsTop",
+          "[reconstruction][solids][sloped]") {
+  const auto r = build_solids(attic_plan());
+  const auto &g = wall_solid(r, "w-gable-w"); // axis (0,4) -> (0,0)
+  REQUIRE(g.closed);
+  CHECK(side(g, 0, 2.0, 2.50) == CGAL::ON_BOUNDED_SIDE); // the peak
+  CHECK(side(g, 0, 2.0, 2.60) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(g, 0, 0.5, 1.45) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(g, 0, 0.5, 1.55) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK_THAT(z_range(g).second, WithinAbs(2.5504, 1e-6));
+  REQUIRE(g.top.size() >= 3);
+  // Knee walls stay boxes at their own height.
+  const auto &k = wall_solid(r, "w-knee-s1");
+  CHECK(k.closed);
+  CHECK(k.top.empty());
+  CHECK_THAT(z_range(k).second, WithinAbs(1.15, 1e-6));
+}
+
+TEST_CASE("Solids_SlopedCeiling_DetectedWallTakesTheCeilingsItMeets",
+          "[reconstruction][solids][sloped]") {
+  // The wall between the attic and the flat-centre room as the walls stage
+  // writes it: detected, flat, at the storey height.
+  auto m = attic_plan();
+  for (auto &w : m.walls)
+    if (w.guid == "w-gable-mid") {
+      w.top.clear();
+      w.source = "detected";
+      w.locked = false;
+    }
+  for (auto &s : m.spaces)
+    s.area = 22.0;
+  SolidsOptions o;
+  o.extend_at_joins = false;
+  const auto r = build_solids(m, o);
+  const auto &w = wall_solid(r, "w-gable-mid");
+  REQUIRE(w.closed);
+  // The attic's ceiling is the higher of the two everywhere.
+  CHECK(side(w, 6, 2.0, 2.50) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(w, 6, 2.0, 2.58) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(w, 6, 0.5, 1.45) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(w, 6, 0.5, 1.55) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(w, 6, 3.5, 1.45) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(w, 6, 3.5, 1.55) == CGAL::ON_UNBOUNDED_SIDE);
+  // The peak is a bend of the profile, not a sample.
+  CHECK_THAT(z_range(w).second, WithinAbs(2.5504, 2e-3));
+}
+
+TEST_CASE("Solids_SlopedCeiling_RoofFollowsTheSlope",
+          "[reconstruction][solids][sloped]") {
+  SolidsOptions o;
+  o.slab_thickness_m = 0.2;
+  const auto r = build_solids(attic_plan(), o);
+  std::vector<const ElementSolid *> roofs;
+  for (const auto &s : r.slabs) {
+    CHECK(s.closed);
+    if (s.predefined == "ROOF")
+      roofs.push_back(&s);
+  }
+  REQUIRE(roofs.size() >= 2);
+  // Over the attic: just above its ceiling, not below it, not 0.2 m above.
+  for (const double y : {0.5, 1.0, 2.0, 3.0, 3.5}) {
+    const double h = std::min(1.15 + 0.7002 * std::min(y, 4.0 - y), 2.6);
+    CHECK(inside_any(roofs, 3, y, h + 0.1));
+    CHECK_FALSE(inside_any(roofs, 3, y, h - 0.05));
+    CHECK_FALSE(inside_any(roofs, 3, y, h + 0.25));
+  }
+  // Over the flat-centre room: flat at 2.2 in the middle.
+  CHECK(inside_any(roofs, 8, 2.0, 2.3));
+  CHECK_FALSE(inside_any(roofs, 8, 2.0, 2.15));
+  CHECK(inside_any(roofs, 8, 0.5, 1.35 + 0.1));
+}
+
+TEST_CASE("Solids_SlopedCeiling_RoofOnALowerStorey",
+          "[reconstruction][solids][sloped]") {
+  // A storey above (elsewhere in plan): the attic is no longer the top
+  // storey, but its sloped ceiling still gets its roof; the flat-roof level
+  // does not.
+  auto m = attic_plan();
+  m.storeys.push_back(storey(1, 3.0, 5.5));
+  m.walls.push_back(wall("upper", 20, 0, 24, 0, 0.2, 2.5));
+  m.walls.back().storey = 1;
+  SolidsOptions o;
+  o.slab_thickness_m = 0.2;
+  const auto r = build_solids(m, o);
+  std::vector<const ElementSolid *> roofs;
+  for (const auto &s : r.slabs)
+    if (s.predefined == "ROOF" && s.storey == 0)
+      roofs.push_back(&s);
+  REQUIRE_FALSE(roofs.empty());
+  for (const auto *s : roofs)
+    CHECK(s->closed);
+  CHECK(inside_any(roofs, 3, 1.0, 1.15 + 0.7002 + 0.1));
+  CHECK(inside_any(roofs, 8, 2.0, 2.3));
 }

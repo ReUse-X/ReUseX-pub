@@ -38,6 +38,19 @@
 // keeps its own z_base / height. A storey whose spaces all sit at its floor
 // and ceiling (within level_tol_m) is built exactly as before.
 //
+// Sloped ceilings (reusex-546): a space with ceiling planes is its prism
+// clipped below each plane (CGAL clip, closed), so its ceiling is
+// core::ceiling_at(). A wall with a sloped top (its own WallRecord::top, or,
+// for a detected wall following its spaces, the highest ceiling of the
+// spaces beside it at each point along the axis, with every bend of a sloped
+// ceiling kept: gable and knee walls) is its elevation polygon in (s, z)
+// extruded across its thickness. A roof slab over a sloped space is the layer
+// between its ceiling and the ceiling raised by the slab thickness, over the
+// space and the walls whose top follows it, on whichever storey the space is
+// (the flat roof stays on the top storey only). All closed. The extrusion
+// profile of such a solid stays its bounding extrusion; the space records
+// the clipping planes (IfcBooleanClippingResult) and the wall its top.
+//
 // Each ElementSolid carries a triangle mesh in WORLD coordinates (each
 // storey's level frame mapped back through the inverse of its
 // level_transform) and the IFC-ready extrusion it was made from: a 2D
@@ -99,6 +112,13 @@ struct ElementSolid {
   int part = 0;
   ExtrusionProfile profile;
   std::vector<OpeningVoid> voids; ///< walls only
+  /// Spaces with a sloped ceiling: the half-spaces the extrusion was clipped
+  /// by, in world coordinates, {a, b, c, d} keeping a x + b y + c z + d <= 0.
+  std::vector<std::array<double, 4>> clip_planes;
+  /// Walls with a sloped top: the top as (x, z) in the profile's placement
+  /// frame (x along the axis, z up from the wall's base), x ascending; the
+  /// profile's depth is the highest point. Empty = flat at the depth.
+  std::vector<core::PlanPoint> top;
   /// Triangles, outward-facing, in world coordinates (PointXYZ vertices).
   pcl::PolygonMesh mesh;
   bool closed = false;  ///< CGAL::is_closed() of the mesh

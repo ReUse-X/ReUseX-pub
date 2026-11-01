@@ -73,7 +73,10 @@ struct SolidModelReport {
   std::optional<double> room_iou_mean;
   /// Mean |detected - reference| floor (ceiling) height over the matched
   /// spaces, in world z at the detected polygon's vertex mean [m]: split
-  /// levels and per-space ceilings (reusex-546).
+  /// levels and per-space ceilings (reusex-546). When either space of a pair
+  /// has a sloped ceiling, its ceiling error is the mean over a grid on the
+  /// plan both cover of |difference of core::ceiling_at()|, so a sloped
+  /// ceiling is measured against the surface, not one height.
   std::optional<double> space_floor_err_mean_m;
   std::optional<double> space_ceiling_err_mean_m;
   /// RMS of the matched detected walls' endpoint distances to their reference
