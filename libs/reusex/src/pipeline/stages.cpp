@@ -34,6 +34,7 @@
 #include "reusex/io/speckle_revit.hpp"
 #include "reusex/reconstruction/mesh.hpp"
 #include "reusex/reconstruction/openings.hpp"
+#include "reusex/reconstruction/plan_regularise.hpp"
 #include "reusex/reconstruction/solids.hpp"
 #include "reusex/reconstruction/walls.hpp"
 #include "reusex/segmentation/band_rooms.hpp"
@@ -1163,6 +1164,7 @@ StageResult run_walls(ProjectDB &db, const json &params, int log_id) {
   std::vector<core::WallRecord> walls;
   std::vector<core::WallJoinRecord> joins;
   int families = 0, faces = 0, pairs = 0, low_seen = 0;
+  std::vector<geometry::WallsResult> results;
   for (const auto &st : storeys) {
     geometry::WallsResult r;
     try {
@@ -1171,6 +1173,38 @@ StageResult run_walls(ProjectDB &db, const json &params, int log_id) {
     } catch (const std::invalid_argument &e) {
       return StageResult::invalid(e.what());
     }
+    results.push_back(std::move(r));
+  }
+
+  // Plan regularisation over all storeys at once (reusex-z1v.12): shared lines
+  // for walls that continue each other or stack, the Manhattan grid; the
+  // measured axes stay in each wall's metadata.
+  geometry::PlanRegulariseResult reg;
+  {
+    std::vector<geometry::WallGraph> graphs;
+    for (auto &r : results)
+      graphs.push_back(std::move(r.graph));
+    try {
+      reg = geometry::regularise_walls(graphs, storeys, o.plan);
+    } catch (const std::invalid_argument &e) {
+      return StageResult::invalid(e.what());
+    }
+    for (size_t k = 0; k < results.size(); ++k)
+      results[k].graph = std::move(graphs[k]);
+  }
+  if (o.plan.plan_regularise)
+    info("walls: plan regularised: {} shared line(s) ({} across storeys), {} "
+         "wall(s) moved (max {:.3f} m, rms {:.3f} m), {} turned onto the "
+         "grid at {:.2f} deg (max {:.2f} deg), {} joined end(s) re-solved",
+         reg.lines, reg.stacked_lines, reg.walls_moved, reg.max_shift_m,
+         reg.rms_shift_m, reg.walls_turned, reg.grid_angle_deg,
+         reg.max_turn_deg, reg.ends_rejoined);
+  else
+    info("walls: plan regularisation off; walls stay on their measured axes");
+
+  for (size_t k = 0; k < storeys.size(); ++k) {
+    const auto &st = storeys[k];
+    const auto &r = results[k];
     auto [w, j] = geometry::wall_records(r.graph, st);
     info("walls: storey {}: {} axis famil{}, {} face(s), {} pair(s) ({} "
          "rejected), {} wall(s), {} join(s), {} wide doorway(s) bridged; "
@@ -1326,6 +1360,9 @@ StageResult run_openings(ProjectDB &db, const json &params, int log_id) {
   if (walls.empty())
     return StageResult::invalid(
         "openings: the project has no walls; run `rux create walls`");
+  // Openings are found against the measured walls (the evidence lies on
+  // the measured faces) and then put onto the regularised ones.
+  const auto measured = geometry::measured_walls(walls);
   const auto cloud = db.point_cloud_xyzrgb("cloud");
   const std::size_t n = cloud->size();
 
@@ -1448,7 +1485,7 @@ StageResult run_openings(ProjectDB &db, const json &params, int log_id) {
       };
     std::vector<geometry::DetectedOpening> det;
     try {
-      det = geometry::detect_openings(ev, walls, st, o.openings);
+      det = geometry::detect_openings(ev, measured, st, o.openings);
     } catch (const std::invalid_argument &e) {
       return StageResult::invalid(e.what());
     }
@@ -1463,6 +1500,22 @@ StageResult run_openings(ProjectDB &db, const json &params, int log_id) {
     }
     info("openings: storey {}: {} point(s), {} opening(s)", st.idx,
          ev.points.size(), on_storey);
+  }
+  geometry::openings_onto_walls(found, measured, walls);
+  // Window alignment (reusex-z1v.12): facade columns across storeys, sill and
+  // head rows within one; the measured values stay in the metadata.
+  if (o.plan.plan_regularise) {
+    geometry::OpeningRegulariseResult reg;
+    try {
+      reg = geometry::regularise_openings(found, walls, storeys, o.plan);
+    } catch (const std::invalid_argument &e) {
+      return StageResult::invalid(e.what());
+    }
+    info("openings: plan regularised: {} window column(s), {} sill/head "
+         "row(s), {} opening(s) moved (max {:.3f} m), {} snap(s) skipped "
+         "(would leave the wall or overlap an opening)",
+         reg.columns, reg.rows, reg.openings_moved, reg.max_shift_m,
+         reg.skipped);
   }
   if (found.empty())
     warn("openings: no opening in {} wall(s) on {} storey(s) over {} points; "
