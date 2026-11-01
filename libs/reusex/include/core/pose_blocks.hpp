@@ -103,9 +103,11 @@ BlockSuggestions suggest_block_splits(const ProjectDB &db,
 
 using PoseBlock = ProjectDB::PoseBlockRecord;
 
-/// One block per session, named s0, s1, ... in node order; every session
-/// after the first starts detached (sessions are imported detached,
-/// reusex-y2lg.30).
+/// One block per session, named s0, s1, ... in node order. A block is
+/// `detached` when the working pose edits cut the odometry link at its
+/// start (a detach, or a session imported with --append, reusex-y2lg.30);
+/// every list below derives the flag that way, so undoing a detach
+/// re-attaches the block.
 std::vector<PoseBlock> default_pose_blocks(const ProjectDB &db);
 
 /// The stored blocks, plus a default block for every session none of them
@@ -116,6 +118,7 @@ std::vector<PoseBlock> pose_blocks(const ProjectDB &db);
 /// Check @p blocks against the project and store them. Every posed frame of
 /// each session must lie in exactly one block of that session, and a block
 /// may not reach into another session. Empty names become "<session>.<k>".
+/// `detached` is not taken from @p blocks (use detach_pose_block()).
 /// @returns the stored list (ids 1..n).
 /// @throws std::invalid_argument naming the block and the problem.
 std::vector<PoseBlock> set_pose_blocks(ProjectDB &db,
@@ -148,13 +151,16 @@ struct DetachResult {
   /// Loop edges (not rejected) from the detached block's session part to
   /// the rest; 0 means nothing holds it (warn).
   int holding_loops = 0;
+  /// The pose version ("detach" / "attach") the cut was recorded as: it
+  /// changes the working edits and an edge status, so it can be undone.
+  int64_t version_id = 0;
 };
 
 /// Detach (or with @p attach, re-attach) block @p block_id from the block
-/// before it. One transaction.
+/// before it. One transaction; records a pose version.
 /// @throws std::invalid_argument for an unknown id or the first frame.
-DetachResult detach_pose_block(ProjectDB &db, int block_id,
-                               bool attach = false);
+DetachResult detach_pose_block(ProjectDB &db, int block_id, bool attach = false,
+                               std::string_view author = "");
 
 /// The node ids of a block list's members that are posed frames, in order.
 std::vector<int> block_nodes(const ProjectDB &db, const PoseBlock &block);

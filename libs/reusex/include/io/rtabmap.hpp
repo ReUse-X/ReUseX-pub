@@ -33,6 +33,9 @@ struct ImportRtabmapOptions {
   bool append_session = false;
   /// Recorded on the pose version.
   std::string author;
+  /// The session's own file name for labels and provenance; empty = the
+  /// file's name (an upload is stored under a server-chosen name).
+  std::string source_name;
 };
 
 struct ImportRtabmapResult {

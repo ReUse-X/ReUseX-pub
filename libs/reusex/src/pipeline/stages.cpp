@@ -2094,9 +2094,10 @@ StageResult run_import_rtabmap(ProjectDB &db, const StageContext &ctx,
   }
   io::ImportRtabmapResult r;
   try {
-    r = io::import_rtabmap(
-        db, file,
-        {.append_session = o.append_session, .author = ctx.submitted_by});
+    r = io::import_rtabmap(db, file,
+                           {.append_session = o.append_session,
+                            .author = ctx.submitted_by,
+                            .source_name = o.source_name});
   } catch (const io::DuplicateSessionError &e) {
     return StageResult::invalid(e.what());
   }

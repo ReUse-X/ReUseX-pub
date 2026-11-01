@@ -99,6 +99,14 @@ void put_working_pose_edit(ProjectDB &db, const json &edit) {
   db.set_setting(kSettingWorkingPoseEdits, doc.dump(2));
 }
 
+std::set<std::string> working_pose_edit_ids(const ProjectDB &db) {
+  std::set<std::string> out;
+  const json doc = load(db); // not a temporary: the loop reads into it
+  for (const auto &e : doc["edits"])
+    out.insert(e["id"].get<std::string>());
+  return out;
+}
+
 bool remove_working_pose_edit(ProjectDB &db, std::string_view id) {
   json doc = load(db);
   auto &edits = doc["edits"];

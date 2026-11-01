@@ -127,7 +127,7 @@ rtabmap-reprocess; each starts **detached** where its own map put it:
 - the odometry link to the previous session is cut in the working pose
   edits (a `reject_edge` `detach-<a>-<b>`, project setting
   `pose_edits.working`), so optimize does not bridge it from the initial
-  poses; the session's default block is `detached`;
+  poses, so the session's block reads `detached`;
 - a pose version `import` is recorded (`pose_versions`).
 
 The job stage `import_rtabmap` reads `path` (absolute, or relative to the
@@ -198,9 +198,11 @@ only: `core/pose_blocks.hpp`, `core/pose_repair.hpp`,
 | Checks   | blocks partition each session's posed frames (no overlap, no gap, no block across sessions); a transform needs a non-empty selection and a rigid delta; undo / redo refuse when there is nothing to go to |
 
 - **Blocks** are stored per project; without stored blocks every session is
-  one block, every session after the first `detached`. Detach writes a
-  `reject_edge` edit for the odometry link at the joint and rejects the
-  stored row; `rebuild_odometry` keeps such a joint cut.
+  one block. A block is `detached` exactly when the working edits hold the
+  `reject_edge` `detach-<a>-<b>` for the odometry link at its start (a
+  detach, or a session imported with `--append`); detach also rejects the
+  stored row, and `rebuild_odometry` keeps such a joint cut. A detach /
+  attach is a pose version, so an undo re-attaches the block.
 - **Block transform** (`mode: reseed`, default): every posed frame's
   `initial_transform := transform`, then the moved poses go into both, and
   the odometry of every consecutive in-session pair is re-derived from the

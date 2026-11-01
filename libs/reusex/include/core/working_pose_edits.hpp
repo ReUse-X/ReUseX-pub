@@ -18,6 +18,7 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include <cstdint>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -37,6 +38,9 @@ void set_working_pose_edits(ProjectDB &db, std::string_view json);
 /// Add @p edit (a JSON object with `id` and `kind`), replacing the edit with
 /// the same id. @throws std::invalid_argument for a malformed edit.
 void put_working_pose_edit(ProjectDB &db, const nlohmann::json &edit);
+
+/// The ids of the stored edits.
+std::set<std::string> working_pose_edit_ids(const ProjectDB &db);
 
 /// Remove the edit @p id. @returns false when there is none.
 bool remove_working_pose_edit(ProjectDB &db, std::string_view id);

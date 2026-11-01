@@ -727,6 +727,9 @@ TEST_CASE("ImportRtabmapStage_Parameters_TableAndRefusals",
             JobStage::import_rtabmap,
             R"({"path": "s.db", "append_session": false})")) ==
         json{{"path", "s.db"}, {"append_session", false}});
+  CHECK(rtabmap_options_from_parameters(
+            R"({"path": "s.db", "source_name": "261020-145525.db"})")
+            .source_name == "261020-145525.db");
   CHECK_THROWS_AS(rtabmap_options_from_parameters("{}"), std::invalid_argument);
   CHECK_THROWS_AS(
       rtabmap_options_from_parameters(R"({"path": "s.db", "bogus": 1})"),

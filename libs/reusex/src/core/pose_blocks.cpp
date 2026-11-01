@@ -6,6 +6,7 @@
 
 #include "core/logging.hpp"
 #include "core/pose_graph.hpp"
+#include "core/pose_versions.hpp"
 #include "core/working_pose_edits.hpp"
 
 #include <fmt/format.h>
@@ -86,6 +87,20 @@ int frame_before(const Sessions &s, int node) {
     prev = id;
   }
   return prev;
+}
+
+/// A block is detached when the working edits cut the odometry link at its
+/// start (the detach-<a>-<b> reject_edge a detach or a session import
+/// writes): one source of truth, so undoing a detach (a pose version, which
+/// holds the edits) re-attaches the block too. The stored column is not
+/// read.
+void derive_detached(const ProjectDB &db, const Sessions &s,
+                     std::vector<PoseBlock> &blocks) {
+  const auto ids = working_pose_edit_ids(db);
+  for (auto &b : blocks) {
+    const int prev = frame_before(s, b.first_node);
+    b.detached = prev != 0 && ids.count(detach_edit_id(prev, b.first_node));
+  }
 }
 
 int scan_of(const Sessions &s, int node) {
@@ -371,11 +386,12 @@ std::vector<PoseBlock> default_pose_blocks(const ProjectDB &db) {
     b.scan_id = scan;
     b.first_node = ids.front();
     b.last_node = ids.back();
-    b.detached = s.ordinal(scan) > 0;
     b.name = default_name(s.ordinal(scan), 0, 1);
     out.push_back(b);
   }
-  return numbered(std::move(out));
+  out = numbered(std::move(out));
+  derive_detached(db, s, out);
+  return out;
 }
 
 std::vector<PoseBlock> pose_blocks(const ProjectDB &db) {
@@ -388,7 +404,9 @@ std::vector<PoseBlock> pose_blocks(const ProjectDB &db) {
   for (const auto &d : default_pose_blocks(db))
     if (!covered.count(d.scan_id))
       stored.push_back(d);
-  return numbered(std::move(stored));
+  stored = numbered(std::move(stored));
+  derive_detached(db, sessions_of(db), stored);
+  return stored;
 }
 
 std::vector<PoseBlock> set_pose_blocks(ProjectDB &db,
@@ -436,8 +454,6 @@ std::vector<PoseBlock> set_pose_blocks(ProjectDB &db,
           scan, missing.size(), missing.front(), missing.back()));
   }
   blocks = numbered(std::move(blocks));
-  if (!blocks.empty())
-    blocks.front().detached = false; // nothing before the first frame
   fill_names(blocks, s);
   db.replace_pose_blocks(blocks);
   return pose_blocks(db);
@@ -453,7 +469,6 @@ std::vector<PoseBlock> blocks_from_splits(const ProjectDB &db,
     PoseBlock cur;
     cur.scan_id = scan;
     cur.first_node = ids.front();
-    cur.detached = s.ordinal(scan) > 0;
     for (size_t k = 1; k < ids.size(); ++k) {
       if (!splits.count(ids[k]))
         continue;
@@ -468,6 +483,7 @@ std::vector<PoseBlock> blocks_from_splits(const ProjectDB &db,
   }
   out = numbered(std::move(out));
   fill_names(out, s);
+  derive_detached(db, s, out);
   return out;
 }
 
@@ -493,7 +509,6 @@ std::vector<PoseBlock> split_pose_block(ProjectDB &db, int node_id,
   const auto pos = std::lower_bound(ids.begin(), ids.end(), node_id);
   PoseBlock tail = *it;
   tail.first_node = node_id;
-  tail.detached = false;
   tail.name = std::move(name);
   it->last_node = *(pos - 1);
   blocks.push_back(tail);
@@ -532,7 +547,8 @@ std::vector<PoseBlock> rename_pose_block(ProjectDB &db, int block_id,
   return set_pose_blocks(db, std::move(blocks));
 }
 
-DetachResult detach_pose_block(ProjectDB &db, int block_id, bool attach) {
+DetachResult detach_pose_block(ProjectDB &db, int block_id, bool attach,
+                               std::string_view author) {
   const Sessions s = sessions_of(db);
   auto blocks = pose_blocks(db);
   auto it = std::find_if(blocks.begin(), blocks.end(),
@@ -549,11 +565,10 @@ DetachResult detach_pose_block(ProjectDB &db, int block_id, bool attach) {
         it->name));
   const bool same_session = scan_of(s, r.prev_node_id) == it->scan_id;
   const PoseBlock detached = *it;
-  it->detached = !attach;
   r.edit_id = detach_edit_id(r.prev_node_id, r.node_id);
 
   ProjectDB::Transaction tx(db);
-  r.blocks = set_pose_blocks(db, blocks);
+  ensure_pose_version(db, author);
   if (!attach) {
     put_working_pose_edit(
         db, reject_odometry_edit(
@@ -584,6 +599,18 @@ DetachResult detach_pose_block(ProjectDB &db, int block_id, bool attach) {
       db.upsert_pose_graph_edge(e, /*overwrite_rejected=*/true);
     }
   }
+  r.blocks = pose_blocks(db);
+  r.version_id = record_pose_version(
+      db, {.kind = attach ? "attach" : "detach",
+           .label = fmt::format("{} block '{}' at {}|{}",
+                                attach ? "re-attach" : "detach", detached.name,
+                                r.prev_node_id, r.node_id),
+           .author = std::string(author),
+           .metrics_json = json{{"block_id", block_id},
+                                {"prev_node_id", r.prev_node_id},
+                                {"node_id", r.node_id},
+                                {"edit_id", r.edit_id}}
+                               .dump()});
   tx.commit();
 
   for (const auto &e : db.list_pose_graph_edges()) {
@@ -682,7 +709,8 @@ json to_json(const DetachResult &r) {
           {"node_id", r.node_id},
           {"edit_id", r.edit_id},
           {"edge_rejected", r.edge_rejected},
-          {"holding_loops", r.holding_loops}};
+          {"holding_loops", r.holding_loops},
+          {"version_id", r.version_id}};
 }
 
 PoseBlock pose_block_from_json(const json &j) {

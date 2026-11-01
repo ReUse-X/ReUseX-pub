@@ -335,6 +335,11 @@ const std::vector<RtabmapParameter> &rtabmap_parameter_table() {
        "Append as one more detached session: refuse one already imported, "
        "odometry from the imported poses, a pose version.",
        RTABMAP(append_session), std::nullopt, std::nullopt},
+      {"source_name", "--source-name", "Session name",
+       "The session's own file name, for the pose version's label and the "
+       "scan's provenance (an upload is stored under a server-chosen name).",
+       +[](RtabmapStageOptions &o) -> std::string & { return o.source_name; },
+       std::nullopt, std::nullopt},
   };
   return table;
 }

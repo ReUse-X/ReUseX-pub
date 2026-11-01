@@ -117,6 +117,8 @@ struct RtabmapStageOptions {
   /// io::ImportRtabmapOptions::append_session; on by default for a job: the
   /// web editor appends sessions one by one.
   bool append_session = true;
+  /// io::ImportRtabmapOptions::source_name: the uploaded file's own name.
+  std::string source_name;
 };
 
 using RtabmapParameter = ImportParameter<RtabmapStageOptions>;

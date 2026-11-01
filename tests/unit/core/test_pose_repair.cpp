@@ -218,7 +218,9 @@ TEST_CASE("PoseBlocks_SplitMergeRenameDetach", "[core][pose_repair]") {
   CHECK(blocks[0].name == "s0");
   CHECK_FALSE(blocks[0].detached);
   CHECK(blocks[1].name == "s1");
-  CHECK(blocks[1].detached); // sessions start detached
+  // No cut in the working edits (a plain import): optimize bridges the
+  // sessions, so the block is not detached.
+  CHECK_FALSE(blocks[1].detached);
 
   blocks = core::split_pose_block(db, 21, "far end");
   REQUIRE(blocks.size() == 3);
@@ -251,6 +253,16 @@ TEST_CASE("PoseBlocks_SplitMergeRenameDetach", "[core][pose_repair]") {
   CHECK(edits["edits"][0]["id"] == "detach-20-21");
   CHECK(edits["edits"][0]["kind"] == "reject_edge");
   CHECK(db.pose_graph_edge(20, 21, "odometry")->status == "rejected");
+  // A detach is a pose version: undo puts edge and edit back.
+  REQUIRE(d.version_id > 0);
+  CHECK(db.pose_version(d.version_id)->kind == "detach");
+  core::undo_pose_version(db);
+  CHECK(db.pose_graph_edge(20, 21, "odometry")->status == "auto");
+  CHECK(json::parse(core::working_pose_edits(db))["edits"].empty());
+  CHECK_FALSE(core::pose_blocks(db)[1].detached); // the undo re-attached it
+  core::redo_pose_version(db);
+  CHECK(db.pose_graph_edge(20, 21, "odometry")->status == "rejected");
+  CHECK(core::pose_blocks(db)[1].detached);
 
   // Re-attach puts the odometry back from the initial poses.
   core::detach_pose_block(db, 2, /*attach=*/true);
@@ -271,7 +283,7 @@ TEST_CASE("PoseBlocks_SplitMergeRenameDetach", "[core][pose_repair]") {
   REQUIRE(from.size() == 4);
   CHECK(from[1].first_node == 10);
   CHECK(from[2].first_node == 41);
-  CHECK(from[2].detached);
+  CHECK_FALSE(from[2].detached);
   CHECK(from[3].first_node == 50);
 }
 
@@ -588,4 +600,31 @@ TEST_CASE("FileFingerprint_ContentNotName_FindsTheScan",
   const auto scan =
       db.create_scan("x.db", json{{"file_fingerprint", fa}}.dump());
   CHECK(core::scan_with_fingerprint(db, fa) == scan.id);
+}
+
+TEST_CASE("PoseVersionDiff_UnchangedFloatRotations_AreNotMoves",
+          "[core][pose_repair]") {
+  // RTAB-Map stores floats: a rotation that is not exactly orthonormal must
+  // not show up as a 0.01 deg "move" when it did not change at all.
+  TempPath tmp("test_pose_version_diff_float");
+  ProjectDB db(tmp.path);
+  db.create_scan("a.db");
+  for (int i = 1; i <= 6; ++i) {
+    auto p = pose_at(0.1 * i, 0, 0, 37.0 + i);
+    for (int k : {0, 1, 2, 4, 5, 6, 8, 9, 10})
+      p[static_cast<size_t>(k)] *= 1.0 - 1e-8; // RTAB-Map's float drift
+    add_frame(db, i, 1, i, p);
+  }
+  core::BlockTransformRequest req;
+  req.node_ranges = {{5, 6}};
+  req.delta.xyz = {0.0, 0.0, 0.5};
+  req.blend_frames = 0;
+  const auto r = core::apply_block_transform(db, req);
+  const auto versions = db.pose_versions();
+  REQUIRE(versions.size() == 2);
+  const auto moves =
+      core::diff_pose_versions(db, versions[0].id, versions[1].id);
+  REQUIRE(moves.size() == 2);
+  CHECK(moves[0].shift_m == Approx(0.5));
+  CHECK(r.frames_moved == 2);
 }

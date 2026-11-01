@@ -145,11 +145,15 @@ double translation_change(const std::array<double, 16> &a,
 
 double rotation_change_deg(const std::array<double, 16> &a,
                            const std::array<double, 16> &b) {
-  const Eigen::Matrix3d Ra = pg::matrix_from_row_major(a).topLeftCorner<3, 3>();
-  const Eigen::Matrix3d Rb = pg::matrix_from_row_major(b).topLeftCorner<3, 3>();
-  const double c =
-      std::clamp(((Ra.transpose() * Rb).trace() - 1.0) / 2.0, -1.0, 1.0);
-  return std::acos(c) * 180.0 / M_PI;
+  if (a == b)
+    return 0.0;
+  // Through quaternions: RTAB-Map's float poses are not exactly orthonormal,
+  // and acos of the trace of Ra^T Rb reads that as a ~0.01 deg turn.
+  const Eigen::Quaterniond qa(
+      Eigen::Matrix3d(pg::matrix_from_row_major(a).topLeftCorner<3, 3>()));
+  const Eigen::Quaterniond qb(
+      Eigen::Matrix3d(pg::matrix_from_row_major(b).topLeftCorner<3, 3>()));
+  return qa.normalized().angularDistance(qb.normalized()) * 180.0 / M_PI;
 }
 
 /// The working edits; an empty setting (a restored "none") is none.
@@ -427,6 +431,8 @@ std::vector<FrameMove> diff_pose_versions(const ProjectDB &db, int64_t a,
   for (const auto &f : sb.frames) {
     auto it = in_a.find(f.node_id);
     if (it == in_a.end())
+      continue;
+    if (it->second->transform == f.transform)
       continue;
     FrameMove m;
     m.node_id = f.node_id;

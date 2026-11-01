@@ -100,6 +100,9 @@ ImportRtabmapResult import_rtabmap(ProjectDB &db,
              options.append_session ? " (append as a detached session)" : "");
   core::stopwatch timer;
   ImportRtabmapResult result;
+  const std::string source_name = options.source_name.empty()
+                                      ? rtabmap_db_path.filename().string()
+                                      : options.source_name;
 
   // ── Initialise RTABMap and load the optimised graph ──────────────
   rtabmap::ParametersMap params;
@@ -155,6 +158,7 @@ ImportRtabmapResult import_rtabmap(ProjectDB &db,
       rtabmap_db_path.string(),
       nlohmann::json{{"importer", "rtabmap"},
                      {"append_session", options.append_session},
+                     {"source_name", source_name},
                      {"fingerprint", fingerprint},
                      {std::string(core::kProvenanceFileFingerprint), file_fp}}
           .dump());
@@ -370,24 +374,24 @@ ImportRtabmapResult import_rtabmap(ProjectDB &db,
           db, core::reject_odometry_edit(
                   previous_last, result.first_node,
                   fmt::format("session {} imported detached ({})", scan.id,
-                              rtabmap_db_path.filename().string())));
+                              source_name)));
       result.detach_edit_id =
           core::detach_edit_id(previous_last, result.first_node);
     }
     result.version_id = core::record_pose_version(
-        db, {.kind = "import",
-             .label = fmt::format("import {} as session {}",
-                                  rtabmap_db_path.filename().string(), scan.id),
-             .author = options.author,
-             .metrics_json =
-                 nlohmann::json{{"scan_id", scan.id},
-                                {"frames", imported_count},
-                                {"first_node", result.first_node},
-                                {"last_node", result.last_node},
-                                {"odometry_rebuilt", odo.written},
-                                {"odometry_replaced", odo.replaced_imported},
-                                {"loop_edges", result.loop_edges}}
-                     .dump()});
+        db,
+        {.kind = "import",
+         .label = fmt::format("import {} as session {}", source_name, scan.id),
+         .author = options.author,
+         .metrics_json =
+             nlohmann::json{{"scan_id", scan.id},
+                            {"frames", imported_count},
+                            {"first_node", result.first_node},
+                            {"last_node", result.last_node},
+                            {"odometry_rebuilt", odo.written},
+                            {"odometry_replaced", odo.replaced_imported},
+                            {"loop_edges", result.loop_edges}}
+                 .dump()});
     tx.commit();
     core::info("Session {} appended detached: nodes {}..{}, {} odometry "
                "edges from the imported poses, pose version {}",
