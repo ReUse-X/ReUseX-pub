@@ -11,9 +11,12 @@
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
 #include <reusex/core/space_polygon.hpp>
+#include <reusex/core/validate.hpp>
 #include <reusex/io/solid_model_json.hpp>
 
 #include "../../support/temp_path.hpp"
+
+#include <sqlite3.h>
 
 #include <cmath>
 #include <limits>
@@ -286,4 +289,100 @@ TEST_CASE("LoadSolidModel_ReadsSpaces_SkipsOrphanBoundaries",
   CHECK(m.has_spaces());
   REQUIRE(m.space_boundaries.size() == 1);
   CHECK(m.space_boundaries[0].wall == w.guid);
+}
+
+TEST_CASE("Spaces_Save_LockedRecordReplacesTheLockedRow",
+          "[projectdb][spaces]") {
+  // reusex-djf: the spaces stage matched a locked space and carries the
+  // lock over to the re-detected outline: the row is replaced in place
+  // (same id), and so are its boundaries.
+  TempPath tmp("test_spaces_locked_replace");
+  ProjectDB db(tmp.path);
+  const auto w = wall(db);
+  auto keep = space(db, "k", 0.0);
+  keep.locked = true;
+  keep.source = "manual";
+  keep.name = "Kitchen";
+  db.save_spaces({keep}, {{keep.guid, w.guid, "a", 0.0, 4.0}});
+  const auto id = db.spaces().at(0).id;
+
+  auto redetected = keep;
+  redetected.polygon = square(0.3, 0.0, 4.0);
+  redetected.room_label = 7;
+  CHECK(db.save_spaces({redetected}, {{keep.guid, w.guid, "b", 0.3, 4.3}}) ==
+        1);
+  const auto rows = db.spaces();
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].id == id);
+  CHECK(rows[0].name == "Kitchen");
+  CHECK(rows[0].locked);
+  CHECK(rows[0].room_label == 7);
+  CHECK(rows[0].polygon.outer == redetected.polygon.outer);
+  const auto sb = db.space_boundaries();
+  REQUIRE(sb.size() == 1);
+  CHECK(sb[0].side == "b");
+}
+
+TEST_CASE("Spaces_Update_RenamesInPlaceKeepsBoundaries",
+          "[projectdb][spaces]") {
+  TempPath tmp("test_spaces_update");
+  ProjectDB db(tmp.path);
+  const auto w = wall(db);
+  const auto a = space(db, "a", 0.0);
+  db.save_spaces({a}, {{a.guid, w.guid, "a", 0.0, 4.0}});
+  auto renamed = db.spaces().at(0);
+  renamed.name = "S0-01 Depot";
+  renamed.kind = "unknown";
+  renamed.source = "manual";
+  renamed.locked = true;
+  CHECK(db.update_spaces({renamed}) == 1);
+  const auto rows = db.spaces();
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].id == renamed.id);
+  CHECK(rows[0].name == "S0-01 Depot");
+  CHECK(rows[0].kind == "unknown");
+  CHECK(rows[0].locked);
+  CHECK(db.space_boundaries().size() == 1);
+
+  auto bad = renamed;
+  bad.kind = "stair";
+  CHECK_THROWS_AS(db.update_spaces({bad}), std::invalid_argument);
+  auto missing = renamed;
+  missing.guid = "not-a-stored-guid";
+  CHECK_THROWS_AS(db.update_spaces({missing}), std::invalid_argument);
+  CHECK(db.spaces().at(0).name == "S0-01 Depot");
+}
+
+TEST_CASE("Spaces_Save_DeletesDanglingBoundaries", "[projectdb][spaces]") {
+  // reusex-932g: a script deleted space rows with foreign keys off, leaving
+  // their boundaries behind; the next save removes them.
+  TempPath tmp("test_spaces_dangling");
+  {
+    ProjectDB db(tmp.path);
+    const auto w = wall(db);
+    const auto a = space(db, "a", 0.0);
+    const auto b = space(db, "b", 4.0);
+    db.save_spaces({a, b}, {{a.guid, w.guid, "a", 0.0, 4.0},
+                            {b.guid, w.guid, "a", 4.0, 8.0}});
+  }
+  {
+    sqlite3 *raw = nullptr;
+    REQUIRE(sqlite3_open(tmp.path.string().c_str(), &raw) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(raw,
+                         "PRAGMA foreign_keys = OFF; DELETE FROM spaces WHERE "
+                         "name = 'Space b';",
+                         nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+  }
+  ProjectDB db(tmp.path);
+  CHECK(db.dangling_space_boundaries() == 1);
+  CHECK(db.space_boundaries().size() == 1); // the join hides it
+  std::vector<reusex::core::ValidationIssue> issues;
+  reusex::core::check_dangling_space_boundaries(db, issues);
+  REQUIRE(issues.size() == 1);
+  CHECK(issues[0].check == "dangling_space_boundaries");
+  const auto a = db.spaces().at(0);
+  db.save_spaces({a}, db.space_boundaries());
+  CHECK(db.dangling_space_boundaries() == 0);
+  CHECK(db.space_boundaries().size() == 1);
 }

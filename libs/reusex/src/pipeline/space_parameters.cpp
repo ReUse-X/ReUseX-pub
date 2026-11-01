@@ -155,6 +155,11 @@ const std::vector<SpaceParameter> &space_parameter_table() {
       {"guid_min_area_ratio", "--guid-min-area-ratio", "Same space area ratio",
        "... and whose area is within this ratio (smaller / larger).",
        IDENT(min_area_ratio), 0.0, 1.0},
+      {"guid_min_overlap", "--guid-min-overlap", "Same space overlap",
+       "Or whose footprint, in world coordinates, overlaps it by this share "
+       "of the larger one (then, among the rest, of the smaller one). A "
+       "match takes a hand-set name, kind and lock with it.",
+       IDENT(min_overlap), 0.0, 1.0},
   };
   return table;
 }

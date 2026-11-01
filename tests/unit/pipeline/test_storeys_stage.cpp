@@ -11,6 +11,7 @@
 
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
+#include <reusex/core/space_identity.hpp>
 #include <reusex/core/stage_contract.hpp>
 #include <reusex/core/storey_identity.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
@@ -271,4 +272,77 @@ TEST_CASE("StoreysStage_NewLowerStorey_KeepsTheOldStoreysGuids",
   CHECK(after[0].guid != before[0].guid);
   CHECK(after[0].guid != before[1].guid);
   CHECK(after[1].z_floor == Approx(3.0).margin(0.02));
+}
+
+TEST_CASE("StoreysStage_Redetected_CarriesSpacesIntoTheNewFrames",
+          "[pipeline][stages][storeys][spaces]") {
+  // reusex-djf: a space is stored in its storey's level frame. A re-run that
+  // finds a basement moves every storey up one idx and the frame origin 3 m
+  // down; the stored spaces must follow, through world coordinates, keeping
+  // their names and locks.
+  TempPath project("test_storeys_stage_spaces");
+  ProjectDB db(project.path);
+  seed_two_storeys(db);
+  REQUIRE(run(db, project).ok);
+  const auto before = db.storeys();
+  REQUIRE(before.size() == 2);
+
+  core::SpaceRecord named;
+  named.guid = core::deterministic_guid(db.project_guid(), "spaces/test/a");
+  named.storey = 1;
+  named.name = "S1-01 Kontor";
+  named.kind = "room";
+  named.source = "manual";
+  named.locked = true;
+  named.polygon.outer = {{1, 1}, {5, 1}, {5, 4}, {1, 4}};
+  named.z_floor = before[1].z_floor;
+  named.z_ceiling = before[1].z_ceiling;
+  named.area = 12.0;
+  auto plain = named;
+  plain.guid = core::deterministic_guid(db.project_guid(), "spaces/test/b");
+  plain.storey = 0;
+  plain.name = "Space 1";
+  plain.source = "detected";
+  plain.locked = false;
+  plain.z_floor = before[0].z_floor;
+  plain.z_ceiling = before[0].z_ceiling;
+  db.save_spaces({named, plain}, {});
+  const auto world_named = core::space_polygon_world(named, before[1]);
+  const auto world_plain = core::space_polygon_world(plain, before[0]);
+
+  seed_two_storeys(db, /*with_basement=*/true);
+  const auto r = run(db, project);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  CHECK(r.message.find("2 space(s) moved") != std::string::npos);
+  const auto after = db.storeys();
+  REQUIRE(after.size() == 3);
+
+  const auto rows = db.spaces();
+  REQUIRE(rows.size() == 2); // moved, never duplicated
+  const auto n = db.space_by_guid(named.guid);
+  const auto p = db.space_by_guid(plain.guid);
+  REQUIRE(n.has_value());
+  REQUIRE(p.has_value());
+  CHECK(n->storey == 2);
+  CHECK(p->storey == 1);
+  CHECK(n->name == "S1-01 Kontor");
+  CHECK(n->locked);
+  CHECK(n->source == "manual");
+  CHECK(n->z_floor == Approx(after[2].z_floor).margin(1e-6));
+  // Same place in the world, new numbers in the level frame.
+  const auto wn = core::space_polygon_world(*n, after[2]);
+  const auto wp = core::space_polygon_world(*p, after[1]);
+  for (size_t i = 0; i < 4; ++i) {
+    CHECK(wn.outer[i][0] == Approx(world_named.outer[i][0]).margin(1e-6));
+    CHECK(wn.outer[i][1] == Approx(world_named.outer[i][1]).margin(1e-6));
+    CHECK(wp.outer[i][0] == Approx(world_plain.outer[i][0]).margin(1e-6));
+    CHECK(wp.outer[i][1] == Approx(world_plain.outer[i][1]).margin(1e-6));
+  }
+
+  // A re-run that changes nothing moves nothing.
+  const auto again = run(db, project);
+  REQUIRE(again.ok);
+  CHECK(again.message.find("0 space(s) moved") != std::string::npos);
+  CHECK(db.space_by_guid(named.guid)->polygon.outer == n->polygon.outer);
 }
