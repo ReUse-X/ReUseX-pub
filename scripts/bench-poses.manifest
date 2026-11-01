@@ -30,3 +30,7 @@ office_corridor    synthetic  tests/fixtures/scans/office_corridor.rux      -   
 # and committed under tests/fixtures/pose_reference/<scan>.trajectory.tum.
 house1             local      $REUSEX_HOUSE1_RUX                            tests/fixtures/pose_reference/house1.trajectory.tum    none,optimize,manhattan,register,opt-register
 house2             local      $REUSEX_HOUSE2_RUX                            tests/fixtures/pose_reference/house2.trajectory.tum    none,optimize,manhattan,register,opt-register
+# newoffice: $REUSEX_NEWOFFICE_RUX as built for scripts/bench-solid.manifest
+# (reference poses, the 102 ORB loop edges rejected), so every config solves
+# without the loops; 'none' is the reference itself (ATE 0).
+newoffice          local      $REUSEX_NEWOFFICE_RUX                         tests/fixtures/pose_reference/newoffice.trajectory.tum none,optimize,manhattan,register,opt-register

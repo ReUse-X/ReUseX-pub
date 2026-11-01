@@ -341,3 +341,49 @@ TEST_CASE("PoseEdits_DesignDocExamples_PassReaderAndSchema",
   CHECK(s.validate(
             nlohmann::json::parse(io::pose_edits_to_json(all_kinds()))) == "");
 }
+
+// ── the committed pose references (reusex-rcv.1.8) ──────────────────────────
+
+TEST_CASE("PoseReferenceFixtures_AreValidDraftReferences", "[io][pose_edits]") {
+  // Each scan's reference is two files that must stay together: the edits
+  // (provenance, replayable with `rux optimize --edits`) and the frozen
+  // trajectory. Both carry a DRAFT header until a maintainer accepts them.
+  struct Ref {
+    std::string scan;
+    std::size_t frames;
+  };
+  const auto s = schema();
+  for (const Ref &r : {Ref{"house2", 384}, Ref{"newoffice", 3876}}) {
+    INFO(r.scan);
+    const auto dir =
+        reusex::test_support::source_dir() / "tests/fixtures/pose_reference";
+    const auto edits_path = dir / (r.scan + ".edits.yaml");
+    const std::string text = slurp(edits_path.string());
+    const auto d = io::read_pose_edits(edits_path);
+    CHECK_FALSE(d.edits.empty());
+    CHECK(s.validate(io::detail::yaml_text_to_json(text)) == "");
+    CHECK_THAT(text, ContainsSubstring("DRAFT"));
+    CHECK_THAT(text, ContainsSubstring("Replay"));
+
+    std::ifstream tum(dir / (r.scan + ".trajectory.tum"));
+    REQUIRE(tum.good());
+    std::string line;
+    std::size_t poses = 0;
+    bool draft = false;
+    while (std::getline(tum, line)) {
+      if (line.rfind('#', 0) == 0) {
+        draft = draft || line.find("DRAFT") != std::string::npos;
+        continue;
+      }
+      if (line.empty())
+        continue;
+      std::istringstream row(line);
+      double v[8];
+      for (double &x : v)
+        CHECK(static_cast<bool>(row >> x));
+      ++poses;
+    }
+    CHECK(draft);
+    CHECK(poses == r.frames);
+  }
+}
