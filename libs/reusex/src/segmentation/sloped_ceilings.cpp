@@ -144,8 +144,7 @@ SlopedCeilingStats fit_sloped_ceilings(
   for (const auto &st : storeys) {
     std::vector<std::size_t> mine;
     for (std::size_t i = 0; i < spaces.size(); ++i)
-      if (spaces[i].storey == st.idx && !spaces[i].locked &&
-          spaces[i].polygon.outer.size() >= 3)
+      if (spaces[i].storey == st.idx && spaces[i].polygon.outer.size() >= 3)
         mine.push_back(i);
     if (mine.empty())
       continue;

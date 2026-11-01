@@ -21,6 +21,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 using Catch::Approx;
 using reusex::ProjectDB;
@@ -229,4 +231,22 @@ TEST_CASE("MigrationV39_V38Project_KeepsRowsFlat",
   s.ceiling_planes = attic(db).ceiling_planes;
   db.save_spaces({s}, {}, -1);
   CHECK(db.spaces()[0].ceiling_planes.size() == 2);
+}
+
+TEST_CASE("SlopedCeiling_MapCeilingPlane_FollowsAFrameChange",
+          "[core][sloped]") {
+  // 90 deg yaw about z plus a shift (1, 2, 0.5): a plane rising along +y
+  // rises along -x afterwards, and every point of it maps onto the new one.
+  const std::array<double, 16> m{0, -1, 0, 1,   1, 0, 0, 2,
+                                 0, 0,  1, 0.5, 0, 0, 0, 1};
+  const CeilingPlane p{{0.0, 0.0, 1.15}, {0.0, 0.7}};
+  const CeilingPlane q = reusex::core::map_ceiling_plane(p, m);
+  CHECK(q.slope[0] == Approx(-0.7));
+  CHECK(q.slope[1] == Approx(0.0).margin(1e-12));
+  for (const auto &[x, y] :
+       std::vector<std::pair<double, double>>{{0, 0}, {2, 3}, {-1, 4}}) {
+    const double z = p.z_at(x, y);
+    // (x, y, z) -> (-y + 1, x + 2, z + 0.5)
+    CHECK(q.z_at(-y + 1, x + 2) == Approx(z + 0.5));
+  }
 }

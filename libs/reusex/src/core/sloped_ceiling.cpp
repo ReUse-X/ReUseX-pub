@@ -55,6 +55,29 @@ double wall_top_at(const WallRecord &wall, double s) {
   return std::min(cap, z);
 }
 
+CeilingPlane map_ceiling_plane(const CeilingPlane &plane,
+                               const std::array<double, 16> &m) {
+  const auto on = [&](double dx, double dy) {
+    const double x = plane.at[0] + dx, y = plane.at[1] + dy;
+    const double z = plane.z_at(x, y);
+    std::array<double, 3> q{};
+    for (std::size_t r = 0; r < 3; ++r)
+      q[r] = m[4 * r] * x + m[4 * r + 1] * y + m[4 * r + 2] * z + m[4 * r + 3];
+    return q;
+  };
+  const auto p0 = on(0, 0), p1 = on(1, 0), p2 = on(0, 1);
+  const std::array<double, 3> u{p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+  const std::array<double, 3> v{p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+  const double nx = u[1] * v[2] - u[2] * v[1];
+  const double ny = u[2] * v[0] - u[0] * v[2];
+  const double nz = u[0] * v[1] - u[1] * v[0];
+  CeilingPlane out = plane;
+  out.at = p0;
+  if (std::abs(nz) > 1e-12)
+    out.slope = {-nx / nz, -ny / nz};
+  return out;
+}
+
 std::string check_ceiling_planes(const SpaceRecord &space) {
   const double max_grad =
       std::tan(kMaxCeilingSlopeDeg * std::numbers::pi / 180.0);

@@ -96,6 +96,12 @@ void check_unstamped_semantic_clouds(const ProjectDB &db,
 void check_stale_cloud_poses(const ProjectDB &db,
                              std::vector<ValidationIssue> &out);
 
+/// space_boundaries rows whose space row is gone (a tool deleted spaces with
+/// foreign keys off, reusex-932g). Reported as a warning; save_spaces()
+/// deletes them.
+void check_dangling_space_boundaries(const ProjectDB &db,
+                                     std::vector<ValidationIssue> &out);
+
 /// Run every check and aggregate the findings.
 ValidationReport validate_project(const ProjectDB &db);
 

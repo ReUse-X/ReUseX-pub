@@ -32,13 +32,18 @@ bool InputHandler::is_stdin_available() {
 
 InputSource
 InputHandler::detect_source(const std::optional<std::string> &inline_value) {
-  if (is_stdin_available()) {
-    return InputSource::Stdin;
-  } else if (inline_value.has_value() && !inline_value->empty()) {
-    return InputSource::Inline;
-  } else {
-    return InputSource::None;
-  }
+  return detect_source(inline_value, is_stdin_available());
+}
+
+InputSource
+InputHandler::detect_source(const std::optional<std::string> &inline_value,
+                            bool stdin_redirected) {
+  // A positional value always wins (reusex-69c): scripts, agents and CI run
+  // with a non-TTY stdin that holds nothing, so preferring stdin there
+  // silently wrote an empty value. "-" asks for stdin explicitly.
+  if (inline_value.has_value())
+    return *inline_value == "-" ? InputSource::Stdin : InputSource::Inline;
+  return stdin_redirected ? InputSource::Stdin : InputSource::None;
 }
 
 std::vector<uint8_t> InputHandler::read_binary_from_stdin() {
@@ -102,8 +107,8 @@ InputHandler::read_input(const std::optional<std::string> &inline_value) {
   case InputSource::None:
   default:
     throw std::runtime_error(
-        "No input provided. Use shell redirection (< file), pipe (cat file |), "
-        "or provide an inline value.");
+        "No input provided. Give the value as an argument, or pipe it in "
+        "(cat file | rux set <path>, or rux set <path> - < file).");
   }
 }
 

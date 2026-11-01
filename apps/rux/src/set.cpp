@@ -36,11 +36,16 @@ PATH SYNTAX:
   clouds.NAME.PROPERTY     Set cloud metadata property
   meshes.NAME.PROPERTY     Set mesh metadata property
   passports.GUID.PROPERTY  Set passport field value
+  spaces.SPACE.PROPERTY    Name / relabel / (un)lock a space (name, kind,
+                           locked); SPACE = guid, row id, [index] or name
+
+  rux set spaces.<guid>.name "S1-04 Kontor"  # Name a space (locks it)
+  rux set spaces.<guid>.kind corridor     # room|corridor|open_plan|unknown
 
 VALUE INPUT:
-  - Positional argument: rux set path "value"
+  - Positional argument: rux set path "value" (always wins over stdin)
   - Stdin (JSON): echo '{"key":"val"}' | rux set path
-  - Stdin preferred for complex JSON structures
+  - Stdin explicitly: rux set path - < file.json
 
 NOTES:
   - Path must specify exact property to set

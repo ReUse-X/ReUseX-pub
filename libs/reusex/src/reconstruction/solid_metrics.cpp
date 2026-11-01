@@ -690,18 +690,13 @@ core::SolidModel to_reference_frames(const core::SolidModel &det,
     }
     m.z_floor = (T * Eigen::Vector3d(cx, cy, sp.z_floor)).z();
     m.z_ceiling = (T * Eigen::Vector3d(cx, cy, sp.z_ceiling)).z();
-    // Each sloped ceiling plane through three of its points (reusex-546).
-    for (auto &pl : m.ceiling_planes) {
-      const auto on = [&](double dx, double dy) {
-        const double x = pl.at[0] + dx, y = pl.at[1] + dy;
-        return Eigen::Vector3d(T * Eigen::Vector3d(x, y, pl.z_at(x, y)));
-      };
-      const Eigen::Vector3d p0 = on(0, 0);
-      const Eigen::Vector3d nrm = (on(1, 0) - p0).cross(on(0, 1) - p0);
-      pl.at = {p0.x(), p0.y(), p0.z()};
-      if (std::abs(nrm.z()) > 1e-12)
-        pl.slope = {-nrm.x() / nrm.z(), -nrm.y() / nrm.z()};
-    }
+    // Sloped ceiling planes move with the polygon (reusex-546).
+    std::array<double, 16> tm{};
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        tm[static_cast<std::size_t>(4 * i + j)] = T.matrix()(i, j);
+    for (auto &pl : m.ceiling_planes)
+      pl = core::map_ceiling_plane(pl, tm);
     auto map_ring = [&](std::vector<core::PlanPoint> &ring) {
       for (auto &q : ring) {
         const Eigen::Vector3d p = T * Eigen::Vector3d(q[0], q[1], sp.z_floor);

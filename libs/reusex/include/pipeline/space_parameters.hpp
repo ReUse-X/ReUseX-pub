@@ -32,7 +32,7 @@ namespace reusex::pipeline {
 struct SpaceStageOptions {
   geometry::SpacesOptions spaces;
   /// GUID matching against the stored spaces (keys guid_match_m,
-  /// guid_min_area_ratio).
+  /// guid_min_area_ratio, guid_min_overlap).
   core::SpaceIdentityOptions identity;
 };
 

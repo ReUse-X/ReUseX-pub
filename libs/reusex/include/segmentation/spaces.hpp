@@ -293,8 +293,10 @@ struct SlopedCeilingStats {
 /// that would take the ceiling within 0.1 m of the floor at a polygon
 /// vertex is dropped. A space that takes a plane gets ceiling_planes,
 /// z_ceiling = the cap, its volume integrated over the raster, and
-/// "ceiling_fit" in its metadata; the others are left as they are, and so
-/// are locked spaces.
+/// "ceiling_fit" in its metadata; the others are left as they are. Every
+/// space handed in is fitted, locked or not: the spaces stage hands it the
+/// detected spaces (one that carries a stored row's lock has the new outline
+/// and heights too, reusex-djf), not the locked rows it keeps as stored.
 /// @throws std::invalid_argument when cloud, normals and labels sizes differ
 ///         or ceiling_labels and ceiling_storeys do.
 SlopedCeilingStats fit_sloped_ceilings(

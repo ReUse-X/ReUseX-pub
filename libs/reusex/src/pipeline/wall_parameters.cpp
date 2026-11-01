@@ -23,6 +23,8 @@ using json = nlohmann::json;
   +[](WallStageOptions &o) -> decltype(auto) { return (o.walls.f); }
 #define IDENT(f)                                                               \
   +[](WallStageOptions &o) -> decltype(auto) { return (o.identity.f); }
+#define PLAN(f)                                                                \
+  +[](WallStageOptions &o) -> decltype(auto) { return (o.plan.f); }
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
@@ -236,6 +238,43 @@ const std::vector<WallParameter> &wall_parameter_table() {
       {"free_top_quantile", "--free-top-quantile", "Free-standing top quantile",
        "The quantile of a wall's evidence heights taken as its top.",
        WALL(free_top_quantile), 0.0, 1.0},
+      // --- plan regularisation (geometry::PlanRegulariseOptions)
+      {"plan_regularise", "--no-plan-regularise", "Regularise the plan",
+       "Straighten the plan: walls onto the Manhattan grid, walls that "
+       "continue each other or stand over each other on adjacent storeys "
+       "onto one shared line; the measured axis is kept in the metadata.",
+       PLAN(plan_regularise), std::nullopt, std::nullopt},
+      {"plan_angle_deg", "--plan-angle", "Shared line angle [deg]",
+       "Walls share a line only when parallel within this.",
+       PLAN(plan_angle_deg), 0.0, 44.0},
+      {"plan_collinear_m", "--plan-collinear", "Collinear snap [m]",
+       "Walls of one storey that continue each other share a line when a "
+       "face seen from the same side lies within this of the other's.",
+       PLAN(plan_collinear_m), 0.0, 1.0},
+      {"plan_collinear_gap_m", "--plan-collinear-gap", "Collinear gap [m]",
+       "... with at most this between them along the axis.",
+       PLAN(plan_collinear_gap_m), 0.0, 100.0},
+      {"plan_max_overlap_m", "--plan-max-overlap", "Side-by-side overlap [m]",
+       "Two walls of one storey overlapping along the axis by more than this "
+       "are different walls and never share a line.",
+       PLAN(plan_max_overlap_m), 0.0, 10.0},
+      {"plan_stack", "--no-plan-stack", "Stack storeys",
+       "Walls standing over each other on adjacent storeys share a line.",
+       PLAN(plan_stack), std::nullopt, std::nullopt},
+      {"plan_stack_m", "--plan-stack", "Stack snap [m]",
+       "... when a same-side face lies within this of the other's ...",
+       PLAN(plan_stack_m), 0.0, 1.0},
+      {"plan_stack_min_overlap_m", "--plan-stack-overlap", "Stack overlap [m]",
+       "... and they overlap by at least this.", PLAN(plan_stack_min_overlap_m),
+       0.0, 100.0},
+      {"plan_grid_deg", "--plan-grid", "Grid snap [deg]",
+       "Walls within this of the project's Manhattan grid turn onto it "
+       "(0 = off).",
+       PLAN(plan_grid_deg), 0.0, 44.0},
+      {"plan_round_m", "--plan-round", "Round dimensions [m]",
+       "Round each wall line's offset to a multiple of this, e.g. 0.01 or "
+       "0.05 (0 = off).",
+       PLAN(plan_round_m), 0.0, 1.0},
       // --- identity (core::WallIdentityOptions)
       {"guid_match_m", "--guid-match", "Same wall within [m]",
        "A re-detected wall keeps the GUID of the stored wall whose axis lies "
@@ -252,6 +291,7 @@ const std::vector<WallParameter> &wall_parameter_table() {
 
 #undef WALL
 #undef IDENT
+#undef PLAN
 
 const std::vector<ParameterDescriptor> &wall_stage_parameters() {
   static const std::vector<ParameterDescriptor> descriptors = [] {

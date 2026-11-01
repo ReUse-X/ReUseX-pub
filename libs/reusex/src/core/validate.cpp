@@ -224,6 +224,22 @@ void check_stale_cloud_poses(const ProjectDB &db,
        /*commands=*/{"rux create clouds"}});
 }
 
+void check_dangling_space_boundaries(const ProjectDB &db,
+                                     std::vector<ValidationIssue> &out) {
+  const size_t n = db.dangling_space_boundaries();
+  if (n == 0)
+    return;
+  out.push_back(
+      {"dangling_space_boundaries",
+       fmt::format("{} space boundar(y/ies) name a space row that no longer "
+                   "exists (written with foreign keys off)",
+                   n),
+       ValidationSeverity::warning,
+       /*hint=*/"re-run `rux create spaces`, which deletes them",
+       /*artifact=*/"space_boundaries",
+       /*commands=*/{"rux create spaces"}});
+}
+
 ValidationReport validate_project(const ProjectDB &db) {
   ValidationReport report;
   check_orphaned_passports(db, report.issues);
@@ -232,6 +248,7 @@ ValidationReport validate_project(const ProjectDB &db) {
   check_sibling_cloud_sizes(db, report.issues);
   check_unstamped_semantic_clouds(db, report.issues);
   check_stale_cloud_poses(db, report.issues);
+  check_dangling_space_boundaries(db, report.issues);
   return report;
 }
 

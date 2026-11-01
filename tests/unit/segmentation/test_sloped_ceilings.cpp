@@ -195,7 +195,7 @@ TEST_CASE("SlopedCeilings_AtticAndFlatCentreAndMonoPitch",
     CHECK(core::check_ceiling_planes(s).empty());
 }
 
-TEST_CASE("SlopedCeilings_OffLockedOrNoCandidates_LeaveSpacesAlone",
+TEST_CASE("SlopedCeilings_OffOrNoCandidates_LeaveSpacesAlone",
           "[segmentation][spaces][sloped]") {
   Scene sc;
   sc.ceiling(
@@ -213,11 +213,13 @@ TEST_CASE("SlopedCeilings_OffLockedOrNoCandidates_LeaveSpacesAlone",
                                 labels, label_storeys, off);
   CHECK(a[0].ceiling_planes.empty());
 
+  // The lock is the stage's business: a detected space that carries a
+  // stored row's lock (reusex-djf) is fitted like any other.
   std::vector<core::SpaceRecord> b = {attic};
   b[0].locked = true;
   geometry::fit_sloped_ceilings(b, {storey()}, sc.cloud, sc.normals, sc.labels,
                                 labels, label_storeys);
-  CHECK(b[0].ceiling_planes.empty());
+  CHECK(b[0].ceiling_planes.size() == 2);
 
   std::vector<core::SpaceRecord> c = {attic};
   geometry::fit_sloped_ceilings(c, {storey()}, sc.cloud, sc.normals, sc.labels,

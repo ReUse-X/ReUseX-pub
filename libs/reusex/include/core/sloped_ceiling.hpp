@@ -22,6 +22,7 @@
 
 #include "reusex/core/solid_model.hpp"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,12 @@ double ceiling_at(const SpaceRecord &space, double x, double y);
 /// interpolated (constant past its ends), capped at z_base + height; that
 /// cap alone when the wall has no profile.
 double wall_top_at(const WallRecord &wall, double s);
+
+/// @p plane carried through @p m (4x4 row-major, a level frame change):
+/// through the images of three of its points. A plane that @p m turns
+/// vertical keeps its old gradient.
+CeilingPlane map_ceiling_plane(const CeilingPlane &plane,
+                               const std::array<double, 16> &m);
 
 /// Steepest ceiling plane accepted anywhere [deg]: a ceiling is not a wall.
 inline constexpr double kMaxCeilingSlopeDeg = 80.0;
