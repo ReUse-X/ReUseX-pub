@@ -194,27 +194,28 @@ std::vector<std::string> ranked_titles(const std::string &q,
 
 TEST_CASE("PaletteTable_ListsPagesActionsAndRecents", "[rux_qt][palette]") {
   const auto t = build_palette(open_state());
-  REQUIRE(t.size() == 6 + 8 + 4 + 3);
+  REQUIRE(t.size() == 7 + 8 + 4 + 3);
   CHECK(t[0].title == "Start");
   CHECK(t[0].badge == "Her");
   CHECK(t[1].title == "Oversigt");
   CHECK(t[1].shortcut == "Alt+2");
-  CHECK(t[3].title == "Rediger");
+  CHECK(t[2].title == "Ressourcer");
+  CHECK(t[4].title == "Rediger");
   // Without a project there is nothing to close, reload, copy or show.
   PaletteState none;
   for (const auto &e : build_palette(none))
     CHECK((e.id != "close" && e.id != "reload" && e.id != "copy-path" &&
            e.id.rfind("pane:", 0) != 0));
   // The Rediger panes, after the project actions.
-  CHECK(t[14].id == "pane:graph");
-  CHECK(t[17].id == "pane:overlay");
-  CHECK(t[17].title == "Vis eller skjul 3D-overlay");
+  CHECK(t[15].id == "pane:graph");
+  CHECK(t[18].id == "pane:overlay");
+  CHECK(t[18].title == "Vis eller skjul 3D-overlay");
   // Recents: generic project.rux shows its folder; missing ones are disabled.
-  CHECK(t[18].title == "NewOffice");
-  CHECK(t[18].badge == "Åben");
-  CHECK(t[19].title == "Kontorhus Valby");
-  CHECK_FALSE(t[19].enabled);
-  CHECK(t[19].badge == "Mangler");
+  CHECK(t[19].title == "NewOffice");
+  CHECK(t[19].badge == "Åben");
+  CHECK(t[20].title == "Kontorhus Valby");
+  CHECK_FALSE(t[20].enabled);
+  CHECK(t[20].badge == "Mangler");
   CHECK(action_shortcut("open") == "Ctrl+O");
 }
 
@@ -230,14 +231,21 @@ TEST_CASE("PaletteTable_Posegraf_FindsRediger", "[rux_qt][palette]") {
   CHECK(r.front() == "Rediger");
 }
 
+TEST_CASE("PaletteTable_Kortlaegning_FindsRessourcer", "[rux_qt][palette]") {
+  const auto r = ranked_titles("kortlægning", build_palette(open_state()));
+  REQUIRE_FALSE(r.empty());
+  CHECK(r.front() == "Ressourcer");
+}
+
 TEST_CASE("SmokePage_NamesMapToRailIndices", "[rux_qt][shell]") {
   CHECK(smoke_page_index("start") == 0);
   CHECK(smoke_page_index("oversigt") == 1);
   CHECK(smoke_page_index("database") == 1); // the old name keeps working
-  CHECK(smoke_page_index("3d") == 2);
-  CHECK(smoke_page_index("rediger") == 3);
-  CHECK(smoke_page_index("pipeline") == 4);
-  CHECK(smoke_page_index("log") == 5);
+  CHECK(smoke_page_index("ressourcer") == 2);
+  CHECK(smoke_page_index("3d") == 3);
+  CHECK(smoke_page_index("rediger") == 4);
+  CHECK(smoke_page_index("pipeline") == 5);
+  CHECK(smoke_page_index("log") == 6);
   CHECK(smoke_page_index("posegraf") == -1);
   CHECK(smoke_page_index("") == -1);
 }

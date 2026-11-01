@@ -9,6 +9,7 @@
 #include <rux_qt/PipelineWorkspace.hpp>
 #include <rux_qt/ProjectSession.hpp>
 #include <rux_qt/RecentProjects.hpp>
+#include <rux_qt/ResourcesWorkspace.hpp>
 #include <rux_qt/StartPage.hpp>
 #include <rux_qt/TableBrowser.hpp>
 #include <rux_qt/Theme.hpp>
@@ -154,9 +155,10 @@ AppShell::AppShell(ProjectSession &session, RecentProjects &recent,
   rail_->add_item(infos[1].name);
   rail_->add_item(infos[2].name);
   rail_->add_item(infos[3].name);
-  rail_->add_group("Behandling");
   rail_->add_item(infos[4].name);
+  rail_->add_group("Behandling");
   rail_->add_item(infos[5].name);
+  rail_->add_item(infos[6].name);
   auto *hint = new QPushButton;
   hint->setObjectName("railPalette");
   hint->setCursor(Qt::PointingHandCursor);
@@ -189,6 +191,8 @@ AppShell::AppShell(ProjectSession &session, RecentProjects &recent,
   connect(database_, &DatabaseWorkspace::browse_requested, this,
           &AppShell::browse);
   stack_->addWidget(database_);
+  resources_ = new ResourcesWorkspace(session_, options.persist_layout);
+  stack_->addWidget(resources_);
   viewer_ =
       new Viewer3DWorkspace(session_, *view_settings_, options.interactive_3d);
   stack_->addWidget(viewer_);
@@ -224,6 +228,8 @@ AppShell::AppShell(ProjectSession &session, RecentProjects &recent,
         inspector_->set_selection(sel);
     };
   };
+  connect(resources_, &ResourcesWorkspace::selection_changed, this,
+          follow(Workspace::resources));
   connect(viewer_, &Viewer3DWorkspace::selection_changed, this,
           follow(Workspace::viewer3d));
   connect(edit_, &EditWorkspace::selection_changed, this,
@@ -376,7 +382,7 @@ void AppShell::build_actions() {
   quit_action_ = make("Afslut", key("quit"), [this] { emit quit_requested(); });
   theme_action_ = make("Skift tema", key("theme"),
                        [this] { emit toggle_theme_requested(); });
-  // Alt+1 … Alt+6 jump to a page, in rail order.
+  // Alt+1 … Alt+7 jump to a page, in rail order.
   for (int i = 0; i < kWorkspaceCount; ++i)
     make(workspace_infos()[i].name, QKeySequence(Qt::ALT | (Qt::Key_1 + i)),
          [this, i] { show_page(static_cast<Workspace>(i)); });
@@ -450,7 +456,9 @@ void AppShell::show_page(Workspace w) {
   rail_->set_current(i);
   stack_->setCurrentIndex(i);
   // Pages load lazily: a million-point cloud is read when 3D is first shown.
-  if (w == Workspace::viewer3d)
+  if (w == Workspace::resources)
+    resources_->activate();
+  else if (w == Workspace::viewer3d)
     viewer_->activate();
   else if (w == Workspace::edit)
     edit_->activate();
@@ -461,6 +469,8 @@ Selection AppShell::page_selection(Workspace w) const {
   switch (w) {
   case Workspace::database:
     return database_->selection();
+  case Workspace::resources:
+    return resources_->selection();
   case Workspace::viewer3d:
     return viewer_->selection();
   case Workspace::edit:
@@ -649,6 +659,11 @@ void AppShell::sync_project() {
       ->set_count(open ? format_count(static_cast<qulonglong>(
                              s.sensor_frames.total_count))
                        : QString());
+  rail_->item(static_cast<int>(Workspace::resources))
+      ->set_count(open && session_.survey_counts().parts > 0
+                      ? format_count(static_cast<qulonglong>(
+                            session_.survey_counts().parts))
+                      : QString());
   rail_->item(static_cast<int>(Workspace::viewer3d))
       ->set_count(open ? QString::number(s.clouds.size()) : QString());
 
