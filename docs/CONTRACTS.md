@@ -344,6 +344,16 @@ that of the new row it stands for (same GUID, else nearest floor), and when
 its height range overlaps a new row's (measured in that row's frame). `rux get storeys` prints the table; `rux del storeys` removes it, and
 needs `--force` when any row is locked.
 
+Stored spaces follow their storey (reusex-djf): a re-run moves the level
+frames (the origin is a floor centroid), so after writing the rows the stage
+takes every stored space through world coordinates into the frame of the
+new row with its storey's GUID (else of the new storey whose height band
+holds the space's floor, `core::which_storey`) and sets its `storey` to that
+row's idx (`core::reframe_spaces`, `core/space_identity.hpp`). Names, locks
+and boundaries stay; a space no new storey holds stays in its old frame and
+is named at `warn`. Walls and openings are not carried: re-run them after
+`storeys`.
+
 Which storey a world point is on: `core::which_storey`
 (`core/storey_lookup.hpp`, reusex-3iy8.4). Each storey is the half-open band
 `[z_floor, z_ceiling)` of its own level frame (the point's level z is row 3 of
@@ -451,7 +461,8 @@ face of a one-sided wall; level frame),
 `thickness_ci_lo` / `thickness_ci_hi` (−1 when assumed), `lean_deg`,
 `is_external`, `assumed`, `seen_share` (−1 n/a), `face_a_points` /
 `face_b_points`, `co_visibility` (−1 for a one-sided wall), `axis_family`,
-`metadata` (`{"low_seen_share": true}` below `min_seen_share`). `storey` is the
+`metadata` (`{"low_seen_share": true}` below `min_seen_share`; `"regularised"`
+below). `storey` is the
 storey's `idx`, not a foreign key, as for `plane_classes`: re-run `walls` after
 `storeys`. Not every vertical sheet is a wall: a short one standing behind
 a perpendicular wall's seen face (a window reveal) and a group of walls
@@ -460,6 +471,24 @@ up to `free_min_top_m` (a column, a cupboard, a desk screen) are left out
 (reusex-1pi). `wall_joins` rows name two walls (by row id in the table, by GUID
 in the API) and where each meets the other (`start`, `end` or along its
 `path`); they go with their walls.
+
+Plan regularisation (`reconstruction/plan_regularise.hpp`,
+`regularise_walls`, reusex-z1v.12; keys `plan_*`, on by default, off with
+`--no-plan-regularise`): before the rows are written, over all storeys at
+once, walls of one storey that continue each other (overlap along the axis at
+most `plan_max_overlap_m`, gap at most `plan_collinear_gap_m`) with a face
+seen from the same side within `plan_collinear_m` share one line, and walls of
+adjacent storeys that overlap by `plan_stack_min_overlap_m` with a same-side
+face within `plan_stack_m` share one line (`plan_stack`). A line is the
+length-weighted mean of its faces on its better-seen side; each wall moves
+that face there, its thickness unchanged. Two walls of one storey standing
+side by side (overlapping) never share a line, however close. Optional:
+`plan_grid_deg` turns walls onto the project's Manhattan grid (off by default:
+it turns whole storeys onto each other), `plan_round_m` rounds each line's
+offset. Corner and tee ends follow the moved lines. A moved wall's `metadata`
+keeps what was measured: `{"regularised": {"rules": ["collinear" | "stack" |
+"grid" | "round" | "join"], "offset_delta_m", "angle_delta_deg", "measured":
+{"x0", "y0", "x1", "y1"}}}`.
 
 Identity: a re-detected wall keeps the GUID of the stored wall of the same
 storey that it lies on — parallel within `guid_match_angle_deg` (10°), each
@@ -510,7 +539,19 @@ sweeps), `is_external` (the host wall's, until spaces exist),
 at most 0.7, raised by agreeing evidence: labels, the instance, glass, camera
 path crossings) and `metadata` (the evidence: fill, jambs, local levels,
 label shares, crossings, glass share, the leaf and `swing` left | right seen
-from the side it opens to). The host is named by GUID, not by a foreign key:
+from the side it opens to). Openings are found against each wall's
+measured axis (`geometry::measured_walls()`: the `"regularised"."measured"`
+metadata of the walls stage) and then put onto the stored, regularised axis
+(`openings_onto_walls()`). Window alignment (`regularise_openings`,
+reusex-z1v.12; keys `plan_*`, on by default, off with `--no-plan-regularise`):
+windows of different storeys on one facade line (hosts parallel within
+`plan_angle_deg`, centres within `plan_facade_m` of it) whose centres lie
+within `plan_column_m` along it, at most one per storey, share the column's
+mean centre and median width; the windows of one storey whose sills (heads)
+lie within `plan_row_m` share the median. A snap that would push a window off
+its wall or onto another opening is skipped. A moved opening's `metadata`
+gets `"regularised": {"rules": ["column" | "row"], "measured": {"s_start",
+"s_end", "z_sill", "z_head"}}`. The host is named by GUID, not by a foreign key:
 a `walls` re-run replaces its rows but keeps their GUIDs, so the openings
 (and a locked one) survive it; an opening whose host is gone is left out of
 `io::load_solid_model` until `openings` runs again.
@@ -597,7 +638,7 @@ rooms -> spaces**.
 | Consumes | `cloud`, `normals`, `storeys`, `rooms` (band) |
 | Optional | `walls` (without it every space is its raster outline), `openings` (the door cuts of the rebuilt grid) |
 | Produces | `spaces`, `space_boundaries` (tables, schema v35: one row per space with a stable GUID, one per bounding wall stretch) |
-| Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
+| Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio`, `guid_min_overlap` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
 | Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; the rebuilt grid's room ids match `rooms` (checked by the stage) |
 
 Each row: `storey` (the storey's idx), `name` ("Space <room label>" until
@@ -616,15 +657,28 @@ it) and its wall by GUID (`wall_guid`), as an opening does, so the
 boundaries of a locked space survive a `walls` re-run; one whose wall is gone
 is left out of `io::load_solid_model`.
 
-Identity: a space's natural key is its storey and its polygon's centroid
-rounded to 5 cm. A re-detected space keeps the GUID of the stored space of
-the same storey whose centroid lies within `guid_match_m` (1 m) and whose
-area is within `guid_min_area_ratio` (half) of its own; only an unmatched one
-gets a fresh GUID, `uuid5(project_guid, "spaces/<storey>/<cx>,<cy>")`,
-suffixed until unique. Rows with `locked = 1` survive a re-run unchanged,
-with their boundaries. `rux get spaces` (or `rux get spaces.<id|guid>`,
-`spaces.<id>.boundaries`) prints the table; `rux del spaces` removes it, and
-needs `--force` when any space is locked. `io::load_solid_model` reads it,
+Identity (reusex-djf): a re-detected space keeps the GUID of the stored
+space of the same storey whose footprint it overlaps, in world coordinates
+(each polygon taken out of its storey's level frame): first pairs that
+overlap by at least `guid_min_overlap` (half) of the larger footprint, or
+whose centroids lie within `guid_match_m` (1 m) with areas within
+`guid_min_area_ratio` (half); then, among the rest, pairs that overlap by
+half of the smaller footprint (a split or merged room's remnant). Greedy,
+largest share first, one-to-one, so a stored space is never doubled. A space
+matched to a row a person named (`locked = 1` or `source = manual`) also
+takes its name, kind, source, lock and metadata keys; its outline, heights
+and boundaries are the new ones (the row is replaced in place). A locked row
+nothing matches is kept as stored, with its boundaries on walls that still
+exist, flagged `"unmatched": true` in `metadata` and named at `warn`. Only an
+unmatched new space gets a fresh GUID, `uuid5(project_guid,
+"spaces/<storey>/<cx>,<cy>")` (the polygon's centroid rounded to 5 cm),
+suffixed until unique. Writing the table deletes boundary rows whose space
+row is gone (a tool that deleted spaces with foreign keys off;
+`rux validate` warns about them, reusex-932g). `rux get spaces` (or `rux get
+spaces.<id|guid>`, `spaces.<id>.boundaries`) prints the table; `rux set
+spaces.<id|guid|name>.name|kind|locked <value>` names, relabels or (un)locks
+one (a name or kind makes the row `manual` and locked, reusex-fkf); `rux del
+spaces` removes it, and needs `--force` when any space is locked. `io::load_solid_model` reads it,
 so `rux analyze solid --reference plan.yaml` scores a project's spaces
 directly. `rux create rooms --spaces-json out.yaml` is the earlier debug
 path: it writes the same spaces (same code, same GUIDs) to a file without

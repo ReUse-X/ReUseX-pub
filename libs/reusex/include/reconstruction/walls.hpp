@@ -412,6 +412,24 @@ ThicknessFit measure_thickness(const WallFace &lo, const WallFace &hi,
                                double s0, double s1,
                                const WallOptions &opt = {});
 
+/// What plan regularisation (reconstruction/plan_regularise.hpp) did to a
+/// wall: the measured axis it replaced and the deltas, so a measured value
+/// stays available next to the regularised one (wall_records() writes it to
+/// the record's metadata as "regularised").
+struct WallRegularisation {
+  bool applied = false; ///< the axis or an end moved
+  /// The measured axis endpoints (level frame), before regularisation.
+  Eigen::Vector2d measured_a = Eigen::Vector2d::Zero();
+  Eigen::Vector2d measured_b = Eigen::Vector2d::Zero();
+  double offset_delta_m = 0.0;  ///< the axis moved this far along d [m]
+  double angle_delta_deg = 0.0; ///< the axis turned this far [deg]
+  /// Which rules moved it: "grid" (turned onto the Manhattan grid),
+  /// "collinear" (shares a line with walls it continues), "stack" (shares a
+  /// line with a wall of the storey above / below), "round" (dimension
+  /// rounding), "join" (an end followed a moved neighbour).
+  std::vector<std::string> rules;
+};
+
 /// One wall in its family's coordinates, before the wall graph (W3.4).
 struct WallSegment {
   int family = 0;                               ///< AxisFamily::index
@@ -435,6 +453,7 @@ struct WallSegment {
   int points_lo = 0, points_hi = 0; ///< face points over [s0, s1]
   double seen_share = -1.0;         ///< set by join_walls (W3.4)
   bool low_seen = false;            ///< seen_share below min_seen_share (W3.4)
+  WallRegularisation regularised;   ///< set by regularise_walls()
 };
 
 /// The walls of a storey from its faces and their pairing (W3.3): a pair is
@@ -555,7 +574,9 @@ detect_walls(const Cloud &cloud, const CloudL &planes,
 /// on its seen face and thickness -1 (unknown, reusex-v8p), any other
 /// assumed wall the default thickness; assumed walls carry no CI; a flagged
 /// wall carries
-/// {"low_seen_share": true} as metadata.
+/// {"low_seen_share": true} as metadata, a regularised one (WallSegment::
+/// regularised) {"regularised": {"rules": [...], "offset_delta_m",
+/// "angle_delta_deg", "measured": {"x0", "y0", "x1", "y1"}}}.
 std::pair<std::vector<core::WallRecord>, std::vector<core::WallJoinRecord>>
 wall_records(const WallGraph &graph, const core::StoreyRecord &storey);
 

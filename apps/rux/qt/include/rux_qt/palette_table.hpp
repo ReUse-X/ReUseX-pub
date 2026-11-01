@@ -27,8 +27,8 @@ struct PageEntry {
   std::string keywords; ///< aliases, Danish and English
 };
 
-/// The shell's pages in rail order (Start, Oversigt, 3D, Rediger,
-/// Pipeline, Log). Alt+1 … Alt+6.
+/// The shell's pages in rail order (Start, Oversigt, Ressourcer, 3D,
+/// Rediger, Pipeline, Log). Alt+1 … Alt+7.
 const std::vector<PageEntry> &page_entries();
 
 /// The Rediger workspace's panes (spec §5.2), in their QSettings order.

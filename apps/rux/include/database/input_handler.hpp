@@ -25,9 +25,10 @@ enum class InputSource {
 /**
  * @brief Handles input for set operations
  *
- * Priority:
- * 1. stdin (if redirected or piped, i.e., !isatty(STDIN_FILENO))
- * 2. Inline value (positional argument)
+ * Priority (reusex-69c):
+ * 1. Inline value (positional argument), unless it is "-"
+ * 2. stdin, when the value is "-" or there is no value and stdin is
+ *    redirected or piped (!isatty(STDIN_FILENO))
  * 3. Error (no input provided)
  */
 class InputHandler {
@@ -70,6 +71,12 @@ class InputHandler {
    */
   static InputSource
   detect_source(const std::optional<std::string> &inline_value);
+
+  /// detect_source() with the TTY test given (@p stdin_redirected), for
+  /// tests.
+  static InputSource
+  detect_source(const std::optional<std::string> &inline_value,
+                bool stdin_redirected);
 };
 
 } // namespace rux::database

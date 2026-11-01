@@ -132,10 +132,116 @@ DataPayload SpaceRouter::get(const std::vector<PathComponent> &components) {
                            "\nAvailable properties: " + available);
 }
 
-void SpaceRouter::set(const std::vector<PathComponent> & /*components*/,
-                      const DataPayload & /*data*/) {
-  throw std::runtime_error("Cannot set spaces via 'rux set'. They are "
-                           "written by 'rux create spaces'.");
+namespace {
+
+/// The space a path names: [index], row id, guid, or its exact name (which
+/// must be unique).
+reusex::core::SpaceRecord
+find_space(const std::vector<reusex::core::SpaceRecord> &rows,
+           const PathComponent &c) {
+  if (c.is_index()) {
+    const int i = *c.index;
+    if (i < 0 || i >= static_cast<int>(rows.size()))
+      throw std::runtime_error("Array index out of range: " +
+                               std::to_string(i));
+    return rows[static_cast<size_t>(i)];
+  }
+  if (!c.is_item())
+    throw std::runtime_error("Expected a space id, guid or name after spaces");
+  const auto &key = c.value;
+  const auto id = parse_int(key);
+  for (const auto &s : rows)
+    if ((id && s.id == *id) || s.guid == key)
+      return s;
+  const reusex::core::SpaceRecord *hit = nullptr;
+  for (const auto &s : rows)
+    if (s.name == key) {
+      if (hit)
+        throw std::runtime_error("Space name '" + key +
+                                 "' is not unique; use the space's guid");
+      hit = &s;
+    }
+  if (!hit)
+    throw std::runtime_error("Space not found: " + key);
+  return *hit;
+}
+
+/// A scalar value as `rux set` passes it: inline text, stdin text (one
+/// trailing newline dropped), or JSON.
+std::string scalar_text(const DataPayload &data) {
+  if (std::holds_alternative<std::string>(data)) {
+    std::string v = std::get<std::string>(data);
+    while (!v.empty() && (v.back() == '\n' || v.back() == '\r'))
+      v.pop_back();
+    return v;
+  }
+  if (std::holds_alternative<nlohmann::json>(data)) {
+    const auto &j = std::get<nlohmann::json>(data);
+    return j.is_string() ? j.get<std::string>() : j.dump();
+  }
+  throw std::runtime_error("Expected a text value, got binary data");
+}
+
+bool parse_bool(const std::string &v) {
+  if (v == "true" || v == "1" || v == "yes")
+    return true;
+  if (v == "false" || v == "0" || v == "no")
+    return false;
+  throw std::runtime_error("Expected true or false, got '" + v + "'");
+}
+
+/// Apply one property. A name or kind is a person's: the row becomes
+/// source manual and locked, so `rux create spaces` carries it over.
+void apply(reusex::core::SpaceRecord &s, const std::string &prop,
+           const std::string &value) {
+  if (prop == "name") {
+    s.name = value;
+  } else if (prop == "kind") {
+    s.kind = value;
+  } else if (prop == "locked") {
+    s.locked = parse_bool(value);
+    return;
+  } else {
+    throw std::runtime_error("Cannot set spaces." + prop +
+                             " (settable: name, kind, locked)");
+  }
+  s.source = "manual";
+  s.locked = true;
+}
+
+} // namespace
+
+void SpaceRouter::set(const std::vector<PathComponent> &components,
+                      const DataPayload &data) {
+  if (components.empty())
+    throw std::runtime_error(
+        "Name the space to set: 'rux set spaces.<guid|id|name>.name <value>' "
+        "(also .kind, .locked); the rows themselves are written by 'rux "
+        "create spaces'");
+  if (components.size() > 2)
+    throw std::runtime_error("Too deep a path under spaces: settable are "
+                             "spaces.<space>.name, .kind and .locked");
+  auto s = find_space(db_->spaces(), components[0]);
+  if (components.size() == 2) {
+    apply(s, components[1].value, scalar_text(data));
+  } else {
+    // spaces.<space> with a JSON object: {"name": ..., "kind": ...,
+    // "locked": ...}.
+    nlohmann::json j;
+    if (std::holds_alternative<nlohmann::json>(data))
+      j = std::get<nlohmann::json>(data);
+    else if (std::holds_alternative<std::string>(data))
+      j = nlohmann::json::parse(std::get<std::string>(data), nullptr, false);
+    if (!j.is_object() || j.empty())
+      throw std::runtime_error(
+          "spaces.<space> takes a JSON object with name, kind and/or locked");
+    for (const auto &[k, v] : j.items())
+      if (k != "locked")
+        apply(s, k, v.is_string() ? v.get<std::string>() : v.dump());
+    if (j.contains("locked"))
+      apply(s, "locked", j["locked"].dump());
+  }
+  db_->update_spaces({s});
 }
 
 std::optional<std::string> SpaceRouter::del_requires_force(

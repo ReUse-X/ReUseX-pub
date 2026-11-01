@@ -15,6 +15,7 @@
 
 #include <reusex/core/wall_identity.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
+#include <reusex/reconstruction/plan_regularise.hpp>
 #include <reusex/reconstruction/walls.hpp>
 
 #include <optional>
@@ -30,6 +31,9 @@ struct WallStageOptions {
   /// GUID matching against the stored walls (keys guid_match_m,
   /// guid_match_angle_deg, guid_min_overlap).
   core::WallIdentityOptions identity;
+  /// Plan regularisation over all storeys before the walls are stored
+  /// (keys plan_*).
+  geometry::PlanRegulariseOptions plan;
 };
 
 /// One parameter of the walls stage.

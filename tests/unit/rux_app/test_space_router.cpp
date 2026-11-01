@@ -125,3 +125,57 @@ TEST_CASE("SpaceRouter_Del_AllAtOnce_LockedNeedForce",
   CHECK_FALSE(db->has_spaces());
   CHECK(db->space_boundaries().empty());
 }
+
+namespace {
+/// The path below the collection, as RouterRegistry hands it to a router.
+std::vector<PathComponent> rel(const std::string &path) {
+  auto c = parse_path("spaces" + path.substr(1));
+  return {c.begin() + 1, c.end()};
+}
+} // namespace
+
+TEST_CASE("SpaceRouter_Set_NamesKindsAndLocks", "[rux_app][router][spaces]") {
+  // reusex-fkf: `rux set spaces.<space>.name` names a room; a name or kind
+  // makes the row a person's (source manual, locked), so `rux create
+  // spaces` carries it over.
+  reusex::test_support::TempPath tmp("test_space_router_set");
+  auto db = seeded(tmp);
+  RouterRegistry registry(db);
+  auto &router = registry.get_router("spaces");
+  const auto rows = db->spaces();
+  const std::string guid = rows[0].guid;
+
+  router.set(rel("x." + guid + ".name"), std::string("S0-01 Depot\n"));
+  auto s = db->space_by_guid(guid);
+  REQUIRE(s.has_value());
+  CHECK(s->name == "S0-01 Depot"); // stdin's trailing newline dropped
+  CHECK(s->locked);
+  CHECK(s->source == "manual");
+  CHECK(db->space_boundaries().size() == 3); // the row was not replaced
+
+  // By row id, by name, by index.
+  router.set(rel("x." + std::to_string(rows[1].id) + ".kind"),
+             std::string("room"));
+  CHECK(db->space_by_guid(rows[1].guid)->kind == "room");
+  CHECK(db->space_by_guid(rows[1].guid)->locked);
+  router.set(rel("x.Space 3.name"), std::string("S1-01 Gang"));
+  CHECK(db->space_by_guid(rows[2].guid)->name == "S1-01 Gang");
+  router.set(rel("x[0].locked"), std::string("false"));
+  CHECK_FALSE(db->space_by_guid(guid)->locked);
+  CHECK(db->space_by_guid(guid)->name == "S0-01 Depot");
+
+  // A JSON object sets several at once.
+  router.set(rel("x." + guid),
+             json{{"name", "S0-02 Teknik"}, {"kind", "unknown"}});
+  s = db->space_by_guid(guid);
+  CHECK(s->name == "S0-02 Teknik");
+  CHECK(s->kind == "unknown");
+  CHECK(s->locked);
+
+  CHECK_THROWS(router.set(rel("x." + guid + ".kind"),
+                          std::string("stair"))); // not in the vocabulary
+  CHECK_THROWS(router.set(rel("x." + guid + ".area"), std::string("3")));
+  CHECK_THROWS(router.set(rel("x.nope.name"), std::string("A")));
+  CHECK_THROWS(router.set(rel("x[0].locked"), std::string("maybe")));
+  CHECK(db->space_by_guid(guid)->kind == "unknown");
+}

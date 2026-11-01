@@ -26,7 +26,13 @@ namespace rux::database {
  * The spaces of one storey: `rux get storeys.<idx>.spaces`. Coordinates are
  * in that storey's level frame. `rux del spaces` deletes every space and
  * boundary; when some spaces are locked (edited by hand) it needs --force.
- * The rows are written by `rux create spaces`, not by `rux set`.
+ *
+ * The rows are written by `rux create spaces`. `rux set` names one
+ * (reusex-fkf): `spaces.<id|guid|name|[i]>.name <text>`, `.kind
+ * <room|corridor|open_plan|unknown>` (either makes the row source manual and
+ * locked, so the next `rux create spaces` carries it over to the re-detected
+ * room), `.locked <true|false>`, or `spaces.<space>` with a JSON object of
+ * those keys.
  */
 class SpaceRouter : public ResourceRouter {
     public:
