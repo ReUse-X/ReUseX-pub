@@ -18,10 +18,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <numbers>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -830,6 +832,35 @@ TEST_CASE("SolidModelFixture_House2_IsAManhattanDraftOnThePoseReference",
   CHECK_THAT(m.description, ContainsSubstring("pose reference"));
   CHECK_THAT(m.storeys[0].metadata,
              ContainsSubstring("draft - needs maintainer review"));
+}
+
+TEST_CASE("SolidModelFixture_NewOffice_IsFittedOnThePoseReference",
+          "[io][solid_model]") {
+  // Re-fitted (reusex-rcv.1.8) on the NewOffice DRAFT pose reference
+  // (tests/fixtures/pose_reference/newoffice.*): the reference is solved
+  // with --manhattan, which turns the trajectory 1.03 deg against the
+  // initial poses the plan was first drawn on, so the plan turned with it.
+  // Every element kept its guid; WC 3's door, which the camera walks through
+  // four times, was added.
+  const SolidModel m =
+      reusex::io::solid_model_from_file(fixture("newoffice.plan.yaml"));
+  CHECK_THAT(m.description, ContainsSubstring("pose reference"));
+  const auto *north = [&]() -> const reusex::core::WallRecord * {
+    for (const auto &w : m.walls)
+      if (w.guid == "x-north")
+        return &w;
+    return nullptr;
+  }();
+  REQUIRE(north != nullptr);
+  const double deg = std::atan2(north->y1 - north->y0, north->x1 - north->x0) *
+                     180.0 / std::numbers::pi;
+  CHECK(deg > 51.0);
+  CHECK(deg < 52.5);
+  std::size_t wc_doors = 0;
+  for (const auto &o : m.openings)
+    if (o.wall == "p-wc-south")
+      ++wc_doors;
+  CHECK(wc_doors == 3);
 }
 
 TEST_CASE("SolidModelFixture_NewOffice_FollowsTheMaintainersRoomLayout",

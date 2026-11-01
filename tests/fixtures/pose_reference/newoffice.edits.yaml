@@ -1,0 +1,351 @@
+# SPDX-FileCopyrightText: 2026 Povl Filip Sonne-Frederiksen
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# NewOffice pose reference: the edits -- DRAFT v1, maintainer review pending (reusex-rcv.1.8).
+#
+# The provenance half of the NewOffice pose reference (docs/guides/pose-reference-authoring.md);
+# newoffice.trajectory.tum next to it is the frozen result. Written with the drift-correction loop
+# (rux optimize --edits --watch --fast, rux analyze drift) plus block fits checked against plan cuts,
+# sections and the colour images. Not ground truth: an agent's best reading of the scan.
+#
+# Source scan: ~/repos/NewOffice/project.rux (3876 frames, node ids 1-4053, one storey; schema v28,
+# sha256 b1258fed6d41...); always work on a copy (opening it migrates it). Nothing derived from the
+# scan except these two files is committed; point $REUSEX_NEWOFFICE_RUX at a copy built as below.
+# No project_guid in this file (reusex-zcd3): the scan predates schema v30, so each copy mints its own guid when it
+# is first opened and the check would refuse every other copy.
+#
+# Starting poses (reusex-m53): sensor_frames.initial_transform, the RTABMap import of 2026-04-23 --
+# the poses the April cloud and newoffice.plan.yaml were drawn on. Every solve seeds from them.
+# The stored sensor_frames.transform is bit-identical to plain `rux optimize` (default flags) with the
+# 102 ORB loop edges rejected: that is the "unknown process" of reusex-m53. Moves are deltas on the
+# initial poses.
+#
+# Replay (on a COPY; deterministic: reproduces newoffice.trajectory.tum to its rounding, 1e-7 m
+# and 1e-10 in the quaternion, which keeps the file under the 500 kB hook limit):
+#   cp ~/repos/NewOffice/project.rux copy.rux
+#   rux -p copy.rux graph prune --type loop_closure
+#   rux -p copy.rux optimize --edits newoffice.edits.yaml --manhattan --manhattan-max-angle 30
+#   rux -p copy.rux export trajectory -o newoffice.trajectory.tum
+# The prune and the two solver flags are part of the reference:
+#  - graph prune --type loop_closure: the 102 stored ORB loop edges (source orb) are scale-collapsed (reusex-w3ye):
+#    their translations are a third to a half of the relative poses every solve agrees on (median
+#    disagreement 0.55 m, 1.2 deg; 0 of 102 within 5 cm). With them plain optimize is worse than the
+#    initial poses on every drift number (table below, 'optimize'); odometry + gauge + the loops alone
+#    gives pass-to-pass 12.7 mm, 290 frames above the flag.
+#  - --manhattan --manhattan-max-angle 30: without it the plane-factor solve tilts the floor ~0.3 deg
+#    (floor modes -1.29 m in the west wing, -1.43 m in the kitchen; slope 3.4 / 3.7 mm/m), which is
+#    what the stored poses show; the floor/ceiling level factors keep it within the initial poses'
+#    spread (-1.25..-1.30 m, slope 1.6 / 2.5 mm/m). The prior also turns the whole trajectory 1.1 deg
+#    about node 1 against the initial poses (grid -37.96 deg vs -39.14 in the plan): a gauge rotation,
+#    harmless for scoring, which is why newoffice.plan.yaml was re-fitted on this reference.
+# The g-* anchors are guards: all-DoF anchors at the poses of the no-edit solve (loops rejected,
+# --manhattan --manhattan-max-angle 30) on 3 nodes of every 12-segment chunk no move names, so each
+# move is measured against the rest as that solve has it and cannot drag the trajectory. The nodes
+# 2060-2109 and 2266-2297 (the walks into and out of the first storage visit) carry no guard: the
+# storage move fought them (g-2086 off 30 mm, g-2269 off 40 mm). All moves read honoured in --watch;
+# plain optimize --edits reads m-716-817 NOT HONOURED by the older block-RMS rule (10.1 mm against a
+# 10.0 mm bound; reusex-wwr).
+#
+# Frame: world. "plan u / v" in the notes = world rotated by -50.864 deg (the plan's display frame,
+# u along the long facade); the renders are drawn in it.
+#
+# Result (rux analyze drift, defaults: frame step 1, depth stride 8, 12 segments; crossings against
+# newoffice.plan.yaml as committed for stored / initial / optimize, against the re-fitted plan for
+# the Manhattan rows):
+#                                 initial      stored = optimize  optimize      loops rejected  this
+#                                 (start)      without loops      (with loops)  + Manhattan     (DRAFT)
+#   noise floor                   6.1 mm       6.0 mm             6.1 mm        6.1 mm          6.1 mm
+#   pass-to-pass median (p90)     10.1 (35.1)  9.9 (33.6)         10.4 (36.1)   10.1 (34.0)     10.1 (33.9) = 1.66x floor
+#   frames above the flag         52           22                 37            23              19
+#   segment-pair median           19.3 mm      19.1 mm            22.0 mm       18.7 mm         18.0 mm
+#   worst segment pair (*)        89.5 mm      39.0 mm            106.8 mm      114.7 mm        115.0 mm
+#   through-wall steps (**)       9 of 50      9 of 50            17 of 59      10 of 50        10 of 50
+#   doubled-wall patches          0.35         0.33               0.39          0.34            0.35
+#   floor modes, west..kitchen    -1.25..-1.30 -1.29..-1.43       -1.02..-1.31  -1.25..-1.30    -1.25..-1.30
+# Manhattan deviation per segment (wall-band point normals, the prior's 4-phi estimator, heading of
+# each 12-segment chunk against the whole scan's grid; deg):
+#   segment      0     1     2     3     4     5     6     7     8     9     10    11   |med| max
+#   initial    +0.53 -0.09 -0.19 +0.11 +0.26 -0.17 -0.22 +0.20 -0.10 -0.30 +0.96 -0.35  0.21 0.96
+#   stored     +0.79 -0.37 -0.45 -0.38 +0.18 +0.15 -0.00 +0.08 +0.30 -0.29 +0.58 -0.41  0.33 0.79
+#   this       -0.46 -0.45 -0.52 -0.24 -0.40 +0.07 -0.20 +0.64 -0.06 +0.27 +0.25 -0.36  0.32 0.64
+# Every segment is within 1 deg of the grid in every pose set; the per-segment spread is at the
+# estimator's noise (0.1-0.3 deg between runs of the same solve with different guards).
+# (*) the two faces of p-bath-printer (0.10-0.15 m, printer room | bathroom lobby), seen by seg 7 from
+#     the lobby and by seg 5 from the printer room, inside the 0.15 m pair gate once the bathroom's two
+#     visits agree (cut by node range, pairmap). The 2x-floor worst-pair bound cannot be met on a
+#     scan with thin walls seen from both sides (the same finding as house2).
+# (**) every remaining crossing is a plan error, not drift: 4 on p-wc-south at s 3.3-3.5 m = the
+#     accessible WC 3's door, which the plan did not draw (images 2568-2569 walk through its door
+#     frame, 3185-3187 inside WC 3; the re-fitted plan adds o-wc3-door), and 6 on p-storage-glass at
+#     s 1.8-2.2 m = the storage door, drawn 0.2-0.5 m off (reusex-g75; images 2107-2109).
+#
+# Unresolved (DRAFT):
+#  - pass-to-pass stays at 1.66x the floor (target 1.5x). Plateau shown: the segment-ICP suggestions
+#    predict <= 4 mm on their own segment: pasted on the loop-free base (seg 5, then seg 3) they moved
+#    pass-to-pass 9.6 -> 9.5 -> 9.5 mm with the cross-segment median unchanged, and a move of the
+#    whole capture segment cannot follow a room (the three moves below are room visits). Each room
+#    fit below halves its block's residual and changes the pooled median by < 0.2 mm. The residual is spread
+#    over the open office (chairs and desks moved between passes) and furniture against walls.
+#  - the doubled-wall share does not move (0.33-0.35 in every solve): furniture, shelving and
+#    glass partitions with mullions, not registration.
+#  - the storage room's absolute position rests on the third, 17-frame visit 3062-3086 and the wall
+#    thickness the plan measured on the initial poses; its two long visits alone could sit 0.1 m
+#    either way.
+#  - the entrance end (plan u -3.0 vs -2.4, images 3385/3387): two surfaces seen by different passes,
+#    read as the glass entrance door and the vestibule beyond it, not drift; not edited.
+schema: reusex.pose_edits.v1
+frame: world
+edits:
+  - id: m-716-817
+    kind: move
+    nodes: [716, 817]
+    delta: {matrix: [0.999967, -0.008172, -0.000447, -0.113333, 0.008170, 0.999960, -0.003554, 0.180988, 0.000476, 0.003550, 0.999994, -0.056690, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.005, rot_deg: 0.1}
+    note: >-
+      closed office, first visit (cameras in the room 716-817; second visit 2953-2981). In the
+      no-edit solves its corridor-side (west) wall sat 0.1 m off where the second visit draws it
+      (co_*.png in the review set). 6-DoF point-to-plane ICP against all frames
+      more than 30 nodes away: median 37.5 -> 14.5 mm (camera centroid +0.08 / -0.10 m in plan u / v,
+      0.6 deg). After it both visits draw the west and north walls on one line (cut 1.8-2.5 m above
+      the floor).
+  - id: m-2110-2265
+    kind: move
+    nodes: [2110, 2265]
+    delta: {matrix: [0.999967, -0.007110, 0.003856, -0.062322, 0.007153, 0.999910, -0.011359, 0.388343, -0.003775, 0.011386, 0.999928, -0.010947, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.005, rot_deg: 0.1}
+    note: >-
+      storage room, first visit (images 2107-2109: through the glass door, moving boxes and a
+      folded table). The loop-free Manhattan solve drew both storage visits (2110-2265, 3997-4053)
+      about 0.2 m towards the kitchen of the third, short visit 3062-3086 (which shares its odometry
+      with the kitchen walk 3008-3101): the storage south wall at plan v -16.7 against -16.9, the
+      kitchen/storage wall 0.3 m thick against the plan's 0.5. On the initial poses the first and
+      the third visit agree and the second (3997-4053) sits 0.25 m towards the kitchen (the plan's
+      'second sheet' in the storage room; before_storage_by_visit.png). Both visits fitted
+      together (one 6-DoF ICP of 2110-2265 + 3997-4053 against every frame outside the storage
+      room): 48.6 -> 19.7 mm, +0.10 / -0.11 m in plan u / v; this is one of the two moves that
+      carry it.
+  - id: m-3997-4053
+    kind: move
+    nodes: [3997, 4053]
+    delta: {matrix: [0.999165, -0.040775, 0.002658, 0.410400, 0.040789, 0.999151, -0.005772, -0.532319, -0.002421, 0.005875, 0.999980, 0.045186, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.005, rot_deg: 0.1}
+    note: >-
+      storage room, second visit (images 4033-4035: the boxes from the doorway). The joint
+      fit with m-2110-2265 (see there); after both, the three storage visits draw the room's walls on
+      one line (south wall plan v -16.85; after_storage_by_visit.png).
+  - id: g-59
+    kind: anchor
+    node: 59
+    pose: {matrix: [-0.883123, -0.040679, 0.467375, 2.547248, 0.464518, 0.063711, 0.883269, -3.761231, -0.065707, 0.997139, -0.037369, 0.356328, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-170
+    kind: anchor
+    node: 170
+    pose: {matrix: [-0.458974, -0.242623, 0.854680, 0.006924, 0.762925, 0.385345, 0.519090, 1.570314, -0.455290, 0.890305, 0.008240, 0.098053, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-279
+    kind: anchor
+    node: 279
+    pose: {matrix: [0.232227, -0.093639, -0.968144, -3.321317, -0.869116, 0.426914, -0.249764, 4.107765, 0.436702, 0.899431, 0.017758, 0.510109, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-387
+    kind: anchor
+    node: 387
+    pose: {matrix: [-0.048122, -0.011416, 0.998776, 2.267411, 0.859207, 0.509445, 0.047220, 6.444970, -0.509361, 0.860428, -0.014707, 0.104900, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-495
+    kind: anchor
+    node: 495
+    pose: {matrix: [-0.292162, -0.008355, 0.956332, 6.276883, 0.953137, 0.079598, 0.291881, 9.349177, -0.078560, 0.996792, -0.015292, 0.369793, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-604
+    kind: anchor
+    node: 604
+    pose: {matrix: [-0.375601, -0.182043, 0.908727, 9.526942, 0.739584, 0.532025, 0.412269, 13.411446, -0.558516, 0.826928, -0.065193, 0.112209, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-694
+    kind: anchor
+    node: 694
+    pose: {matrix: [-0.764874, -0.617440, 0.183674, 10.359245, 0.111306, 0.154165, 0.981756, 18.892471, -0.634492, 0.771363, -0.049192, 0.082825, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-870
+    kind: anchor
+    node: 870
+    pose: {matrix: [0.344509, 0.109278, 0.932401, 14.295316, 0.903873, 0.229719, -0.360892, 14.414691, -0.253627, 0.967103, -0.019633, 0.309343, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-944
+    kind: anchor
+    node: 944
+    pose: {matrix: [0.618347, 0.254115, -0.743688, 9.571534, -0.692792, -0.270535, -0.668469, 12.570293, -0.371062, 0.928567, 0.008764, 0.254644, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1034
+    kind: anchor
+    node: 1034
+    pose: {matrix: [0.729715, 0.623123, -0.281485, 7.380138, -0.203489, -0.195112, -0.959439, 8.092271, -0.652769, 0.757396, -0.015578, 0.083260, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1143
+    kind: anchor
+    node: 1143
+    pose: {matrix: [0.824517, 0.553829, -0.115955, 5.716951, -0.078541, -0.090924, -0.992756, 6.164906, -0.560360, 0.827651, -0.031470, 0.122719, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1254
+    kind: anchor
+    node: 1254
+    pose: {matrix: [0.479793, 0.130051, -0.867690, 4.656982, -0.829589, -0.254701, -0.496900, 4.479953, -0.285624, 0.958235, -0.014315, 0.289125, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1362
+    kind: anchor
+    node: 1362
+    pose: {matrix: [0.940450, 0.167108, 0.296022, 0.683874, 0.290253, 0.058520, -0.955159, 0.895193, -0.176938, 0.984200, 0.006531, 0.337492, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1476
+    kind: anchor
+    node: 1476
+    pose: {matrix: [0.420337, -0.068285, 0.904795, 8.518681, 0.899950, -0.095868, -0.425322, 11.539685, 0.115784, 0.993049, 0.021156, 0.394668, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1585
+    kind: anchor
+    node: 1585
+    pose: {matrix: [0.743231, 0.667886, 0.039195, 17.506370, 0.028046, 0.027430, -0.999230, 17.229035, -0.668447, 0.743758, 0.001655, 0.127501, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1693
+    kind: anchor
+    node: 1693
+    pose: {matrix: [-0.064545, -0.037416, -0.997213, 17.072963, -0.996089, -0.058003, 0.066648, 16.545603, -0.060336, 0.997615, -0.033526, 0.415939, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1802
+    kind: anchor
+    node: 1802
+    pose: {matrix: [-0.872199, -0.452047, -0.186874, 23.119310, -0.164974, -0.087805, 0.982382, 14.772497, -0.460492, 0.887662, 0.002008, 0.187512, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1914
+    kind: anchor
+    node: 1914
+    pose: {matrix: [0.496111, -0.214950, -0.841232, 25.610985, -0.781872, 0.310710, -0.540496, 13.455369, 0.377559, 0.925881, -0.013916, 0.600654, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-1985
+    kind: anchor
+    node: 1985
+    pose: {matrix: [-0.489318, -0.286868, 0.823574, 23.796002, 0.735954, 0.370846, 0.566432, 8.776030, -0.467911, 0.883278, 0.029660, 0.148658, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2015
+    kind: anchor
+    node: 2015
+    pose: {matrix: [-0.894925, -0.442201, -0.059734, 20.826009, -0.066842, 0.000493, 0.997764, 11.230915, -0.441183, 0.896916, -0.029999, 0.151264, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2045
+    kind: anchor
+    node: 2045
+    pose: {matrix: [-0.409197, -0.223191, 0.884728, 18.283728, 0.763116, 0.447845, 0.465929, 12.542884, -0.500212, 0.865806, -0.012936, 0.109045, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2353
+    kind: anchor
+    node: 2353
+    pose: {matrix: [0.699775, 0.517853, 0.492081, 16.546659, 0.402988, 0.282602, -0.870481, 18.800399, -0.589844, 0.807443, -0.010930, 0.222456, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2462
+    kind: anchor
+    node: 2462
+    pose: {matrix: [0.771627, 0.087973, -0.629962, 12.945780, -0.625093, -0.078363, -0.776607, 18.517115, -0.117686, 0.993036, -0.005475, 0.437546, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2571
+    kind: anchor
+    node: 2571
+    pose: {matrix: [-0.038150, 0.008968, -0.999232, 15.693121, -0.683463, -0.729723, 0.019545, 20.770309, -0.728987, 0.683684, 0.033968, 0.066785, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2679
+    kind: anchor
+    node: 2679
+    pose: {matrix: [-0.024763, -0.008236, 0.999659, 13.443104, 0.896498, 0.442292, 0.025851, 15.466894, -0.442354, 0.896833, -0.003569, 0.237643, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2789
+    kind: anchor
+    node: 2789
+    pose: {matrix: [-0.780752, 0.180540, -0.598190, 4.826897, -0.581792, 0.139148, 0.801346, 6.269843, 0.227912, 0.973675, -0.003604, 0.487235, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-2906
+    kind: anchor
+    node: 2906
+    pose: {matrix: [0.598458, 0.122293, 0.791766, 2.546743, 0.758201, 0.232799, -0.609045, 3.970781, -0.258804, 0.964805, 0.046597, 0.274588, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3036
+    kind: anchor
+    node: 3036
+    pose: {matrix: [-0.744295, -0.428122, 0.512579, 23.479478, 0.487054, 0.177174, 0.855212, 11.138078, -0.456950, 0.886184, 0.076649, 0.186312, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3171
+    kind: anchor
+    node: 3171
+    pose: {matrix: [0.834669, 0.548572, -0.048951, 16.026550, -0.063989, 0.008314, -0.997916, 18.566393, -0.547022, 0.836062, 0.042042, 0.163943, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3318
+    kind: anchor
+    node: 3318
+    pose: {matrix: [0.615287, 0.373235, -0.694347, 0.095984, -0.565144, -0.405221, -0.718615, 0.950907, -0.549577, 0.834560, -0.038396, 0.147535, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3457
+    kind: anchor
+    node: 3457
+    pose: {matrix: [0.174731, -0.037450, 0.983904, 3.766146, 0.865255, -0.471053, -0.171590, 1.587835, 0.469897, 0.881310, -0.049904, 0.610336, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3565
+    kind: anchor
+    node: 3565
+    pose: {matrix: [-0.902210, 0.394462, -0.174405, 12.395253, -0.216736, -0.065054, 0.974060, 10.429921, 0.372884, 0.916607, 0.144186, 0.640999, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3675
+    kind: anchor
+    node: 3675
+    pose: {matrix: [-0.090453, -0.044330, -0.994914, 7.222584, -0.952790, -0.286895, 0.099406, 14.604389, -0.289842, 0.956936, -0.016287, 0.329171, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3773
+    kind: anchor
+    node: 3773
+    pose: {matrix: [-0.116675, -0.120651, -0.985815, 4.090154, -0.684047, -0.709867, 0.167837, 7.317485, -0.720046, 0.693926, 0.000292, 0.029701, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3862
+    kind: anchor
+    node: 3862
+    pose: {matrix: [0.773151, 0.382596, -0.505824, 15.992630, -0.438178, -0.254362, -0.862149, 14.271624, -0.458517, 0.888212, -0.029014, 0.272240, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"
+  - id: g-3952
+    kind: anchor
+    node: 3952
+    pose: {matrix: [-0.632510, 0.235227, -0.737970, 20.563102, -0.725731, 0.152931, 0.670766, 16.035385, 0.270640, 0.959834, 0.073981, 0.558832, 0.000000, 0.000000, 0.000000, 1.000000]}
+    sigma: {trans_m: 0.01, rot_deg: 0.2}
+    note: "guard: held where the no-edit full solve (loops rejected, --manhattan --manhattan-max-angle 30) puts it"

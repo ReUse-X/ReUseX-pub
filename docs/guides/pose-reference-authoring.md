@@ -349,6 +349,97 @@ stair at x 0.5 / 0.9). Pass-to-pass 10.4 -> 10.3 mm, segment-pair median
 coloured by who saw what, finds this; a pass-to-pass residual does not:
 both faces were drawn on top of each other, which is a perfect fit.
 
+### NewOffice: a start that is already near the floor (2026-11-01)
+
+The second reference, `tests/fixtures/pose_reference/newoffice.*`
+(3876 frames, one storey; the edits file's header has the replay, the
+numbers and the per-segment Manhattan table). NewOffice differs from house2
+in the way that matters most: its starting poses (`initial_transform`, the
+April RTABMap import the plan was drawn on) were already good, and most of
+the work was finding what made the *solver* worse.
+
+**0. Check the stored edges before you trust a solve.** Plain
+`rux optimize` was worse than the start on every drift number (pass-to-pass
+10.4 vs 10.1 mm, through-wall steps 17 vs 9). The cause was the 102 stored
+ORB loop edges: compared with the relative poses every solve agrees on,
+their translations were a third to a half too short (median disagreement
+0.55 m, none within 5 cm; `reusex-w3ye`). A two-line check (edge transform
+against `inv(T_a) T_b` of the initial poses, per edge type) finds that in a
+second; `graph prune --type loop_closure` then belongs to the replay. The
+same check answered `reusex-m53`: the stored `transform` was bit-identical
+to plain optimize with the loops rejected.
+
+**1. Level the floor before anything else.** With the loops gone, the
+plane-factor solve still tilted the floor 0.3 deg (14 cm lower in the
+kitchen than in the west wing; the start was flat within 4 cm). No
+pass-to-pass number sees a tilt: every pass tilts together. Measure it
+(the floor's histogram mode per 2 m cell, a few cells across the plan);
+`--manhattan` ties floor and ceiling landmarks to up and kept it level, so
+the reference is solved with it, and the guards come from that solve.
+`--manhattan` also turned the whole trajectory 1.1 deg about node 1 (a
+gauge rotation): harmless for scoring, but the plan has to turn with it.
+
+**2. Move room visits, not capture segments.** The suggestions are whole
+time segments; on a long office scan a segment spans several rooms, and
+pasting the top ones moved the pooled numbers by 0.1 mm. What worked was
+listing the camera runs inside each room (plan box -> contiguous node runs)
+and fitting each *visit* (6-DoF point-to-plane ICP against all frames more
+than 30 nodes away), then looking at a cut coloured by visit. Three visits
+became moves: the closed office's first visit (37.5 -> 14.5 mm) and the two
+long storage-room visits, fitted together (48.6 -> 19.7 mm).
+
+**3. Two visits that each want the other one moved need a third witness.**
+The storage room's two long visits each fitted 0.15-0.2 m onto the other,
+in opposite directions. Fitting each against the frames outside the room,
+and against the short third visit 3062-3086 (tied to the kitchen walk by its
+own odometry), broke the tie: both long visits sat 0.2 m off the third one,
+and the wall thickness the plan had measured (0.5 m) agreed with it. Fit
+the two together as one block, then write one move per contiguous range.
+
+**4. A guard next to a move is a constraint against it.** The storage move
+was fought (`NOT HONOURED`, then `g-2086` and `g-2269` off 30-40 mm) by the
+guards on the kitchen walks just before and after the visit: the odometry
+over the door threshold carries the error. Leave the walk into and out of a
+moved visit out of the guard list; then every edit read honoured.
+
+**5. Re-derive a fit on the current base.** On the loop-free solve the
+bathroom's first visit sat 0.13 m off its revisit, and a move fixed it; on
+the Manhattan solve the two visits already agreed, the fit wanted 5 cm, and
+its refit onto the initial poses left a 32 mm residual (the solve had bent
+the block, `reusex-2bp`). It was dropped. A fit made on one base is not
+evidence on another.
+
+**6. Crossings can be plan errors; add what the camera proves.** All ten
+remaining through-wall steps were the plan's: four through WC 3's door,
+which the plan did not draw (images 2568-2569 walk through its frame; the
+cloud has a gap along the wall from s 3.15 to 3.75, 0.3-1.9 m above the
+floor), six through the storage door drawn 0.2-0.5 m off (`reusex-g75`).
+The re-fitted plan adds the WC 3 door.
+
+| | initial (start) | stored = optimize without loops | optimize (with loops) | DRAFT reference |
+|---|---|---|---|---|
+| pass-to-pass median (p90) | 10.1 (35.1) mm | 9.9 (33.6) mm | 10.4 (36.1) mm | 10.1 (33.9) mm, 1.66x the floor |
+| frames above the flag | 52 | 22 | 37 | 19 |
+| segment-pair median | 19.3 mm | 19.1 mm | 22.0 mm | 18.0 mm |
+| floor, west wing .. kitchen | -1.25..-1.30 m | -1.29..-1.43 m | -1.02..-1.31 m | -1.25..-1.30 m |
+| segment heading, median / max | 0.21 / 0.96 deg | 0.33 / 0.79 deg | -- | 0.32 / 0.64 deg |
+
+The bead's 1.5x-floor target was not reached; the plateau is in the edits
+header (suggestions predict <= 4 mm and move the pooled median <= 0.1 mm;
+each room fit halves its own residual and moves the pooled median < 0.2 mm;
+what is left is furniture moved between passes). The worst segment pair
+(115 mm) is again the two faces of a thin wall, p-bath-printer, seen from
+the lobby and from the printer room.
+
+**Re-fitting the plan.** A rigid 2D fit of the start's wall points onto the
+reference's (rotate 1.03 deg, shift 4 cm) brought the long walls within
+0-15 mm. Per-wall checks after that need care: the mode of the points
+within 0.3 m of an axis jumps between the two faces of a thick wall, so
+look for the face nearest the old one (and in both halves of the wall), and
+cross-check against `rux create walls` on a reference copy before moving a
+wall: of five walls the face check wanted to move, the detector agreed on
+two. The rest is `reusex-gjjb`.
+
 ## Pose references: scoring a trajectory against a frozen ground truth
 
 This half covers the artefact the loop above produces once a cycle's result
@@ -360,8 +451,10 @@ above).
 
 ```
 tests/fixtures/pose_reference/
-├── house2.trajectory.tum   # the frozen trajectory, TUM format
-└── house2.edits.yaml       # the pose-edits file that produced it (reusex-rcv.1.2)
+├── house2.trajectory.tum      # the frozen trajectory, TUM format
+├── house2.edits.yaml          # the pose-edits file that produced it (reusex-rcv.1.2)
+├── newoffice.trajectory.tum
+└── newoffice.edits.yaml
 ```
 
 A pose reference is two files, named `<scan>.trajectory.tum` and

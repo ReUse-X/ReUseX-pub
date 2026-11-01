@@ -17,23 +17,35 @@ two_rooms_synth    synthetic  tests/fixtures/solid_model/two_rooms.plan.json tes
 office_corridor    fixture    tests/fixtures/solid_model/two_rooms.plan.json -                                               tests/fixtures/scans/office_corridor.rux clouds,planes,rooms
 # Local-only rows (never committed data), skipped unless the variable is set:
 # NewOffice: the authored reference is committed (DRAFT, reusex-z1v.2.6); the
-# scan is not. Point $REUSEX_NEWOFFICE_RUX at a copy of NewOffice's
-# project.rux regenerated with today's defaults on the poses the reference
-# was authored on (reusex-s4t):
-#   cp ~/repos/NewOffice/project.rux newoffice-regen.rux
-#   sqlite3 newoffice-regen.rux \
-#     'UPDATE sensor_frames SET transform = initial_transform;'
-#   rux -p newoffice-regen.rux create clouds   # defaults (sampling factor 4)
-#   rux -p newoffice-regen.rux create planes   # defaults (adaptive)
-# The reference was drawn on the April cloud, built from the frames'
-# initial_transform; their stored transform has since moved (median 4 cm,
-# up to 16 cm, non-rigid), so a cloud rebuilt from it disagrees with the
-# reference by up to ~0.3 m in the WC row. A fresh `import rtabmap` of
-# database.db gives the same trajectory but rotated 2.08 deg about the
-# vertical, so it cannot be scored against this reference at all.
-# (2026-10-17, main 840cf8dc, chain storeys..spaces: room IoU 0.874 / +2,
-# wall rms 0.054 m, openings 0.62 / 0.70 -- vs the legacy unregenerated
-# copy 0.893 / +1, 0.141 m, 0.24 / 0.30.)
+# scan is not. Since 2026-11-01 (reusex-rcv.1.8) the plan is re-fitted on the
+# NewOffice pose reference (DRAFT, tests/fixtures/pose_reference/newoffice.*),
+# so build $REUSEX_NEWOFFICE_RUX on the REFERENCE poses:
+#   cp ~/repos/NewOffice/project.rux newoffice-ref.rux
+#   rux -p newoffice-ref.rux graph prune --type loop_closure
+#   rux -p newoffice-ref.rux optimize \
+#       --edits tests/fixtures/pose_reference/newoffice.edits.yaml \
+#       --manhattan --manhattan-max-angle 30
+#   rux -p newoffice-ref.rux analyze poses \
+#       --reference tests/fixtures/pose_reference/newoffice.trajectory.tum  # ATE < 1e-7 m
+#   rux -p newoffice-ref.rux create clouds   # defaults (sampling factor 4)
+#   rux -p newoffice-ref.rux create planes   # defaults (adaptive)
+# The 102 stored ORB loop edges are wrong (scale-collapsed) and the stored
+# transform is plain optimize without them, whose floor tilts 0.3 deg
+# (reusex-m53); the reference turns the trajectory 1.03 deg against the
+# initial poses (the Manhattan gauge), so a copy on the stored or initial
+# poses is turned ~1 deg against this plan and scores far lower: expected.
+# (2026-11-01, chain storeys,classify,walls,openings: wall recall 0.59 /
+# precision 0.42, rms 0.135 m, thickness err 0.043 m, openings 0.66 / 0.57
+# (IoU 0.46) -- the old plan on its own initial-pose copy: 0.63 / 0.46, rms
+# 0.056 m, openings 0.68 / 0.69; the old plan on the reference copy: rms
+# 0.294 m, openings 0.62 / 0.52. The rms is driven by x-west-n /
+# x-west-n-pier and x-east, whose detected axes moved more than their cloud
+# faces did; re-measuring them is reusex-gjjb.)
+# Before 2026-11-01 the recipe was the initial poses
+# (`UPDATE sensor_frames SET transform = initial_transform`): the plan was
+# drawn on the April cloud, built from them. A fresh `import rtabmap` of
+# database.db gives the same trajectory rotated 2.08 deg about the vertical,
+# so it cannot be scored against this reference at all.
 newoffice         local      tests/fixtures/solid_model/newoffice.plan.yaml -                                               $REUSEX_NEWOFFICE_RUX storeys,classify,walls,openings
 # s3dis_area1      local      $REUSEX_S3DIS_DIR/area1.plan.json             -                                               $REUSEX_S3DIS_DIR/area1.rux storeys,walls,spaces,openings
 # house1 / house2 (scan archive, see reusex-yf4.3): authored references
