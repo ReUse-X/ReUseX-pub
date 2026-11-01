@@ -5,11 +5,17 @@
 #include "io/rtabmap.hpp"
 #include "core/ProjectDB.hpp"
 #include "core/SensorIntrinsics.hpp"
+#include "core/file_fingerprint.hpp"
 #include "core/logging.hpp"
+#include "core/pose_blocks.hpp"
 #include "core/pose_graph.hpp"
+#include "core/pose_repair.hpp"
+#include "core/pose_versions.hpp"
 #include "core/processing_observer.hpp"
+#include "core/working_pose_edits.hpp"
 #include "io/rtabmap_links.hpp"
 
+#include <nlohmann/json.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -48,20 +54,52 @@ static_assert(reusex::io::rtabmap_link_type::gravity ==
 
 namespace reusex::io {
 
+namespace {
+
+/// What identifies a session regardless of its file name: node count and
+/// first / last stamp (an upload lands under a new name).
+nlohmann::json
+session_fingerprint(const std::map<int, rtabmap::Transform> &poses,
+                    const std::map<int, rtabmap::Signature> &nodes) {
+  double first = -1.0, last = -1.0;
+  for (const auto &[id, sig] : nodes) {
+    const double s = sig.getStamp();
+    if (s <= 0.0)
+      continue;
+    first = first < 0.0 ? s : std::min(first, s);
+    last = std::max(last, s);
+  }
+  return {
+      {"nodes", poses.size()}, {"first_stamp", first}, {"last_stamp", last}};
+}
+
+/// The scan already holding a session with @p fp, or -1.
+int find_session(const ProjectDB &db, const nlohmann::json &fp) {
+  for (const auto &s : db.scans()) {
+    try {
+      const auto p = nlohmann::json::parse(s.provenance_json);
+      if (p.contains("fingerprint") && p["fingerprint"] == fp)
+        return s.id;
+    } catch (const nlohmann::json::exception &) {
+    }
+  }
+  return -1;
+}
+
+} // namespace
+
 void import_rtabmap(ProjectDB &db,
                     const std::filesystem::path &rtabmap_db_path) {
-  core::info("Importing RTABMap database: {}", rtabmap_db_path);
-  core::stopwatch timer;
+  import_rtabmap(db, rtabmap_db_path, ImportRtabmapOptions{});
+}
 
-  // Create a scan record and get the ID offset for this session.
-  // id_offset = MAX(existing node_id), ensuring new IDs never collide with
-  // previously imported sessions. FK-constrained tables (segmentation_images,
-  // panoramic_images, glass_confidence_images) cannot hold references above
-  // the offset because SQLite FK enforcement is on. pose_graph_edges has no
-  // FK; this importer writes RTABMap links for its own (offset) id range only.
-  auto scan = db.create_scan(rtabmap_db_path.string());
-  core::info("Multi-session import: scan id={} id_offset={}", scan.id,
-             scan.id_offset);
+ImportRtabmapResult import_rtabmap(ProjectDB &db,
+                                   const std::filesystem::path &rtabmap_db_path,
+                                   const ImportRtabmapOptions &options) {
+  core::info("Importing RTABMap database: {}{}", rtabmap_db_path,
+             options.append_session ? " (append as a detached session)" : "");
+  core::stopwatch timer;
+  ImportRtabmapResult result;
 
   // ── Initialise RTABMap and load the optimised graph ──────────────
   rtabmap::ParametersMap params;
@@ -88,6 +126,42 @@ void import_rtabmap(ProjectDB &db,
                    /*withImages=*/true, /*withScan=*/true,
                    /*withUserData=*/true, /*withGrid=*/true);
   core::debug("Graph loaded in {:.3f}s ({} nodes)", timer, poses.size());
+
+  // Create a scan record and get the ID offset for this session.
+  // id_offset = MAX(existing node_id), ensuring new IDs never collide with
+  // previously imported sessions. FK-constrained tables (segmentation_images,
+  // panoramic_images, glass_confidence_images) cannot hold references above
+  // the offset because SQLite FK enforcement is on. pose_graph_edges has no
+  // FK; this importer writes RTABMap links for its own (offset) id range only.
+  const auto fingerprint = session_fingerprint(poses, nodes);
+  const std::string file_fp = core::file_fingerprint(rtabmap_db_path);
+  if (options.append_session) {
+    int dup = find_session(db, fingerprint);
+    if (dup < 0)
+      dup = core::scan_with_fingerprint(db, file_fp).value_or(-1);
+    if (dup >= 0) {
+      rtabmap.close();
+      throw DuplicateSessionError(fmt::format(
+          "{} is already imported as session (scan) {} ({} nodes, same "
+          "content or first and last timestamps); not importing it twice",
+          rtabmap_db_path.filename().string(), dup, poses.size()));
+    }
+  }
+  int previous_last = 0; // the last posed frame before this session
+  for (const int id : db.sensor_frame_ids())
+    if (db.has_sensor_frame_pose(id))
+      previous_last = std::max(previous_last, id);
+  auto scan = db.create_scan(
+      rtabmap_db_path.string(),
+      nlohmann::json{{"importer", "rtabmap"},
+                     {"append_session", options.append_session},
+                     {"fingerprint", fingerprint},
+                     {std::string(core::kProvenanceFileFingerprint), file_fp}}
+          .dump());
+  core::info("Multi-session import: scan id={} id_offset={}", scan.id,
+             scan.id_offset);
+  result.scan_id = scan.id;
+  result.id_offset = scan.id_offset;
 
   // ── Import each node ─────────────────────────────────────────────
   auto observer =
@@ -180,6 +254,10 @@ void import_rtabmap(ProjectDB &db,
                            worldPose, intrinsics, stamp, scan.id);
       db.set_initial_pose(id + scan.id_offset, worldPose);
       imported.emplace(id, worldPose);
+      const int node = id + scan.id_offset;
+      result.first_node =
+          result.first_node == 0 ? node : std::min(result.first_node, node);
+      result.last_node = std::max(result.last_node, node);
 
       core::trace("Imported node {} ({}x{}, depth {}x{})", id, color.cols,
                   color.rows, depth.cols, depth.rows);
@@ -262,6 +340,8 @@ void import_rtabmap(ProjectDB &db,
                  "links are missing",
                  self, dangling, invalid);
 
+    result.odometry_edges = odometry;
+    result.loop_edges = loops;
     db.log_pipeline_end(logId, true);
   } catch (...) {
     db.log_pipeline_end(logId, false, "import_rtabmap failed");
@@ -270,10 +350,51 @@ void import_rtabmap(ProjectDB &db,
   }
 
   rtabmap.close();
+  result.frames = imported_count;
   core::info("Import complete: scan {} ({} frames, id_offset={}), {} total "
              "sensor frames in project",
              scan.id, imported_count, scan.id_offset,
              db.sensor_frame_ids().size());
+
+  if (options.append_session && imported_count > 0) {
+    // RTAB-Map's odometry is raw VIO; the poses are loop-corrected
+    // (reusex-33j). Replace this session's odometry by the imported poses'.
+    const auto odo = core::rebuild_odometry(
+        db, {.scan_id = scan.id, .record_version = false});
+    result.odometry_rebuilt = odo.written;
+    ProjectDB::Transaction tx(db);
+    // The session starts detached: optimize must not bridge the gap to the
+    // previous session from the initial poses (reusex-y2lg.30).
+    if (previous_last > 0) {
+      core::put_working_pose_edit(
+          db, core::reject_odometry_edit(
+                  previous_last, result.first_node,
+                  fmt::format("session {} imported detached ({})", scan.id,
+                              rtabmap_db_path.filename().string())));
+      result.detach_edit_id =
+          core::detach_edit_id(previous_last, result.first_node);
+    }
+    result.version_id = core::record_pose_version(
+        db, {.kind = "import",
+             .label = fmt::format("import {} as session {}",
+                                  rtabmap_db_path.filename().string(), scan.id),
+             .author = options.author,
+             .metrics_json =
+                 nlohmann::json{{"scan_id", scan.id},
+                                {"frames", imported_count},
+                                {"first_node", result.first_node},
+                                {"last_node", result.last_node},
+                                {"odometry_rebuilt", odo.written},
+                                {"odometry_replaced", odo.replaced_imported},
+                                {"loop_edges", result.loop_edges}}
+                     .dump()});
+    tx.commit();
+    core::info("Session {} appended detached: nodes {}..{}, {} odometry "
+               "edges from the imported poses, pose version {}",
+               scan.id, result.first_node, result.last_node, odo.written,
+               *result.version_id);
+  }
+  return result;
 }
 
 } // namespace reusex::io

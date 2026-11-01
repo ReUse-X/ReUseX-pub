@@ -319,6 +319,27 @@ const std::vector<IfcParameter> &ifc_parameter_table() {
   return table;
 }
 
+// --- import_rtabmap ---------------------------------------------------------
+
+#define RTABMAP(f)                                                             \
+  +[](RtabmapStageOptions &o) -> decltype(auto) { return (o.f); }
+
+const std::vector<RtabmapParameter> &rtabmap_parameter_table() {
+  static const std::vector<RtabmapParameter> table = {
+      {"path", "--path", "RTAB-Map database",
+       "The RTAB-Map session .db: absolute, or relative to the project's "
+       "directory.",
+       +[](RtabmapStageOptions &o) -> std::string & { return o.path; },
+       std::nullopt, std::nullopt, /*required=*/true},
+      {"append_session", "--no-append", "Append as a session",
+       "Append as one more detached session: refuse one already imported, "
+       "odometry from the imported poses, a pose version.",
+       RTABMAP(append_session), std::nullopt, std::nullopt},
+  };
+  return table;
+}
+
+#undef RTABMAP
 #undef SPECKLE
 #undef REVIT
 #undef IFC
@@ -337,6 +358,21 @@ std::string ifc_parameters_json(const IfcStageOptions &options) {
   return json_of(ifc_parameter_table(), options);
 }
 
+const std::vector<ParameterDescriptor> &rtabmap_stage_parameters() {
+  static const std::vector<ParameterDescriptor> d =
+      descriptors_of(rtabmap_parameter_table());
+  return d;
+}
+
+RtabmapStageOptions
+rtabmap_options_from_parameters(std::string_view parameters) {
+  return options_from("import_rtabmap", rtabmap_parameter_table(), parameters);
+}
+
+std::string rtabmap_parameters_json(const RtabmapStageOptions &options) {
+  return json_of(rtabmap_parameter_table(), options);
+}
+
 std::string normalize_import_parameters(JobStage stage,
                                         std::string_view parameters) {
   switch (stage) {
@@ -344,13 +380,16 @@ std::string normalize_import_parameters(JobStage stage,
     return speckle_parameters_json(speckle_options_from_parameters(parameters));
   case JobStage::import_ifc:
     return ifc_parameters_json(ifc_options_from_parameters(parameters));
+  case JobStage::import_rtabmap:
+    return rtabmap_parameters_json(rtabmap_options_from_parameters(parameters));
   default:
     return std::string(parameters);
   }
 }
 
 bool is_import_stage(JobStage stage) {
-  return stage == JobStage::import_speckle || stage == JobStage::import_ifc;
+  return stage == JobStage::import_speckle || stage == JobStage::import_ifc ||
+         stage == JobStage::import_rtabmap;
 }
 
 bool default_speckle_server_allowed(const std::string &url,
@@ -421,9 +460,18 @@ bool is_within(const std::filesystem::path &base,
 std::filesystem::path resolve_ifc_path(const std::filesystem::path &project,
                                        const std::string &path,
                                        bool allow_outside_project) {
+  return resolve_import_path(project, path, allow_outside_project,
+                             "import_ifc");
+}
+
+std::filesystem::path resolve_import_path(const std::filesystem::path &project,
+                                          const std::string &path,
+                                          bool allow_outside_project,
+                                          std::string_view stage) {
   namespace fs = std::filesystem;
   if (path.empty())
-    throw std::invalid_argument("import_ifc parameter 'path' is required");
+    throw std::invalid_argument(
+        fmt::format("{} parameter 'path' is required", stage));
   std::error_code ec;
   fs::path base = project.parent_path();
   if (base.empty())
@@ -444,12 +492,12 @@ std::filesystem::path resolve_ifc_path(const std::filesystem::path &project,
     // paths a front end's user may not see.
     if (!is_file || !is_within(base, real))
       throw std::invalid_argument(fmt::format(
-          "import_ifc: '{}' is not a file in the project's directory", path));
+          "{}: '{}' is not a file in the project's directory", stage, path));
     return real;
   }
   if (!is_file)
     throw std::invalid_argument(
-        fmt::format("import_ifc: '{}' is not an existing file", path));
+        fmt::format("{}: '{}' is not an existing file", stage, path));
   return real;
 }
 

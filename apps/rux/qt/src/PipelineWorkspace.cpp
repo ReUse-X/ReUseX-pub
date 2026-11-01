@@ -475,7 +475,8 @@ void PipelineWorkspace::rebuild_stages() {
     // IFC file to pick. They run from `rux import speckle|ifc` and as ruxd
     // jobs; their history rows still map back here (stage_from_log_name), so
     // "Kopiér som rux-kommando" works for them in the Log.
-    if (s == pl::JobStage::import_speckle || s == pl::JobStage::import_ifc)
+    if (s == pl::JobStage::import_speckle || s == pl::JobStage::import_ifc ||
+        s == pl::JobStage::import_rtabmap)
       continue;
     // A row is a button holding labels (qt-client.md: give it a minimum
     // height from its layout).

@@ -708,3 +708,38 @@ TEST_CASE("ImportStages_Names_AndPipelineLogNames",
   CHECK(stage_supports_cancellation(JobStage::import_speckle));
   CHECK_FALSE(stage_supports_cancellation(JobStage::import_ifc));
 }
+
+// ===========================================================================
+// import_rtabmap (reusex-y2lg.30)
+// ===========================================================================
+
+TEST_CASE("ImportRtabmapStage_Parameters_TableAndRefusals",
+          "[pipeline][stages][import][rtabmap]") {
+  CHECK(parse_job_stage("import_rtabmap") == JobStage::import_rtabmap);
+  CHECK(pipeline_log_name(JobStage::import_rtabmap) == "import_rtabmap");
+  CHECK(is_import_stage(JobStage::import_rtabmap));
+  CHECK_FALSE(stage_supports_cancellation(JobStage::import_rtabmap));
+
+  const auto o = rtabmap_options_from_parameters(R"({"path": "s.db"})");
+  CHECK(o.path == "s.db");
+  CHECK(o.append_session); // a job appends by default
+  CHECK(json::parse(normalize_import_parameters(
+            JobStage::import_rtabmap,
+            R"({"path": "s.db", "append_session": false})")) ==
+        json{{"path", "s.db"}, {"append_session", false}});
+  CHECK_THROWS_AS(rtabmap_options_from_parameters("{}"), std::invalid_argument);
+  CHECK_THROWS_AS(
+      rtabmap_options_from_parameters(R"({"path": "s.db", "bogus": 1})"),
+      std::invalid_argument);
+
+  // The file must lie in the project's directory.
+  TempDir dir("test_import_rtabmap_case");
+  StageContext ctx;
+  ctx.project = dir.path / "case.rux";
+  ctx.stage = JobStage::import_rtabmap;
+  ctx.parameters = json{{"path", "/nonexistent/session.db"}}.dump();
+  const StageResult r = run_stage(ctx);
+  CHECK(r.invalid_input);
+  CHECK(r.message.find("import_rtabmap: '/nonexistent/session.db' is not a "
+                       "file in the project's directory") != std::string::npos);
+}
