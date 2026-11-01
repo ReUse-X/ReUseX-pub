@@ -12,7 +12,10 @@
 #include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
+#include <nlohmann/json.hpp>
+
 #include <exception>
+#include <iostream>
 
 void setup_subcommand_graph_init(CLI::App &parent,
                                  std::shared_ptr<RuxOptions> global_opt) {
@@ -31,6 +34,11 @@ DESCRIPTION:
   odometry get an edge (e.g. after importing another scan). Existing
   snapshots and edges are kept; it refuses only when there is nothing to add.
 
+  --rebuild-odometry (reusex-y2lg.16) replaces RTAB-Map's raw odometry by
+  edges from the initial poses, including the pairs at tracking gaps whose
+  stale measurement can lift a block after a re-seed (reusex-xmt), and
+  reports how many pairs changed.
+
   --force replaces the auto odometry_init edges and re-snapshots every initial
   pose from the current poses; confirmed odometry_init edges, loop edges,
   RTABMap edges and rejected edges are kept. Use it after changing poses
@@ -39,6 +47,17 @@ DESCRIPTION:
   sub->add_flag("--force", opt->force,
                 "Re-derive the odometry_init edges and re-snapshot every "
                 "initial pose from the current poses");
+  sub->add_flag("--rebuild-odometry", opt->rebuild_odometry,
+                "Replace the odometry of every consecutive pair in a session "
+                "(imported RTAB-Map rows included, even rejected ones) by "
+                "the relative pose of the initial poses; confirmed and "
+                "user-rejected rows and detached joints are kept. Records a "
+                "pose version");
+  sub->add_flag("--from-current", opt->from_current,
+                "With --rebuild-odometry: snapshot every initial pose from "
+                "the current pose first");
+  sub->add_flag("--json", opt->json,
+                "With --rebuild-odometry: print the result as JSON");
   sub->callback([opt, global_opt]() {
     rux::finish(run_subcommand_graph_init(*opt, *global_opt));
   });
@@ -46,6 +65,31 @@ DESCRIPTION:
 
 int run_subcommand_graph_init(const SubcommandGraphInitOptions &opt,
                               const RuxOptions &global_opt) {
+  if (opt.rebuild_odometry) {
+    try {
+      reusex::ProjectDB db(global_opt.project_db);
+      const auto r = reusex::core::rebuild_odometry(
+          db, {.from_current = opt.from_current, .author = "rux"});
+      if (opt.json)
+        std::cout << reusex::core::to_json(r).dump(2) << "\n";
+      else
+        spdlog::info("Odometry rebuilt: {} pairs, {} edges written ({} "
+                     "changed, max {:.3f} m / {:.2f} deg, {} imported "
+                     "replaced); {} confirmed, {} rejected kept; {} cut at "
+                     "detached joints; pose version {}",
+                     r.pairs, r.written, r.changed, r.max_change_m,
+                     r.max_change_deg, r.replaced_imported, r.kept_confirmed,
+                     r.kept_rejected, r.cut_detached, r.version_id.value_or(0));
+      return RuxError::SUCCESS;
+    } catch (const std::exception &e) {
+      spdlog::error("graph init --rebuild-odometry failed: {}", e.what());
+      return RuxError::GENERIC;
+    }
+  }
+  if (opt.from_current) {
+    spdlog::error("--from-current needs --rebuild-odometry");
+    return RuxError::INVALID_ARGUMENT;
+  }
   try {
     reusex::ProjectDB db(global_opt.project_db);
     if (int rc = rux::check_stage_prerequisites(

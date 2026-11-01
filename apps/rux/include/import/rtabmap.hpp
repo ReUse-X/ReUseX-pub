@@ -13,6 +13,8 @@ namespace fs = std::filesystem;
 
 struct SubcommandImportRTABMapOptions {
   fs::path database_path_in;
+  /// io::ImportRtabmapOptions::append_session (reusex-y2lg.30).
+  bool append = false;
 };
 
 // Function declarations.
