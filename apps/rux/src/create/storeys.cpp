@@ -48,6 +48,9 @@ NOTES:
   - A re-detected storey keeps the GUID of the stored storey whose floor
     it matches (--guid-match), even when its idx changes; locked rows are
     kept on a re-run (warned about when they no longer fit the new frame)
+  - Stored spaces (named and locked ones included) move with their storey
+    into its new level frame, through world coordinates; re-run walls ->
+    openings -> rooms -> spaces afterwards
 )");
 
   sub->get_formatter()->column_width(40);

@@ -421,10 +421,10 @@ geometry::SpacesResult polygonise_with_guids(
     const std::vector<core::WallRecord> &walls, const SpaceStageOptions &so,
     core::SpaceIdentityResult *ids = nullptr) {
   auto sp = geometry::polygonise_spaces(grids, storeys, walls, so.spaces);
-  const auto r = core::assign_space_guids(sp.spaces, sp.boundaries, db.spaces(),
-                                          db.project_guid(), so.identity);
+  auto r = core::assign_space_guids(sp.spaces, sp.boundaries, db.spaces(),
+                                    storeys, db.project_guid(), so.identity);
   if (ids)
-    *ids = r;
+    *ids = std::move(r);
   return sp;
 }
 
@@ -666,6 +666,23 @@ StageResult run_instances(ProjectDB &db, const StageContext &ctx,
     }
   }
 
+  // The previous instances cloud is index-aligned with the cloud it was
+  // made from. When `create clouds` has rebuilt the cloud since (a pose
+  // change, reusex-2u9), the indices no longer name the same points, so
+  // there is nothing to reconcile against: every instance gets a fresh
+  // GUID, and each material link of the old ones is reported as dropped
+  // below, instead of the stage failing.
+  if (old_labels && old_labels->size() != result.instance_labels->size()) {
+    warn("instances: the stored '{}' cloud has {} points but the cloud now "
+         "has {} (rebuilt by `create clouds`); instance identities cannot be "
+         "carried over by point index -- every instance gets a new GUID and "
+         "{} material link(s) are dropped",
+         output_cloud, old_labels->size(), result.instance_labels->size(),
+         old_links.size());
+    old_labels.reset();
+    old_instances.clear();
+  }
+
   std::vector<geometry::PriorInstance> prior;
   prior.reserve(old_instances.size());
   for (const auto &old : old_instances)
@@ -895,6 +912,36 @@ StageResult run_storeys(ProjectDB &db, const json &params, int log_id) {
 
   const size_t written = db.save_storeys(r.storeys, log_id);
   const auto rows = db.storeys();
+
+  // The spaces are stored in their storey's level frame, and a re-detected
+  // storey's frame moves (its origin is a floor centroid; reusex-djf): take
+  // every stored space through world coordinates into its storey's new
+  // frame (same GUID, else the storey whose band holds it), so named and
+  // locked spaces stay where they are and `create spaces` can match them.
+  std::string reframed_note;
+  if (db.has_spaces()) {
+    auto spaces = db.spaces();
+    const auto moved = core::reframe_spaces(spaces, stored, rows);
+    if (moved.moved > 0) {
+      std::vector<core::SpaceRecord> changed;
+      const auto before = db.spaces();
+      for (size_t i = 0; i < spaces.size(); ++i)
+        if (spaces[i].storey != before[i].storey ||
+            spaces[i].z_floor != before[i].z_floor ||
+            spaces[i].polygon.outer != before[i].polygon.outer)
+          changed.push_back(spaces[i]);
+      db.update_spaces(changed);
+    }
+    info("storeys: {} stored space(s) re-expressed in the new storey frames, "
+         "{} unchanged",
+         moved.moved, moved.unchanged);
+    if (!moved.lost.empty())
+      warn("storeys: {} stored space(s) found no storey in the new table and "
+           "stay in their old frame: {}",
+           moved.lost.size(), fmt::join(moved.lost, ", "));
+    reframed_note =
+        fmt::format("; {} space(s) moved into the new frames", moved.moved);
+  }
   const auto locked_kept = static_cast<size_t>(std::count_if(
       rows.begin(), rows.end(), [](const auto &s) { return s.locked; }));
   if (written < r.storeys.size())
@@ -909,11 +956,11 @@ StageResult run_storeys(ProjectDB &db, const json &params, int log_id) {
                   "vertical {:.3f} deg off world z; storey verticals up to "
                   "{:.3f} deg off it, {} storey(s) in their own "
                   "frame; floor/ceiling by {}; {} row(s) written, {} locked "
-                  "row(s) kept",
+                  "row(s) kept{}",
                   r.storeys.size(), r.levels, r.horizontal_planes, tilt_deg,
                   r.max_storey_tilt_deg, r.own_frames,
                   r.normal_sign_used ? "normal sign" : "height", written,
-                  locked_kept),
+                  locked_kept, reframed_note),
       {{"table", "storeys", static_cast<int64_t>(written)}});
 }
 
@@ -1593,9 +1640,28 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
   } catch (const std::invalid_argument &e) {
     return StageResult::failure(e.what());
   }
-  info("spaces: {} matched a stored space ({} locked, kept as stored), {} "
-       "new GUID(s)",
-       ids.matched, ids.locked_matched, ids.minted);
+  info("spaces: {} matched a stored space by footprint ({} locked, {} took "
+       "a stored name), {} new GUID(s)",
+       ids.matched, ids.locked_matched, ids.named_matched, ids.minted);
+  // A locked space nothing matched is written back as stored, flagged
+  // "unmatched" (reusex-djf). Its boundaries stay while their wall does.
+  if (!ids.kept.empty()) {
+    std::set<std::string> wall_guids, kept_guids;
+    for (const auto &w : walls)
+      wall_guids.insert(w.guid);
+    std::vector<std::string> names;
+    for (const auto &k : ids.kept) {
+      kept_guids.insert(k.guid);
+      names.push_back(k.name.empty() ? k.guid : k.name);
+    }
+    for (const auto &b : db.space_boundaries())
+      if (kept_guids.count(b.space) && wall_guids.count(b.wall))
+        sp.boundaries.push_back(b);
+    sp.spaces.insert(sp.spaces.end(), ids.kept.begin(), ids.kept.end());
+    warn("spaces: {} locked space(s) match no detected space and are kept as "
+         "stored, flagged \"unmatched\" in their metadata: {}",
+         ids.kept.size(), fmt::join(names, ", "));
+  }
   int lost = 0;
   double arrangement = 0.0, total = 0.0;
   for (const auto &st : sp.stats)
@@ -1616,15 +1682,18 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
   std::map<std::string, int> kinds;
   for (const auto &s : sp.spaces)
     ++kinds[s.kind];
+  const size_t detected = sp.spaces.size() - ids.kept.size();
   return StageResult::success(
       fmt::format("{} space(s) from {} room(s) on {} storey(s): {} room(s), "
                   "{} corridor(s), {} open plan; {:.1f} m2, {:.0f} % on wall "
                   "faces; {} boundar(y/ies); {} room(s) lost; {} row(s) "
-                  "written, {} locked row(s) kept",
-                  sp.spaces.size(), r.rooms, r.grids.size(), kinds["room"],
+                  "written, {} locked row(s) kept; {} name(s) carried, {} "
+                  "unmatched locked space(s)",
+                  detected, r.rooms, r.grids.size(), kinds["room"],
                   kinds["corridor"], kinds["open_plan"], total,
                   total > 0.0 ? 100.0 * arrangement / total : 0.0,
-                  sp.boundaries.size(), lost, written, locked_kept),
+                  sp.boundaries.size(), lost, written, locked_kept,
+                  ids.named_matched, ids.kept.size()),
       {{"table", "spaces", static_cast<int64_t>(rows.size())},
        {"table", "space_boundaries",
         static_cast<int64_t>(db.space_boundaries().size())}});

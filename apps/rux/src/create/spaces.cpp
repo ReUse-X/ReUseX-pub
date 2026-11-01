@@ -56,8 +56,11 @@ NOTES:
   - Requires 'cloud', 'normals', 'rooms' (band) and the 'storeys' table;
     uses the 'walls' and 'openings' tables when present
   - A re-detected space keeps the GUID of the stored one of its storey
-    (--guid-match, --guid-min-area-ratio); rows with locked = 1 (edited by
-    hand) are kept with their boundaries
+    whose footprint it overlaps in world coordinates (--guid-min-overlap,
+    --guid-match, --guid-min-area-ratio). A match to a row named by hand
+    (rux set spaces.<guid>.name ...; locked) carries its name, kind and lock
+    over to the new outline; a locked row nothing matches is kept, flagged
+    "unmatched" in its metadata
   - `rux analyze solid --reference plan.yaml` scores the stored spaces
 )");
 

@@ -881,15 +881,19 @@ class ProjectDB {
   /// Store the spaces of one detection run and their space boundaries
   /// (IfcRelSpaceBoundary). Replaces every space whose `locked` is 0 by
   /// @p spaces; their boundaries go with them (ON DELETE CASCADE). A locked
-  /// space is never touched: a record whose guid a locked row holds is
-  /// skipped (the locked row wins) and so are its boundaries in
-  /// @p boundaries (the stored ones stay). A boundary names its space by
-  /// guid (one of @p spaces) and its wall by guid (column wall_guid, not a
-  /// foreign key: a walls re-run replaces those rows but keeps their GUIDs,
-  /// the openings rule). `storey` is the storey's idx. The polygon is stored
-  /// as a blob (core/space_polygon.hpp). One SAVEPOINT, so a refused call
-  /// leaves both tables as they were. @p run_id is the pipeline_log row that
-  /// produced them (-1 = none).
+  /// row is kept: a record whose guid a locked row holds is skipped (the
+  /// locked row wins) and so are its boundaries in @p boundaries (the
+  /// stored ones stay) -- unless the record is itself locked, which is how
+  /// the spaces stage carries a lock over to a re-detected space
+  /// (reusex-djf): then the row is replaced in place (same id) and its
+  /// boundaries by those in @p boundaries. Boundaries whose space row no
+  /// longer exists (reusex-932g) are deleted, logged at warn. A boundary names
+  /// its space by guid (one of @p spaces) and its wall by guid (column
+  /// wall_guid, not a foreign key: a walls re-run replaces those rows but keeps
+  /// their GUIDs, the openings rule). `storey` is the storey's idx. The polygon
+  /// is stored as a blob (core/space_polygon.hpp). One SAVEPOINT, so a refused
+  /// call leaves both tables as they were. @p run_id is the pipeline_log row
+  /// that produced them (-1 = none).
   /// @returns the number of spaces written.
   /// @throws std::invalid_argument for an empty guid, a kind other than room
   ///         | corridor | open_plan | unknown, a source other than detected
@@ -902,6 +906,18 @@ class ProjectDB {
   size_t save_spaces(const std::vector<core::SpaceRecord> &spaces,
                      const std::vector<core::SpaceBoundaryRecord> &boundaries,
                      int run_id = -1);
+  /// Rewrite stored spaces in place, matched by guid: every column but id,
+  /// guid and run_id; the boundaries stay. For a rename (`rux set
+  /// spaces.<guid>.name`) and for re-expressing spaces in new storey frames
+  /// (the storeys stage, reusex-djf). One SAVEPOINT.
+  /// @returns the number of rows updated (all of @p spaces).
+  /// @throws std::invalid_argument for a record save_spaces() would refuse,
+  ///         two records sharing a guid, or a guid no row holds;
+  ///         std::runtime_error on a read-only or pre-v35 project.
+  size_t update_spaces(const std::vector<core::SpaceRecord> &spaces);
+  /// Space boundaries whose space row no longer exists (written by a tool
+  /// with foreign keys off, reusex-932g). save_spaces() deletes them.
+  size_t dangling_space_boundaries() const;
   /// Every stored space, storey ascending, then row id. Empty for a pre-v35
   /// project.
   std::vector<core::SpaceRecord> spaces() const;

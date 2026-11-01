@@ -519,6 +519,40 @@ TEST_CASE("RunStage_SeededInstancesStage_DrivesGlobalProgressObserver",
   CHECK(observer.finished > 0);
 }
 
+TEST_CASE("RunStage_InstancesAfterCloudRebuilt_FreshGuidsInsteadOfFailing",
+          "[pipeline][stages]") {
+  // reusex-2u9: `create clouds` rebuilt the cloud (another point count)
+  // after the instances cloud was made; reconciling by point index is
+  // impossible, so the stage gives fresh GUIDs instead of throwing.
+  TempPath project("test_pipeline_stages_instances_rebuilt");
+  reusex::ProjectDB db(project.path);
+  seed_segmentable_project(db);
+  StageContext ctx;
+  ctx.project = project.path;
+  ctx.stage = JobStage::instances;
+  ctx.parameters = R"({"min_cluster_size":1,"cluster_tolerance":0.05})";
+
+  // A stale instances cloud with one point fewer than the cloud.
+  const auto cloud = db.point_cloud_xyzrgb("cloud");
+  REQUIRE(cloud->size() > 1);
+  reusex::CloudL stale;
+  for (size_t i = 0; i + 1 < cloud->size(); ++i) {
+    reusex::LabelT l;
+    l.label = 1U;
+    stale.push_back(l);
+  }
+  db.save_point_cloud("instances", stale, "segment_instances");
+  db.save_instances("instances", {{1U, "11111111-2222-3333-4444-555555555555",
+                                   1, static_cast<int>(stale.size())}});
+
+  const auto result = run_stage(db, ctx);
+  INFO(result.message);
+  REQUIRE(result.ok);
+  CHECK(db.point_cloud_label("instances")->size() == cloud->size());
+  for (const auto &r : db.instances("instances"))
+    CHECK(r.guid != "11111111-2222-3333-4444-555555555555");
+}
+
 // ===========================================================================
 // Mesh stage (#265, Phase 3)
 // ===========================================================================

@@ -344,6 +344,16 @@ that of the new row it stands for (same GUID, else nearest floor), and when
 its height range overlaps a new row's (measured in that row's frame). `rux get storeys` prints the table; `rux del storeys` removes it, and
 needs `--force` when any row is locked.
 
+Stored spaces follow their storey (reusex-djf): a re-run moves the level
+frames (the origin is a floor centroid), so after writing the rows the stage
+takes every stored space through world coordinates into the frame of the
+new row with its storey's GUID (else of the new storey whose height band
+holds the space's floor, `core::which_storey`) and sets its `storey` to that
+row's idx (`core::reframe_spaces`, `core/space_identity.hpp`). Names, locks
+and boundaries stay; a space no new storey holds stays in its old frame and
+is named at `warn`. Walls and openings are not carried: re-run them after
+`storeys`.
+
 Which storey a world point is on: `core::which_storey`
 (`core/storey_lookup.hpp`, reusex-3iy8.4). Each storey is the half-open band
 `[z_floor, z_ceiling)` of its own level frame (the point's level z is row 3 of
@@ -597,7 +607,7 @@ rooms -> spaces**.
 | Consumes | `cloud`, `normals`, `storeys`, `rooms` (band) |
 | Optional | `walls` (without it every space is its raster outline), `openings` (the door cuts of the rebuilt grid) |
 | Produces | `spaces`, `space_boundaries` (tables, schema v35: one row per space with a stable GUID, one per bounding wall stretch) |
-| Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
+| Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio`, `guid_min_overlap` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
 | Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; the rebuilt grid's room ids match `rooms` (checked by the stage) |
 
 Each row: `storey` (the storey's idx), `name` ("Space <room label>" until
@@ -616,15 +626,28 @@ it) and its wall by GUID (`wall_guid`), as an opening does, so the
 boundaries of a locked space survive a `walls` re-run; one whose wall is gone
 is left out of `io::load_solid_model`.
 
-Identity: a space's natural key is its storey and its polygon's centroid
-rounded to 5 cm. A re-detected space keeps the GUID of the stored space of
-the same storey whose centroid lies within `guid_match_m` (1 m) and whose
-area is within `guid_min_area_ratio` (half) of its own; only an unmatched one
-gets a fresh GUID, `uuid5(project_guid, "spaces/<storey>/<cx>,<cy>")`,
-suffixed until unique. Rows with `locked = 1` survive a re-run unchanged,
-with their boundaries. `rux get spaces` (or `rux get spaces.<id|guid>`,
-`spaces.<id>.boundaries`) prints the table; `rux del spaces` removes it, and
-needs `--force` when any space is locked. `io::load_solid_model` reads it,
+Identity (reusex-djf): a re-detected space keeps the GUID of the stored
+space of the same storey whose footprint it overlaps, in world coordinates
+(each polygon taken out of its storey's level frame): first pairs that
+overlap by at least `guid_min_overlap` (half) of the larger footprint, or
+whose centroids lie within `guid_match_m` (1 m) with areas within
+`guid_min_area_ratio` (half); then, among the rest, pairs that overlap by
+half of the smaller footprint (a split or merged room's remnant). Greedy,
+largest share first, one-to-one, so a stored space is never doubled. A space
+matched to a row a person named (`locked = 1` or `source = manual`) also
+takes its name, kind, source, lock and metadata keys; its outline, heights
+and boundaries are the new ones (the row is replaced in place). A locked row
+nothing matches is kept as stored, with its boundaries on walls that still
+exist, flagged `"unmatched": true` in `metadata` and named at `warn`. Only an
+unmatched new space gets a fresh GUID, `uuid5(project_guid,
+"spaces/<storey>/<cx>,<cy>")` (the polygon's centroid rounded to 5 cm),
+suffixed until unique. Writing the table deletes boundary rows whose space
+row is gone (a tool that deleted spaces with foreign keys off;
+`rux validate` warns about them, reusex-932g). `rux get spaces` (or `rux get
+spaces.<id|guid>`, `spaces.<id>.boundaries`) prints the table; `rux set
+spaces.<id|guid|name>.name|kind|locked <value>` names, relabels or (un)locks
+one (a name or kind makes the row `manual` and locked, reusex-fkf); `rux del
+spaces` removes it, and needs `--force` when any space is locked. `io::load_solid_model` reads it,
 so `rux analyze solid --reference plan.yaml` scores a project's spaces
 directly. `rux create rooms --spaces-json out.yaml` is the earlier debug
 path: it writes the same spaces (same code, same GUIDs) to a file without

@@ -12,6 +12,7 @@
 
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
+#include <reusex/core/space_identity.hpp>
 #include <reusex/core/space_polygon.hpp>
 #include <reusex/core/stage_contract.hpp>
 #include <reusex/io/solid_model_json.hpp>
@@ -206,6 +207,7 @@ TEST_CASE("SpacesStage_Parameters_AreSpacesOptionsDefaults",
   CHECK(std::get<double>(value("guid_match_m")) == d.identity.match_m);
   CHECK(std::get<double>(value("guid_min_area_ratio")) ==
         d.identity.min_area_ratio);
+  CHECK(std::get<double>(value("guid_min_overlap")) == d.identity.min_overlap);
 
   const auto again =
       space_options_from_parameters(space_parameters_json(SpaceStageOptions{}));
@@ -351,4 +353,106 @@ TEST_CASE("SpacesStage_LeidenRooms_IsRefused", "[pipeline][stages][spaces]") {
   CHECK_FALSE(r.ok);
   CHECK(r.invalid_input);
   CHECK(r.message.find("leiden") != std::string::npos);
+}
+
+TEST_CASE("SpacesStage_RenamedThenStoreysRedetected_NamesSurviveNoDuplicates",
+          "[pipeline][stages][spaces]") {
+  // reusex-djf: name a space by hand, re-detect the storeys (the seeded
+  // storey has the identity frame; the detected one puts its origin at the
+  // floor centroid, so the frame moves by ~(2, 1.5) m), re-run the chain
+  // walls -> openings -> rooms -> spaces: the name, kind and lock stay on
+  // the same room, in the same place in the world, and no row is doubled.
+  TempPath project("test_spaces_stage_reframe");
+  ProjectDB db(project.path);
+  seed_band_rooms(db, project);
+  REQUIRE(run(db, project, JobStage::spaces).ok);
+  auto rows = db.spaces();
+  REQUIRE(rows.size() == 2);
+  const auto old_storey = db.storeys().at(0);
+  auto named = rows.front();
+  named.name = "S0-01 Køkken";
+  named.kind = "corridor";
+  named.source = "manual";
+  named.locked = true;
+  db.update_spaces({named}); // what `rux set spaces.<guid>.name` writes
+  const auto world_before = core::space_polygon_centroid(
+      core::space_polygon_world(named, old_storey));
+
+  const auto st = run(db, project, JobStage::storeys);
+  INFO(st.message);
+  REQUIRE(st.ok);
+  const auto new_storey = db.storeys().at(0);
+  REQUIRE(new_storey.guid == old_storey.guid);
+  REQUIRE(new_storey.level_transform != old_storey.level_transform);
+  for (auto stage : {JobStage::walls, JobStage::openings, JobStage::rooms,
+                     JobStage::spaces}) {
+    const auto r = run(db, project, stage);
+    INFO(to_string(stage) << ": " << r.message);
+    REQUIRE(r.ok);
+  }
+
+  rows = db.spaces();
+  CHECK(rows.size() == 2);
+  int named_rows = 0;
+  std::set<std::string> ids;
+  for (const auto &s : rows) {
+    ids.insert(s.guid);
+    CHECK(s.metadata.find("unmatched") == std::string::npos);
+    if (s.name != "S0-01 Køkken")
+      continue;
+    ++named_rows;
+    CHECK(s.guid == named.guid);
+    CHECK(s.kind == "corridor");
+    CHECK(s.locked);
+    CHECK(s.source == "manual");
+    const auto c =
+        core::space_polygon_centroid(core::space_polygon_world(s, new_storey));
+    CHECK_THAT(c[0], WithinAbs(world_before[0], 0.1));
+    CHECK_THAT(c[1], WithinAbs(world_before[1], 0.1));
+  }
+  CHECK(named_rows == 1);
+  CHECK(ids.size() == rows.size());
+  // Every boundary belongs to a stored space and names a stored wall.
+  std::set<std::string> walls;
+  for (const auto &w : db.walls())
+    walls.insert(w.guid);
+  for (const auto &b : db.space_boundaries()) {
+    CHECK(ids.count(b.space) == 1);
+    CHECK(walls.count(b.wall) == 1);
+  }
+  CHECK(db.dangling_space_boundaries() == 0);
+}
+
+TEST_CASE("SpacesStage_UnmatchedLockedSpace_IsKeptFlagged",
+          "[pipeline][stages][spaces]") {
+  // A locked space no detected room covers (drawn by hand outside the
+  // scan) stays, flagged, and is not doubled on the next run.
+  TempPath project("test_spaces_stage_unmatched");
+  ProjectDB db(project.path);
+  seed_band_rooms(db, project);
+  REQUIRE(run(db, project, JobStage::spaces).ok);
+  core::SpaceRecord drawn;
+  drawn.guid = core::deterministic_guid(db.project_guid(), "spaces/drawn");
+  drawn.name = "S0-99 Udeareal";
+  drawn.source = "manual";
+  drawn.locked = true;
+  drawn.polygon.outer = {{10, 10}, {14, 10}, {14, 13}, {10, 13}};
+  drawn.area = 12.0;
+  auto rows = db.spaces();
+  rows.push_back(drawn);
+  db.save_spaces(rows, db.space_boundaries());
+  REQUIRE(db.spaces().size() == 3);
+
+  for (int pass = 0; pass < 2; ++pass) {
+    const auto r = run(db, project, JobStage::spaces);
+    INFO(r.message);
+    REQUIRE(r.ok);
+    CHECK(r.message.find("1 unmatched locked") != std::string::npos);
+    CHECK(db.spaces().size() == 3);
+    const auto kept = db.space_by_guid(drawn.guid);
+    REQUIRE(kept.has_value());
+    CHECK(kept->name == "S0-99 Udeareal");
+    CHECK(kept->polygon.outer == drawn.polygon.outer);
+    CHECK(kept->metadata.find("\"unmatched\":true") != std::string::npos);
+  }
 }
