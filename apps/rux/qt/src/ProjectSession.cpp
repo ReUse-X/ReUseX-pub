@@ -24,6 +24,7 @@ struct ProjectSession::Result {
   QString read_only_reason;
   std::unique_ptr<reusex::ProjectDB> db;
   reusex::ProjectDB::ProjectSummary summary{};
+  SurveyCounts survey{};
   Error error;
   qint64 ms = 0;
   unsigned generation = 0;
@@ -97,6 +98,21 @@ std::shared_ptr<ProjectSession::Result> do_open(const QString &path,
     }
     r->read_only = ro;
     r->summary = r->db->project_summary();
+    // The resources (survey parts) the Start page and the rail count. A
+    // project too old for the survey tables simply has none.
+    try {
+      for (const auto &p : r->db->survey_parts()) {
+        if (p.dismissed)
+          ++r->survey.dismissed;
+        else
+          ++r->survey.parts;
+      }
+      r->survey.types = static_cast<int>(r->db->survey_types().size());
+    } catch (const std::exception &e) {
+      reusex::warn("Qt client: cannot count the survey parts of {}: {}",
+                   path.toStdString(), e.what());
+      r->survey = {};
+    }
   } catch (const std::exception &e) {
     r->db.reset();
     OpenErrorKind kind = classify_open_error(e.what());
@@ -235,6 +251,7 @@ void ProjectSession::apply(const std::shared_ptr<Result> &r) {
   if (r->db) {
     db_ = std::move(r->db);
     summary_ = std::move(r->summary);
+    survey_ = r->survey;
     read_only_ = r->read_only;
     read_only_reason_ = r->read_only_reason;
     error_ = {};
@@ -244,6 +261,7 @@ void ProjectSession::apply(const std::shared_ptr<Result> &r) {
     emit opened();
   } else {
     summary_ = {};
+    survey_ = {};
     read_only_ = false;
     read_only_reason_.clear();
     error_ = r->error;
@@ -265,6 +283,7 @@ void ProjectSession::close() {
   const bool had = db_ != nullptr;
   db_.reset();
   summary_ = {};
+  survey_ = {};
   path_.clear();
   read_only_ = false;
   read_only_reason_.clear();

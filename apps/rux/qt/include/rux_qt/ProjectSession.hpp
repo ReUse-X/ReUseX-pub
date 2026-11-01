@@ -42,6 +42,13 @@ class ProjectSession : public QObject {
     QString detail; ///< the raw exception text
   };
 
+  /// The project's resources (survey parts) and types, counted at open.
+  struct SurveyCounts {
+    int parts = 0;     ///< not marked as an error
+    int dismissed = 0; ///< marked as an error ("Fejlmarkeret")
+    int types = 0;
+  };
+
   explicit ProjectSession(QObject *parent = nullptr);
   ~ProjectSession() override;
 
@@ -69,6 +76,8 @@ class ProjectSession : public QObject {
   reusex::ProjectDB *db() const { return db_.get(); }
   /// Valid while open (taken at open time; reload() refreshes it).
   const reusex::ProjectDB::ProjectSummary &summary() const { return summary_; }
+  /// Valid while open, like summary().
+  const SurveyCounts &survey_counts() const { return survey_; }
   const Error &error() const { return error_; }
   /// Milliseconds the last open took.
   qint64 load_ms() const { return load_ms_; }
@@ -103,6 +112,7 @@ class ProjectSession : public QObject {
   QString read_only_reason_;
   std::unique_ptr<reusex::ProjectDB> db_;
   reusex::ProjectDB::ProjectSummary summary_{};
+  SurveyCounts survey_{};
   Error error_;
   qint64 load_ms_ = 0;
 
