@@ -114,7 +114,8 @@ TEST_CASE("SolidModelJson_RoundTrip_IsLossless", "[io][solid_model]") {
   CHECK(first == second);
 
   const auto j = nlohmann::json::parse(first);
-  CHECK(j.at("model_version") == reusex::io::kSolidModelJsonVersion);
+  // A flat model is written as version 1, readable by a version-1 build.
+  CHECK(j.at("model_version") == 1);
   CHECK(j.at("walls").size() == 7);
   CHECK(j.at("spaces").size() == 2);
   CHECK(j.at("openings").size() == 3);
@@ -1165,4 +1166,92 @@ TEST_CASE("ImportPlan_LogsOneRowWithTheCounts", "[io][solid_model]") {
     for (const auto id : run_ids(db, "walls"))
       CHECK(id == caller);
   }
+}
+
+// ── Sloped ceilings and wall tops (model_version 2, reusex-546) ─────────────
+
+TEST_CASE("SolidModelJson_AtticFixture_ReadsSlopesAndIsAFixedPoint",
+          "[io][solid_model][sloped]") {
+  const SolidModel m =
+      reusex::io::solid_model_from_file(fixture("attic.plan.json"));
+  REQUIRE(m.spaces.size() == 2);
+  REQUIRE(m.spaces[0].ceiling_planes.size() == 2);
+  CHECK(m.spaces[0].ceiling_planes[0].at[2] == 1.15);
+  CHECK(m.spaces[0].ceiling_planes[1].slope[1] == -0.7002);
+  REQUIRE(m.walls.size() == 7);
+  REQUIRE(m.walls[2].top.size() == 3);
+  CHECK(m.walls[2].top[1][1] == 2.5504);
+  CHECK(m.walls[0].top.empty());
+
+  const std::string first = solid_model_to_json(m);
+  CHECK(solid_model_to_json(solid_model_from_json(first)) == first);
+  const auto j = nlohmann::json::parse(first);
+  CHECK(j.at("model_version") == 2);
+  CHECK(j.at("spaces")[0].contains("ceiling_planes"));
+  CHECK(j.at("walls")[2].contains("top"));
+  CHECK_FALSE(j.at("walls")[0].contains("top"));
+  // YAML carries the same.
+  const SolidModel y =
+      reusex::io::solid_model_from_yaml(reusex::io::solid_model_to_yaml(m));
+  CHECK(solid_model_to_json(y) == first);
+}
+
+TEST_CASE("SolidModelFromJson_InvalidSlopes_ThrowNamingTheElement",
+          "[io][solid_model][sloped]") {
+  auto doc = nlohmann::json::parse(read_file(fixture("attic.plan.json")));
+  const auto throws = [](const nlohmann::json &d, const char *what) {
+    CHECK_THROWS_WITH(solid_model_from_json(d.dump()), ContainsSubstring(what));
+  };
+  SECTION("ceiling_planes in a version-1 document") {
+    doc["model_version"] = 1;
+    throws(doc, "needs model_version 2");
+  }
+  SECTION("a ceiling below the floor at a vertex") {
+    doc["spaces"][0]["ceiling_planes"][0]["at"][2] = -0.5;
+    throws(doc, "below z_floor");
+  }
+  SECTION("a near-vertical plane") {
+    doc["spaces"][0]["ceiling_planes"][0]["slope"] = {0.0, 9.0};
+    throws(doc, "steeper than");
+  }
+  SECTION("an unknown key in a plane") {
+    doc["spaces"][0]["ceiling_planes"][0]["normal"] = {0, 0, 1};
+    throws(doc, "unknown key 'normal'");
+  }
+  SECTION("a plane without its slope") {
+    doc["spaces"][0]["ceiling_planes"][0].erase("slope");
+    throws(doc, "slope");
+  }
+  SECTION("a wall top whose s goes back") {
+    doc["walls"][2]["top"][2][0] = 1.0;
+    throws(doc, "must exceed the previous s");
+  }
+  SECTION("a wall top at its base") {
+    doc["walls"][2]["top"][0][1] = 0.0;
+    throws(doc, "above z_base");
+  }
+  SECTION("a one-point wall top") {
+    doc["walls"][2]["top"] =
+        nlohmann::json::array({nlohmann::json::array({0.0, 1.0})});
+    throws(doc, "at least 2 points");
+  }
+  SECTION("model_version 3") {
+    doc["model_version"] = 3;
+    throws(doc, "not supported");
+  }
+}
+
+TEST_CASE("StoreSolidModel_AtticFixture_KeepsSlopesThroughTheTables",
+          "[io][solid_model][sloped]") {
+  reusex::test_support::TempPath tmp("test_store_solid_attic");
+  SolidModel m = reusex::io::solid_model_from_file(fixture("attic.plan.json"));
+  reusex::io::mark_imported(m);
+  {
+    reusex::ProjectDB db(tmp.path);
+    const auto r = reusex::io::store_solid_model(db, m);
+    CHECK(r.not_stored.empty());
+  }
+  const reusex::ProjectDB db(tmp.path, /*readOnly*/ true);
+  const SolidModel back = reusex::io::load_solid_model(db);
+  CHECK(canonical(back) == canonical(m));
 }

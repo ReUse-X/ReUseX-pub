@@ -6,6 +6,18 @@
 #
 # Hand-authored ground-truth target for the solid-model benchmark
 # (docs/design/solid-model-json.md, docs/guides/solid-model-reference-authoring.md).
+# Sloped ceilings (model_version 2, reusex-546, 2026-11-01): the storey-1 rooms
+# under the roof slopes have ceiling planes (slope along x: the ridge runs
+# N-S), z_ceiling being the flat part (5.03-5.10) or, in the gable room, the
+# ridge (6.55). Measured from the raw cloud, not from any detected plane:
+# points >= 0.8 m above the room's floor inside its polygon, binned every
+# 0.2 m along x, the 90th percentile per bin; the flat part is the median of
+# the bins within 6 cm of the highest, each slope a straight line through
+# the bins >= 12 cm below it on that side (residuals <= 5 cm). The roof is
+# ~45 deg (0.90-1.05 m/m). Bedroom E and the corridor / landing are flat.
+# Wall tops (knee and gable walls) are not authored yet: their height stays
+# the highest point.
+#
 # Never round-trip this file through a writer (rux edit plan --export drops the
 # comments): edit it by hand with the --watch loop.
 #
@@ -79,7 +91,7 @@
 # area between it and the gable room (x -1.5..-0.1, y 0.6..1.55) are unclear.
 #
 # Rooms named from the sensor images (frame ids in each space's metadata).
-model_version: 1
+model_version: 2
 units: m
 name: "house2 reference (DRAFT)"
 description: "DRAFT - needs maintainer review. Agent-authored on the house2 scan (scan archive house-2_c582d1f758) with the loop in docs/guides/solid-model-reference-authoring.md, re-fitted on the DRAFT v3 pose reference (tests/fixtures/pose_reference/house2.*, reusex-ghy); not ground truth (decision D5). Two storeys in one detected level frame whose axes are the Manhattan grid; every wall runs along x or y. Living room N's outline and the conservatory's east side are low-confidence estimates."
@@ -645,7 +657,10 @@ spaces:
     polygon:
       outer: [[-6.360, -3.760], [0.730, -3.760], [0.730, 0.240], [-6.360, 0.240]]
     z_floor: 3.11
-    z_ceiling: 6.54
+    z_ceiling: 6.55
+    ceiling_planes:  # roof slope(s), measured (see the header)
+      - {at: [-6.360, -3.760, 4.056], slope: [0.976, 0.0]}
+      - {at: [0.730, -3.760, 4.011], slope: [-1.011, 0.0]}
     source: manual
     locked: true
     metadata: {identified_by: "Exposed collar beams, arched brick-framed gable window (frames 258-280). Floor at 3.11, 0.22 m above the rest of storey 1 on the corrected poses too (old plan: 0.14 m, blamed on drift); open to the ridge at 6.54. North side open to the stairwell between x -3.2 and -1.6."}
@@ -656,7 +671,9 @@ spaces:
     polygon:
       outer: [[-6.080, 0.720], [-3.820, 0.720], [-3.820, 8.620], [-6.080, 8.620]]
     z_floor: 2.90
-    z_ceiling: 5.06
+    z_ceiling: 5.08
+    ceiling_planes:  # roof slope(s), measured (see the header)
+      - {at: [-6.080, 0.720, 4.281], slope: [0.973, 0.0]}
     source: manual
     locked: true
     confidence: 0.6
@@ -669,6 +686,8 @@ spaces:
       outer: [[-6.050, 9.370], [-3.650, 9.370], [-3.650, 8.720], [-2.500, 8.720], [-2.500, 10.840], [-6.050, 10.840]]
     z_floor: 2.84
     z_ceiling: 5.09
+    ceiling_planes:  # roof slope(s), measured (see the header)
+      - {at: [-6.050, 8.720, 3.988], slope: [1.051, 0.0]}
     source: manual
     locked: true
     metadata: {identified_by: "Wardrobe, north gable window (frames 352-361, cameras at x -3.2..-3.0, y 9.1-10.5). Includes the corridor's north end (x -3.65..-2.5, north of y 8.72, a line where the corridor ends)."}
@@ -679,7 +698,9 @@ spaces:
     polygon:
       outer: [[-2.500, 7.470], [1.080, 7.470], [1.080, 10.550], [-2.500, 10.550]]
     z_floor: 2.88
-    z_ceiling: 5.07
+    z_ceiling: 5.08
+    ceiling_planes:  # roof slope(s), measured (see the header)
+      - {at: [1.080, 7.470, 4.101], slope: [-0.955, 0.0]}
     source: manual
     locked: true
     metadata: {identified_by: "Gable-end room (frames 336-348)."}
@@ -713,6 +734,8 @@ spaces:
       outer: [[-1.580, 1.580], [0.620, 1.580], [0.620, 3.900], [-1.580, 3.900]]
     z_floor: 2.91
     z_ceiling: 5.03
+    ceiling_planes:  # roof slope(s), measured (see the header)
+      - {at: [0.620, 1.580, 4.375], slope: [-0.904, 0.0]}
     source: manual
     locked: true
     confidence: 0.5

@@ -26,8 +26,11 @@ class ProjectDB;
 
 namespace reusex::io {
 
-/// The `model_version` this build reads and writes.
-inline constexpr int kSolidModelJsonVersion = 1;
+/// The highest `model_version` this build reads (it reads 1 and 2). Version 2
+/// (reusex-546) adds a space's `ceiling_planes` and a wall's `top`; the
+/// writer emits 1 for a model that uses neither, so a flat model stays
+/// readable by a version-1 build.
+inline constexpr int kSolidModelJsonVersion = 2;
 
 /// Serialise a model. Keys come out in a fixed order and every element array
 /// the model provides (`SolidModel::has_*`) is written, so the output is

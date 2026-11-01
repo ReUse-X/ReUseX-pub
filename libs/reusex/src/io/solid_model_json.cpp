@@ -7,6 +7,7 @@
 #include "core/ProjectDB.hpp"
 #include "core/guid.hpp"
 #include "core/logging.hpp"
+#include "reusex/core/sloped_ceiling.hpp"
 #include "yaml_json.hpp"
 
 #include <fmt/format.h>
@@ -300,9 +301,22 @@ ojson ring_json(const std::vector<core::PlanPoint> &ring) {
 // one reader. `solid_model_to_yaml` emits the same ordered document
 // `solid_model_to_json` builds, so both front ends agree on key order.
 
+/// The lowest model_version that holds @p m: 2 when a space has ceiling
+/// planes or a wall a top profile (reusex-546), else 1, so a flat model is
+/// still read by a version-1 build.
+int needed_version(const core::SolidModel &m) {
+  for (const auto &s : m.spaces)
+    if (!s.ceiling_planes.empty())
+      return 2;
+  for (const auto &w : m.walls)
+    if (!w.top.empty())
+      return 2;
+  return 1;
+}
+
 ojson build_document(const core::SolidModel &m) {
   ojson doc;
-  doc["model_version"] = kSolidModelJsonVersion;
+  doc["model_version"] = needed_version(m);
   doc["units"] = "m";
   if (!m.name.empty())
     doc["name"] = m.name;
@@ -346,6 +360,8 @@ ojson build_document(const core::SolidModel &m) {
       o["face_points"] = {w.face_a_points, w.face_b_points};
       o["co_visibility"] = w.co_visibility;
       o["axis_family"] = w.axis_family;
+      if (!w.top.empty())
+        o["top"] = w.top;
       write_common(o, w, record_name("walls", &w - m.walls.data(), w.guid));
       arr.push_back(std::move(o));
     }
@@ -384,6 +400,12 @@ ojson build_document(const core::SolidModel &m) {
       o["polygon"] = std::move(poly);
       o["z_floor"] = s.z_floor;
       o["z_ceiling"] = s.z_ceiling;
+      if (!s.ceiling_planes.empty()) {
+        ojson planes = ojson::array();
+        for (const auto &p : s.ceiling_planes)
+          planes.push_back({{"at", p.at}, {"slope", p.slope}});
+        o["ceiling_planes"] = std::move(planes);
+      }
       o["area"] = s.area;
       o["perimeter"] = s.perimeter;
       o["volume"] = s.volume;
@@ -497,10 +519,20 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
   const json &version = top.at("model_version");
   if (!version.is_number_integer())
     fail("document", "'model_version' must be an integer");
-  if (version.dump() != std::to_string(kSolidModelJsonVersion))
+  const int model_version = version.dump() == "1"   ? 1
+                            : version.dump() == "2" ? 2
+                                                    : 0;
+  if (model_version < 1 || model_version > kSolidModelJsonVersion)
     fail("document",
-         fmt::format("model_version {} is not supported (this build reads {})",
+         fmt::format("model_version {} is not supported (this build reads 1 "
+                     "to {})",
                      version.dump(), kSolidModelJsonVersion));
+  // Keys a version-1 document must not carry (version 1 readers reject
+  // them as unknown).
+  const auto needs_v2 = [&](const Reader &r, const char *key) {
+    if (r.has(key) && model_version < 2)
+      fail(r.where(), fmt::format("'{}' needs model_version 2", key));
+  };
   if (top.text("units", "m") != "m")
     fail("document", "'units' must be \"m\"");
 
@@ -542,8 +574,9 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
   m.provided.walls = for_each_element(doc, "walls", [&](const Reader &r) {
     r.only({"guid", "storey", "axis", "z_base", "height", "thickness",
             "thickness_ci", "lean_deg", "is_external", "assumed", "seen_share",
-            "face_points", "co_visibility", "axis_family", "source", "locked",
-            "confidence", "metadata"});
+            "face_points", "co_visibility", "axis_family", "top", "source",
+            "locked", "confidence", "metadata"});
+    needs_v2(r, "top");
     core::WallRecord w;
     w.guid = r.text("guid", "");
     check_unique_guid(guids, w.guid, r.where());
@@ -583,6 +616,15 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
     }
     w.co_visibility = r.number("co_visibility", w.co_visibility);
     w.axis_family = r.integer("axis_family", w.axis_family);
+    if (r.has("top")) {
+      const json &top = r.at("top");
+      if (!top.is_array())
+        fail(r.where(), "'top' must be an array of [s, z] points");
+      for (std::size_t i = 0; i < top.size(); ++i)
+        w.top.push_back(r.point(top[i], fmt::format("top[{}]", i)));
+      if (const auto bad = core::check_wall_top(w); !bad.empty())
+        fail(r.where(), bad);
+    }
     read_common(r, w.source, w.locked, w.confidence, w.metadata);
     m.walls.push_back(std::move(w));
   });
@@ -611,8 +653,9 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
   std::unordered_set<std::string> space_guids;
   m.provided.spaces = for_each_element(doc, "spaces", [&](const Reader &r) {
     r.only({"guid", "storey", "name", "kind", "polygon", "z_floor", "z_ceiling",
-            "area", "perimeter", "volume", "compactness", "room_label",
-            "source", "locked", "confidence", "metadata"});
+            "ceiling_planes", "area", "perimeter", "volume", "compactness",
+            "room_label", "source", "locked", "confidence", "metadata"});
+    needs_v2(r, "ceiling_planes");
     core::SpaceRecord s;
     s.guid = r.text("guid", "");
     check_unique_guid(guids, s.guid, r.where());
@@ -636,6 +679,22 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
     check_polygon(s.polygon, r.where());
     s.z_floor = r.number("z_floor", s.z_floor);
     s.z_ceiling = r.number("z_ceiling", s.z_ceiling);
+    if (r.has("ceiling_planes")) {
+      const json &planes = r.at("ceiling_planes");
+      if (!planes.is_array())
+        fail(r.where(), "'ceiling_planes' must be an array of planes");
+      for (std::size_t i = 0; i < planes.size(); ++i) {
+        const Reader pr(planes[i],
+                        r.where() + fmt::format(".ceiling_planes[{}]", i));
+        pr.only({"at", "slope"});
+        const auto at = pr.numbers("at", 3, "[x, y, z]");
+        const auto slope = pr.numbers("slope", 2, "[dz/dx, dz/dy]");
+        s.ceiling_planes.push_back(
+            core::CeilingPlane{{at[0], at[1], at[2]}, {slope[0], slope[1]}});
+      }
+      if (const auto bad = core::check_ceiling_planes(s); !bad.empty())
+        fail(r.where(), bad);
+    }
     s.area = r.number("area", s.area);
     s.perimeter = r.number("perimeter", s.perimeter);
     s.volume = r.number("volume", s.volume);
@@ -959,13 +1018,14 @@ std::string opening_key(const core::OpeningRecord &o) {
 // which one gets which guid does not matter.
 std::string full_fields(const core::WallRecord &w) {
   return fmt::format(
-      "{:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} "
-      "{:.17g} {:.17g} {} {} {:.17g} {} {} {:.17g} {} {} {} {:.17g} {}",
-      w.x0, w.y0, w.x1, w.y1, w.z_base, w.height, w.thickness,
-      w.thickness_ci_lo, w.thickness_ci_hi, w.lean_deg, w.is_external,
-      w.assumed, w.seen_share, w.face_a_points, w.face_b_points,
-      w.co_visibility, w.axis_family, w.source, w.locked, w.confidence,
-      w.metadata);
+             "{:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} "
+             "{:.17g} {:.17g} {} {} {:.17g} {} {} {:.17g} {} {} {} {:.17g} {}",
+             w.x0, w.y0, w.x1, w.y1, w.z_base, w.height, w.thickness,
+             w.thickness_ci_lo, w.thickness_ci_hi, w.lean_deg, w.is_external,
+             w.assumed, w.seen_share, w.face_a_points, w.face_b_points,
+             w.co_visibility, w.axis_family, w.source, w.locked, w.confidence,
+             w.metadata) +
+         (w.top.empty() ? std::string() : core::encode_wall_top(w.top));
 }
 std::string full_fields(const core::SpaceRecord &s) {
   std::string out = fmt::format(
@@ -982,6 +1042,7 @@ std::string full_fields(const core::SpaceRecord &s) {
   ring(s.polygon.outer);
   for (const auto &h : s.polygon.holes)
     ring(h);
+  out += core::encode_ceiling_planes(s.ceiling_planes);
   return out;
 }
 std::string full_fields(const core::OpeningRecord &o) {

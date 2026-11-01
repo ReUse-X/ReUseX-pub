@@ -5,6 +5,7 @@
 #include "reusex/reconstruction/solids.hpp"
 
 #include "reusex/core/logging.hpp"
+#include "reusex/core/sloped_ceiling.hpp"
 #include "reusex/geometry/transform_utils.hpp"
 
 #include <CGAL/Boolean_set_operations_2.h>
@@ -12,8 +13,10 @@
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Polygon_2.h>
+#include <CGAL/Polygon_mesh_processing/clip.h>
 #include <CGAL/Polygon_mesh_processing/corefinement.h>
 #include <CGAL/Polygon_mesh_processing/measure.h>
+#include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Polygon_set_2.h>
 #include <CGAL/Polygon_with_holes_2.h>
@@ -300,6 +303,95 @@ void finish(ElementSolid &e, Mesh &m, const Eigen::Affine3d &T) {
   }
 }
 
+// ── Sloped ceilings (reusex-546) ───────────────────────────────────────────
+
+/// The level-frame plane z = p(x, y) + dz as a CGAL plane whose negative side
+/// is below it: -sx x - sy y + z + (sx x0 + sy y0 - z0 - dz) = 0.
+K::Plane_3 below_plane(const core::CeilingPlane &p, double dz) {
+  return {-p.slope[0], -p.slope[1], 1.0,
+          p.slope[0] * p.at[0] + p.slope[1] * p.at[1] - p.at[2] - dz};
+}
+
+// The sloped-ceiling booleans run on exact constructions: with inexact ones
+// the clip / corefinement of a long thin roof piece meets "unauthorized
+// intersections of constraints" on real scans (Sygehusgrunden).
+using EMesh = CGAL::Surface_mesh<EK::Point_3>;
+
+EMesh to_exact(const Mesh &m) {
+  EMesh out;
+  std::vector<EMesh::Vertex_index> v(m.num_vertices());
+  for (const auto vi : m.vertices()) {
+    const auto &p = m.point(vi);
+    v[vi.idx()] = out.add_vertex(EK::Point_3(p.x(), p.y(), p.z()));
+  }
+  for (const auto f : m.faces()) {
+    std::vector<EMesh::Vertex_index> ids;
+    for (const auto vi : CGAL::vertices_around_face(m.halfedge(f), m))
+      ids.push_back(v[vi.idx()]);
+    out.add_face(ids);
+  }
+  return out;
+}
+
+Mesh to_inexact(const EMesh &m) {
+  Mesh out;
+  std::vector<Mesh::Vertex_index> v(m.num_vertices());
+  for (const auto vi : m.vertices()) {
+    const auto &p = m.point(vi);
+    v[vi.idx()] = out.add_vertex(K::Point_3(CGAL::to_double(p.x()),
+                                            CGAL::to_double(p.y()),
+                                            CGAL::to_double(p.z())));
+  }
+  for (const auto f : m.faces()) {
+    std::vector<Mesh::Vertex_index> ids;
+    for (const auto vi : CGAL::vertices_around_face(m.halfedge(f), m))
+      ids.push_back(v[vi.idx()]);
+    out.add_face(ids);
+  }
+  return out;
+}
+
+/// Keep the part of the closed mesh @p m below every plane (raised by
+/// @p dz), exactly. False when a clip failed or left nothing.
+bool clip_below(EMesh &m, const std::vector<core::CeilingPlane> &planes,
+                double dz) {
+  for (const auto &p : planes) {
+    const EK::FT sx(p.slope[0]), sy(p.slope[1]);
+    const EK::Plane_3 plane(-sx, -sy, EK::FT(1),
+                            sx * EK::FT(p.at[0]) + sy * EK::FT(p.at[1]) -
+                                EK::FT(p.at[2]) - EK::FT(dz));
+    try {
+      PMP::clip(m, plane, CGAL::parameters::clip_volume(true));
+    } catch (const std::exception &e) {
+      debug("solids: clipping by a ceiling plane threw: {}", e.what());
+      return false;
+    }
+    if (m.number_of_faces() == 0)
+      return false;
+  }
+  return true;
+}
+
+/// clip_below() on an inexact mesh, through the exact kernel.
+bool clip_below(Mesh &m, const std::vector<core::CeilingPlane> &planes,
+                double dz) {
+  EMesh e = to_exact(m);
+  if (!clip_below(e, planes, dz) || !CGAL::is_closed(e))
+    return false;
+  m = to_inexact(e);
+  return true;
+}
+
+/// @p p (level frame) as a world plane {a, b, c, d}, a x + b y + c z + d = 0,
+/// the kept side negative.
+std::array<double, 4> world_plane(const K::Plane_3 &p,
+                                  const Eigen::Affine3d &T) {
+  const Eigen::Vector3d n_l(p.a(), p.b(), p.c());
+  const Eigen::Vector3d n_w = T.linear() * n_l;
+  // T is rigid: n_l . x_l + d = n_w . (x_w - t) + d.
+  return {n_w.x(), n_w.y(), n_w.z(), p.d() - n_w.dot(T.translation())};
+}
+
 bool inside_ring(const Ring &r, const Vec2 &p) {
   bool in = false;
   for (std::size_t i = 0, j = r.size() - 1; i < r.size(); j = i++) {
@@ -329,6 +421,30 @@ struct WallBox {
   Vec2 p0, d;
   double len = 0.0, s0 = 0.0, s1 = 0.0, lo = 0.0, hi = 0.0, z0 = 0.0, z1 = 0.0;
   bool valid = false;
+  /// Sloped top (s, z), capped at z1 (reusex-546); empty = flat at z1.
+  std::vector<Vec2> top;
+  /// The sloped space whose ceiling the derived top follows (index into
+  /// model.spaces), -1 for none: the wall's roof goes with that space's.
+  int slope_space = -1;
+
+  /// The top at @p s: the profile interpolated (constant past its ends),
+  /// capped at z1.
+  [[nodiscard]] double top_at(double s) const {
+    if (top.empty())
+      return z1;
+    double z = top.front().y();
+    if (s >= top.back().x()) {
+      z = top.back().y();
+    } else if (s > top.front().x()) {
+      std::size_t i = 1;
+      while (i + 1 < top.size() && top[i].x() < s)
+        ++i;
+      const Vec2 &a = top[i - 1], &b = top[i];
+      const double w = b.x() > a.x() ? (s - a.x()) / (b.x() - a.x()) : 0.0;
+      z = a.y() + w * (b.y() - a.y());
+    }
+    return std::min(z1, z);
+  }
 
   Vec2 at(double s, double t) const {
     return p0 + d * s + Vec2(-d.y(), d.x()) * t;
@@ -361,6 +477,8 @@ std::vector<WallBox> wall_boxes(const core::SolidModel &model,
     b.s1 = b.len;
     b.z0 = w.z_base;
     b.z1 = w.z_base + w.height;
+    for (const auto &q : w.top)
+      b.top.emplace_back(q[0], q[1]);
     if (w.thickness > 0.0) {
       b.lo = -0.5 * w.thickness;
       b.hi = 0.5 * w.thickness;
@@ -416,6 +534,71 @@ std::vector<WallBox> wall_boxes(const core::SolidModel &model,
   return boxes;
 }
 
+/// The s values where a wall's top bends: its ends, the profile's vertices
+/// between them, and where the profile crosses the cap z1.
+std::vector<double> top_breaks(const WallBox &b) {
+  std::vector<double> ss{b.s0, b.s1};
+  for (std::size_t i = 0; i < b.top.size(); ++i) {
+    const Vec2 &q = b.top[i];
+    if (q.x() > b.s0 && q.x() < b.s1)
+      ss.push_back(q.x());
+    if (i == 0)
+      continue;
+    const Vec2 &a = b.top[i - 1];
+    if ((a.y() - b.z1) * (q.y() - b.z1) < 0.0) {
+      const double s =
+          a.x() + (b.z1 - a.y()) / (q.y() - a.y()) * (q.x() - a.x());
+      if (s > b.s0 && s < b.s1)
+        ss.push_back(s);
+    }
+  }
+  std::sort(ss.begin(), ss.end());
+  ss.erase(std::unique(ss.begin(), ss.end(),
+                       [](double x, double y) { return y - x < 1e-9; }),
+           ss.end());
+  return ss;
+}
+
+/// Does the top dip below z1 anywhere along the wall (by more than 1 mm)?
+bool has_sloped_top(const WallBox &b) {
+  if (b.top.empty())
+    return false;
+  for (const double s : top_breaks(b))
+    if (b.top_at(s) < b.z1 - 1e-3)
+      return true;
+  return false;
+}
+
+/// The wall's elevation in (s, z), counter-clockwise: the bottom at z0 from
+/// s0 to s1, then the top back from s1 to s0 (never lower than 1 cm above
+/// the bottom).
+Ring wall_elevation(const WallBox &b) {
+  const auto ss = top_breaks(b);
+  Ring r{{b.s0, b.z0}, {b.s1, b.z0}};
+  for (auto it = ss.rbegin(); it != ss.rend(); ++it)
+    r.emplace_back(*it, std::max(b.z0 + 0.01, b.top_at(*it)));
+  return r;
+}
+
+/// The wall's closed solid before openings: its box, or with a sloped top its
+/// elevation extruded across the thickness (local (s, z, w) mapped back to
+/// the level frame, w along minus the left normal so the frame stays
+/// right-handed and the faces outward).
+std::optional<Mesh> wall_mesh(const WallBox &b) {
+  if (!has_sloped_top(b))
+    return extrude(b.footprint(), {}, b.z0, b.z1);
+  auto m = extrude(wall_elevation(b), {}, -b.hi, -b.lo);
+  if (!m)
+    return m;
+  const Vec2 n(-b.d.y(), b.d.x());
+  for (const auto v : m->vertices()) {
+    const auto p = m->point(v);
+    const Vec2 xy = b.p0 + b.d * p.x() - n * p.z();
+    m->point(v) = K::Point_3(xy.x(), xy.y(), p.y());
+  }
+  return m;
+}
+
 ElementSolid build_wall(const WallBox &b,
                         const std::vector<const core::OpeningRecord *> &ops,
                         const Frames &frames, const SolidsOptions &opts,
@@ -431,7 +614,12 @@ ElementSolid build_wall(const WallBox &b,
   e.profile.depth = b.z1 - b.z0;
   e.profile.placement = row_major(T * local_frame(b.p0, b.z0, b.d));
 
-  auto box = extrude(b.footprint(), {}, b.z0, b.z1);
+  if (has_sloped_top(b))
+    for (const auto &q : wall_elevation(b))
+      if (q.y() > b.z0 + 1e-12)
+        e.top.push_back({q.x(), q.y() - b.z0});
+  std::reverse(e.top.begin(), e.top.end());
+  auto box = wall_mesh(b);
   Mesh m = box ? std::move(*box) : Mesh{};
   const double eps = 1e-3, over = opts.opening_overcut_m;
   for (const auto *o : ops) {
@@ -455,7 +643,7 @@ ElementSolid build_wall(const WallBox &b,
       c = b.s1 + over;
     if (zs <= b.z0 + eps)
       zs = b.z0 - over;
-    if (zh >= b.z1 - eps)
+    if (zh >= std::min(b.top_at(a), b.top_at(c)) - eps)
       zh = b.z1 + over;
     const double lo = b.lo - over, hi = b.hi + over;
     OpeningVoid v;
@@ -498,6 +686,92 @@ ElementSolid build_wall(const WallBox &b,
   }
   finish(e, m, T);
   return e;
+}
+
+/// A detected wall beside a space with a sloped ceiling takes its top from
+/// the ceilings it meets (gable and knee walls, reusex-546): at every s the
+/// highest ceiling of the spaces on either side there, evaluated on the
+/// axis. Sampled every 0.25 m plus where each sloped space's ceiling bends
+/// along the axis (two of its planes, or a plane and its cap, meet), so a
+/// gable's peak is kept exactly; capped at z1, simplified to its bends.
+void follow_sloped_ceilings(WallBox &b, const core::SolidModel &model,
+                            const std::vector<std::size_t> &beside,
+                            double off) {
+  std::vector<std::size_t> sloped;
+  for (const auto si : beside)
+    if (!model.spaces[si].ceiling_planes.empty())
+      sloped.push_back(si);
+  if (sloped.empty())
+    return;
+  std::vector<double> ss{b.s0, b.s1};
+  for (double v = std::ceil(b.s0 / 0.25) * 0.25; v < b.s1; v += 0.25)
+    ss.push_back(v);
+  // Bends of each sloped ceiling along the axis line.
+  const auto along = [&](const core::SpaceRecord &s, std::size_t k, double t) {
+    const Vec2 p = b.at(t, 0.0);
+    return k < s.ceiling_planes.size() ? s.ceiling_planes[k].z_at(p.x(), p.y())
+                                       : s.z_ceiling;
+  };
+  for (const auto si : sloped) {
+    const auto &s = model.spaces[si];
+    const std::size_t n = s.ceiling_planes.size() + 1; // planes + the cap
+    for (std::size_t i = 0; i < n; ++i)
+      for (std::size_t j = i + 1; j < n; ++j) {
+        const double ai = along(s, i, 0.0), bi = along(s, i, 1.0) - ai;
+        const double aj = along(s, j, 0.0), bj = along(s, j, 1.0) - aj;
+        if (std::abs(bi - bj) < 1e-9)
+          continue;
+        const double t = (aj - ai) / (bi - bj);
+        if (t > b.s0 && t < b.s1)
+          ss.push_back(t);
+      }
+  }
+  std::sort(ss.begin(), ss.end());
+  ss.erase(std::unique(ss.begin(), ss.end(),
+                       [](double x, double y) { return y - x < 1e-6; }),
+           ss.end());
+
+  const int storey = b.wall->storey;
+  std::vector<Vec2> top;
+  int best_space = -1;
+  double best_area = -1.0;
+  for (const double sv : ss) {
+    const Vec2 p = b.at(std::clamp(sv, 0.0, b.len), 0.0);
+    double z = -std::numeric_limits<double>::infinity();
+    for (const double t : {off, -off}) {
+      const Vec2 q = b.at(std::clamp(sv, 0.0, b.len), t);
+      for (std::size_t si = 0; si < model.spaces.size(); ++si) {
+        const auto &s = model.spaces[si];
+        if (s.storey != storey || !(s.z_ceiling > s.z_floor) ||
+            !inside_space(s, q))
+          continue;
+        z = std::max(z, core::ceiling_at(s, p.x(), p.y()));
+        if (!s.ceiling_planes.empty() && std::max(s.area, 0.0) > best_area) {
+          best_area = std::max(s.area, 0.0);
+          best_space = static_cast<int>(si);
+        }
+      }
+    }
+    if (std::isfinite(z))
+      top.emplace_back(sv, std::clamp(z, b.z0 + 0.05, b.z1));
+  }
+  if (top.size() < 2 || best_space < 0)
+    return;
+  // Past the probed stretch the top holds its last value (top_at); drop
+  // points on a straight line between their neighbours.
+  std::vector<Vec2> simple{top.front()};
+  for (std::size_t i = 1; i + 1 < top.size(); ++i) {
+    const Vec2 &a = simple.back(), &c = top[i + 1], &q = top[i];
+    const double w = (q.x() - a.x()) / (c.x() - a.x());
+    if (std::abs(a.y() + w * (c.y() - a.y()) - q.y()) > 1e-4)
+      simple.push_back(q);
+  }
+  simple.push_back(top.back());
+  b.top = std::move(simple);
+  if (has_sloped_top(b))
+    b.slope_space = best_space;
+  else
+    b.top.clear();
 }
 
 // ── Slabs ───────────────────────────────────────────────────────────────────
@@ -674,6 +948,98 @@ ElementSolid build_slab(const core::StoreyRecord &st, const Piece &piece,
   return e;
 }
 
+/// A roof slab over a space with a sloped ceiling (reusex-546): the layer
+/// between the ceiling and the ceiling raised by @p thickness over @p piece,
+/// as (the piece's prism under the raised ceiling) minus (a wider prism
+/// under the ceiling). The two never share a face, so the corefinement has
+/// no coplanar case. Falls back to a flat slab at the space's z_ceiling,
+/// with a warning, when the boolean fails.
+/// @p r without vertices within 0.1 mm of the previous one: a union of
+/// footprints leaves such near-duplicates, and the triangles they make break
+/// the booleans of a sloped roof.
+Ring tidy_ring(const Ring &r) {
+  Ring out;
+  for (const auto &p : r)
+    if (out.empty() || (p - out.back()).norm() >= 1e-4)
+      out.push_back(p);
+  while (out.size() > 1 && (out.front() - out.back()).norm() < 1e-4)
+    out.pop_back();
+  return out;
+}
+
+ElementSolid build_sloped_roof(const core::StoreyRecord &st,
+                               const Piece &piece_in, int part,
+                               const core::SpaceRecord &space, double thickness,
+                               const Frames &frames) {
+  Piece piece = piece_in;
+  piece.outer = tidy_ring(piece.outer);
+  for (auto &h : piece.holes)
+    h = tidy_ring(h);
+  double zlow = std::numeric_limits<double>::infinity();
+  double x0 = zlow, y0 = zlow, x1 = -zlow, y1 = -zlow;
+  for (const auto &v : piece.outer) {
+    zlow = std::min(zlow, core::ceiling_at(space, v.x(), v.y()));
+    x0 = std::min(x0, v.x());
+    y0 = std::min(y0, v.y());
+    x1 = std::max(x1, v.x());
+    y1 = std::max(y1, v.y());
+  }
+  zlow -= 0.05;
+  const double cap = space.z_ceiling;
+  std::optional<Mesh> above, below;
+  if (std::isfinite(zlow) && cap > zlow) {
+    above = extrude(piece.outer, piece.holes, zlow, cap + thickness);
+    below = extrude({{x0 - 1.0, y0 - 1.0},
+                     {x1 + 1.0, y0 - 1.0},
+                     {x1 + 1.0, y1 + 1.0},
+                     {x0 - 1.0, y1 + 1.0}},
+                    {}, zlow - 1.0, cap);
+  }
+  Mesh out;
+  EMesh a, b, diff;
+  if (above && below) {
+    a = to_exact(*above);
+    b = to_exact(*below);
+  }
+  bool ok = above && below && CGAL::is_closed(a) &&
+            !PMP::does_self_intersect(a) &&
+            clip_below(a, space.ceiling_planes, thickness) &&
+            clip_below(b, space.ceiling_planes, 0.0);
+  if (ok) {
+    try {
+      ok = PMP::corefine_and_compute_difference(a, b, diff) &&
+           CGAL::is_closed(diff) && diff.number_of_faces() > 0;
+      if (ok)
+        out = to_inexact(diff);
+    } catch (const std::exception &e) {
+      debug("solids: sloped roof over space {}: corefinement threw: {}",
+            space.guid, e.what());
+      ok = false;
+    }
+  }
+  if (!ok) {
+    warn("solids: the roof over space {} could not follow its sloped "
+         "ceiling; it is a flat slab at {:.2f} m",
+         space.guid, cap);
+    return build_slab(st, piece, part, cap, thickness, "ROOF", frames);
+  }
+  const Eigen::Affine3d &T = frames.of(st.idx);
+  ElementSolid e;
+  e.type = SolidType::slab;
+  e.source_guid = st.guid;
+  e.storey = st.idx;
+  e.predefined = "ROOF";
+  e.part = part;
+  e.profile.outer = to_plan(clean_ring(piece.outer, true));
+  for (const auto &h : piece.holes)
+    e.profile.holes.push_back(to_plan(clean_ring(h, false)));
+  e.profile.depth = cap + thickness - zlow;
+  e.profile.placement =
+      row_major(T * local_frame(Vec2::Zero(), zlow, Vec2::UnitX()));
+  finish(e, out, T);
+  return e;
+}
+
 Vec2 centroid(const Ring &r) {
   Vec2 c = Vec2::Zero();
   for (const auto &p : r)
@@ -738,16 +1104,20 @@ SolidsResult build_solids(const core::SolidModel &model,
           std::max(0.15, std::max(std::abs(b.lo), std::abs(b.hi)) + 0.1);
       double lo = std::numeric_limits<double>::infinity();
       double hi = -std::numeric_limits<double>::infinity();
+      std::vector<std::size_t> beside;
       for (const double f : {0.1, 0.3, 0.5, 0.7, 0.9}) {
         const double sv = f * b.len;
         for (const double t : {off, -off}) {
           const Vec2 p = b.at(sv, t);
-          for (const auto &s : model.spaces) {
+          for (std::size_t si = 0; si < model.spaces.size(); ++si) {
+            const auto &s = model.spaces[si];
             if (s.storey != w.storey || !(s.z_ceiling > s.z_floor) ||
                 !inside_space(s, p))
               continue;
             lo = std::min(lo, s.z_floor);
             hi = std::max(hi, s.z_ceiling);
+            if (std::find(beside.begin(), beside.end(), si) == beside.end())
+              beside.push_back(si);
           }
         }
       }
@@ -766,8 +1136,34 @@ SolidsResult build_solids(const core::SolidModel &model,
       if (z1 > z0) {
         b.z0 = z0;
         b.z1 = z1;
+        follow_sloped_ceilings(b, model, beside, off);
       }
     }
+  }
+  // The roof over a wall beside a sloped space goes with that space's roof
+  // (the largest such space beside it), so it follows the same planes.
+  for (auto &b : boxes) {
+    if (!b.valid || b.slope_space >= 0)
+      continue;
+    const double off =
+        std::max(0.15, std::max(std::abs(b.lo), std::abs(b.hi)) + 0.1);
+    double best = -1.0;
+    for (const double f : {0.1, 0.3, 0.5, 0.7, 0.9})
+      for (const double t : {off, -off}) {
+        const Vec2 p = b.at(f * b.len, t);
+        for (std::size_t si = 0; si < model.spaces.size(); ++si) {
+          const auto &s = model.spaces[si];
+          if (s.storey != b.wall->storey || s.ceiling_planes.empty() ||
+              !inside_space(s, p))
+            continue;
+          const double area =
+              std::max(s.area, std::abs(signed_area(to_ring(s.polygon.outer))));
+          if (area > best) {
+            best = area;
+            b.slope_space = static_cast<int>(si);
+          }
+        }
+      }
   }
   std::unordered_map<std::string, std::vector<const core::OpeningRecord *>>
       openings;
@@ -816,6 +1212,19 @@ SolidsResult build_solids(const core::SolidModel &model,
     e.profile.depth = s.z_ceiling - s.z_floor;
     e.profile.placement =
         row_major(T * local_frame(Vec2::Zero(), s.z_floor, Vec2::UnitX()));
+    // A sloped ceiling cuts the prism (reusex-546).
+    if (!s.ceiling_planes.empty()) {
+      Mesh keep = *m;
+      if (clip_below(*m, s.ceiling_planes, 0.0) && CGAL::is_closed(*m)) {
+        for (const auto &p : s.ceiling_planes)
+          e.clip_planes.push_back(world_plane(below_plane(p, 0.0), T));
+      } else {
+        warn("solids: space {}: its ceiling planes could not be cut from "
+             "its volume; it is left flat at {:.2f} m",
+             s.guid, s.z_ceiling);
+        *m = std::move(keep);
+      }
+    }
     finish(e, *m, T);
     result.spaces.push_back(std::move(e));
   }
@@ -836,19 +1245,40 @@ SolidsResult build_solids(const core::SolidModel &model,
     const Levels cl = levels_of(ceiling_levels, st.idx, st.z_ceiling);
     std::vector<std::vector<Ring>> floor_rings(fl.z.size()),
         roof_rings(cl.z.size());
+    // Roof regions past cl.z.size() each belong to one space with a sloped
+    // ceiling (reusex-546): its own polygon and the walls whose top follows
+    // it, last so that they take what they share with a flat level.
+    constexpr std::size_t kFlat = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> roof_space(cl.z.size(), kFlat);
+    std::map<std::size_t, std::size_t> sloped_group;
     bool any_space = false;
-    for (const auto &s : model.spaces)
+    for (std::size_t si = 0; si < model.spaces.size(); ++si) {
+      const auto &s = model.spaces[si];
       if (s.storey == st.idx && s.polygon.outer.size() >= 3) {
         floor_rings[fl.of(s.z_floor)].push_back(to_ring(s.polygon.outer));
-        roof_rings[cl.of(s.z_ceiling)].push_back(to_ring(s.polygon.outer));
+        if (s.ceiling_planes.empty()) {
+          roof_rings[cl.of(s.z_ceiling)].push_back(to_ring(s.polygon.outer));
+        } else {
+          sloped_group[si] = roof_rings.size();
+          roof_rings.push_back({to_ring(s.polygon.outer)});
+          roof_space.push_back(si);
+        }
         any_space = true;
       }
+    }
     std::vector<Ring> wall_rings;
     for (const auto &b : boxes)
       if (b.valid && b.wall->storey == st.idx) {
         wall_rings.push_back(b.footprint());
         floor_rings[fl.of(b.z0)].push_back(b.footprint());
-        roof_rings[cl.of(b.z1)].push_back(b.footprint());
+        const auto g =
+            b.slope_space >= 0
+                ? sloped_group.find(static_cast<std::size_t>(b.slope_space))
+                : sloped_group.end();
+        if (g != sloped_group.end())
+          roof_rings[g->second].push_back(b.footprint());
+        else
+          roof_rings[cl.of(b.z1)].push_back(b.footprint());
       }
     std::vector<std::vector<Piece>> floors, roofs;
     if (any_space) {
@@ -906,13 +1336,23 @@ SolidsResult build_solids(const core::SolidModel &model,
         result.slabs.push_back(build_slab(st, piece, part++, z_bottom,
                                           fl_used.z[lv] - z_bottom, "FLOOR",
                                           frames));
-    if (opts.roof && k + 1 == storeys.size()) {
+    // The flat roof over the top storey; a sloped ceiling's roof on every
+    // storey (a sloped ceiling is under a roof wherever it is: Sygehusgrunden's
+    // Etage 2 has its own pitched part beside Etage 3).
+    if (opts.roof) {
+      const bool top = k + 1 == storeys.size();
       int roof_part = 0;
       for (std::size_t lv = 0; lv < roofs.size(); ++lv)
-        for (const auto &piece : roofs[lv])
-          result.slabs.push_back(
-              build_slab(st, piece, roof_part++, cl_used.z[lv],
-                         opts.slab_thickness_m, "ROOF", frames));
+        for (const auto &piece : roofs[lv]) {
+          if (lv < roof_space.size() && roof_space[lv] != kFlat)
+            result.slabs.push_back(build_sloped_roof(
+                st, piece, roof_part++, model.spaces[roof_space[lv]],
+                opts.slab_thickness_m, frames));
+          else if (top)
+            result.slabs.push_back(
+                build_slab(st, piece, roof_part++, cl_used.z[lv],
+                           opts.slab_thickness_m, "ROOF", frames));
+        }
     }
   }
   if (not_simple > 0)

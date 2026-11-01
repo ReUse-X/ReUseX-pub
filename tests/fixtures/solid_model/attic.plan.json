@@ -1,0 +1,23 @@
+{
+  "$schema": "../../../docs/design/solid-model-reference.schema.json",
+  "model_version": 2,
+  "units": "m",
+  "name": "attic (synthetic reference)",
+  "description": "Hand-written synthetic plan (reusex-546): one storey under a 35 deg pitched roof, ridge along x at y = 2. West: an attic room with 1.15 m knee walls (y = 0 and 4) and gable walls (x = 0 and 6) whose tops follow the pitch to the ridge at 2.5504 m. East: a room with a flat centre (2.2 m) and sloped sides rising at 35 deg from 1.0 m knee walls. Not derived from any scan.",
+  "storeys": [
+    {"guid": "storey-0", "idx": 0, "name": "Attic", "z_floor": 0.0, "z_ceiling": 2.6, "source": "manual", "locked": true}
+  ],
+  "walls": [
+    {"guid": "w-knee-s1", "storey": 0, "axis": [[0.0, 0.0], [6.0, 0.0]], "z_base": 0.0, "height": 1.15, "thickness": 0.2, "is_external": true, "source": "manual", "locked": true},
+    {"guid": "w-knee-n1", "storey": 0, "axis": [[6.0, 4.0], [0.0, 4.0]], "z_base": 0.0, "height": 1.15, "thickness": 0.2, "is_external": true, "source": "manual", "locked": true},
+    {"guid": "w-gable-w", "storey": 0, "axis": [[0.0, 4.0], [0.0, 0.0]], "z_base": 0.0, "height": 2.6, "thickness": 0.2, "is_external": true, "top": [[0.0, 1.15], [2.0, 2.5504], [4.0, 1.15]], "source": "manual", "locked": true},
+    {"guid": "w-gable-mid", "storey": 0, "axis": [[6.0, 0.0], [6.0, 4.0]], "z_base": 0.0, "height": 2.6, "thickness": 0.2, "is_external": false, "top": [[0.0, 1.15], [2.0, 2.5504], [4.0, 1.15]], "source": "manual", "locked": true},
+    {"guid": "w-knee-s2", "storey": 0, "axis": [[6.0, 0.0], [10.0, 0.0]], "z_base": 0.0, "height": 1.0, "thickness": 0.2, "is_external": true, "source": "manual", "locked": true},
+    {"guid": "w-knee-n2", "storey": 0, "axis": [[10.0, 4.0], [6.0, 4.0]], "z_base": 0.0, "height": 1.0, "thickness": 0.2, "is_external": true, "source": "manual", "locked": true},
+    {"guid": "w-gable-e", "storey": 0, "axis": [[10.0, 0.0], [10.0, 4.0]], "z_base": 0.0, "height": 2.6, "thickness": 0.2, "is_external": true, "top": [[0.0, 1.0], [1.7138, 2.2], [2.2862, 2.2], [4.0, 1.0]], "source": "manual", "locked": true}
+  ],
+  "spaces": [
+    {"guid": "s-attic", "storey": 0, "name": "Attic room", "kind": "room", "polygon": {"outer": [[0.1, 0.1], [5.9, 0.1], [5.9, 3.9], [0.1, 3.9]]}, "z_floor": 0.0, "z_ceiling": 2.6, "ceiling_planes": [{"at": [0.0, 0.0, 1.15], "slope": [0.0, 0.7002]}, {"at": [0.0, 4.0, 1.15], "slope": [0.0, -0.7002]}], "source": "manual", "locked": true},
+    {"guid": "s-flat-centre", "storey": 0, "name": "Flat-centre room", "kind": "room", "polygon": {"outer": [[6.1, 0.1], [9.9, 0.1], [9.9, 3.9], [6.1, 3.9]]}, "z_floor": 0.0, "z_ceiling": 2.2, "ceiling_planes": [{"at": [6.0, 0.0, 1.0], "slope": [0.0, 0.7002]}, {"at": [6.0, 4.0, 1.0], "slope": [0.0, -0.7002]}], "source": "manual", "locked": true}
+  ]
+}

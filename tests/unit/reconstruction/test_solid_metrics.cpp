@@ -6,6 +6,9 @@
 // answers are known in closed form.
 
 #include <reusex/core/solid_model.hpp>
+#include <reusex/io/solid_model_json.hpp>
+
+#include "../../support/source_dir.hpp"
 #include <reusex/geometry/transform_utils.hpp>
 #include <reusex/reconstruction/solid_metrics.hpp>
 
@@ -735,4 +738,35 @@ TEST_CASE("CompareSolidModels_SpaceHeights_ScoreTheSplitLevel",
   CHECK(j.contains("space_ceiling_err_mean_m"));
   CHECK_FALSE(compare_solid_models(SolidModel{}, ref)
                   .space_floor_err_mean_m.has_value());
+}
+
+TEST_CASE("SolidMetrics_SlopedCeiling_IsScoredAgainstTheSurface",
+          "[reconstruction][solid_metrics][sloped]") {
+  // reusex-546: the attic plan against itself, and against the same plan
+  // with its ceilings flattened at their caps.
+  const SolidModel ref = reusex::io::solid_model_from_file(
+      reusex::test_support::source_dir() / "tests" / "fixtures" /
+      "solid_model" / "attic.plan.json");
+  const SolidModelReport same = compare_solid_models(ref, ref);
+  REQUIRE(same.space_ceiling_err_mean_m);
+  CHECK_THAT(*same.space_ceiling_err_mean_m, WithinAbs(0.0, 1e-9));
+
+  SolidModel flat = ref;
+  for (auto &s : flat.spaces)
+    s.ceiling_planes.clear();
+  const SolidModelReport r = compare_solid_models(flat, ref);
+  REQUIRE(r.space_ceiling_err_mean_m);
+  // The attic is 2.6 flat against a pitch from ~1.22 to 2.55: about 0.84 m
+  // off on average; the flat-centre room 2.2 against sides from ~1.07: about
+  // 0.31 m. A single-height comparison would have said 0.
+  CHECK(*r.space_ceiling_err_mean_m > 0.4);
+  CHECK(*r.space_ceiling_err_mean_m < 0.8);
+
+  // A flat pair keeps the single-height error exactly.
+  SolidModel lower = flat;
+  for (auto &s : lower.spaces)
+    s.z_ceiling -= 0.1;
+  const SolidModelReport f = compare_solid_models(lower, flat);
+  REQUIRE(f.space_ceiling_err_mean_m);
+  CHECK_THAT(*f.space_ceiling_err_mean_m, WithinAbs(0.1, 1e-9));
 }

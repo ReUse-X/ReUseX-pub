@@ -418,7 +418,9 @@ TEST_CASE("StageContract_Spaces_AfterRooms_WallsAndOpeningsOptional",
   for (const auto &input : spaces.inputs)
     for (const auto &name : input.any_of)
       (input.optional ? optional : required).insert(std::string(name));
-  CHECK(optional == std::set<std::string>{"walls", "openings"});
+  // planes + plane_classes: the sloped-ceiling candidates (reusex-546).
+  CHECK(optional ==
+        std::set<std::string>{"walls", "openings", "planes", "plane_classes"});
   CHECK(required ==
         std::set<std::string>{"cloud", "normals", "storeys", "rooms"});
   CHECK(std::vector<std::string_view>(spaces.outputs.begin(),

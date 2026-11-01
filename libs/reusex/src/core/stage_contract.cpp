@@ -254,13 +254,16 @@ const std::vector<StageContract> &contracts() {
        // ids are the cloud's labels, and polygonises it against `walls`.
        // walls and openings are optional (raster outlines without walls),
        // but sit earlier in this table: run walls -> openings -> rooms ->
-       // spaces.
+       // spaces. `planes` + `plane_classes` give the sloped-ceiling
+       // candidates (reusex-546); without them every ceiling stays flat.
        {{{"cloud"}},
         {{"normals"}},
         {{"storeys"}},
         {{"rooms"}},
         {{"walls"}, 1, 0, /*optional=*/true},
-        {{"openings"}, 1, 0, /*optional=*/true}},
+        {{"openings"}, 1, 0, /*optional=*/true},
+        {{"planes"}, 1, 0, /*optional=*/true},
+        {{"plane_classes"}, 1, 0, /*optional=*/true}},
        {"spaces", "space_boundaries"}},
 
       {PipelineStage::solids,
