@@ -5,6 +5,7 @@
 #include "io/speckle_revit.hpp"
 
 #include "bim_mapping.hpp"
+#include "io/speckle_bundle.hpp"
 
 #include "core/ProjectDB.hpp"
 #include "core/logging.hpp"
@@ -921,24 +922,39 @@ import_speckle_revit(ProjectDB &db, const SpeckleRevitImportOptions &opt,
   core::info("import_speckle_revit: project {} model {} version {} ({}, {})",
              opt.project, opt.model, res.version.id,
              res.version.source_application, res.version.created_at);
-  // A bundle-only version has no object graph; refuse it before anything is
-  // written to the project (reusex-fo1t).
-  if (res.version.is_bundle()) {
-    core::warn("import_speckle_revit: version {} is bundle-only "
-               "(referencedObject starts with 'bundle.'); not supported yet",
+  // A bundle-only version (reusex-fo1t) has no object graph: its Parquet
+  // bundle is read through DuckDB when this build has it, and refused
+  // before anything is written to the project otherwise.
+  const bool bundle = res.version.is_bundle();
+  if (bundle && !has_bundle_support()) {
+    core::warn("import_speckle_revit: version {} is bundle-only and this "
+               "build has no DuckDB (REUSEX_HAVE_DUCKDB off)",
                res.version.id);
     throw BundleVersionUnsupported(res.version.referenced_object);
   }
 
-  const json source = {{"source", "speckle"},
-                       {"server", reader.server_url()},
-                       {"project", opt.project},
-                       {"model", opt.model},
-                       {"version", res.version.id},
-                       {"root_object", res.version.referenced_object},
-                       {"source_application", res.version.source_application}};
+  json source = {{"source", "speckle"},
+                 {"server", reader.server_url()},
+                 {"project", opt.project},
+                 {"model", opt.model},
+                 {"version", res.version.id},
+                 {"root_object", res.version.referenced_object},
+                 {"source_application", res.version.source_application}};
+  if (bundle)
+    source["format"] = "bundle";
   auto fetch = [&]() {
     throw_if_cancelled("before the download");
+    if (bundle) {
+      BundleFetchReport report;
+      json root = fetch_bundle_tree(reader, opt.project,
+                                    res.version.referenced_object, &report);
+      throw_if_cancelled("after the download");
+      core::info("import_speckle_revit: bundle of {} files ({:.1f} MiB), {} "
+                 "objects, {} meshes",
+                 report.files, static_cast<double>(report.bytes) / (1 << 20),
+                 report.projection.objects, report.projection.meshes);
+      return root;
+    }
     const ObjectTree tree =
         reader.fetch_object_tree(opt.project, res.version.referenced_object);
     throw_if_cancelled("after the download");

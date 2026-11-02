@@ -168,6 +168,14 @@ if(REUSEX_HAVE_WEB_IFC)
     target_link_libraries(reusex_unit_tests PRIVATE web-ifc::web-ifc)
 endif()
 
+# tests/unit/io/test_speckle_bundle.cpp writes synthetic Parquet fixtures
+# with DuckDB (COPY ... TO 'x.parquet'), so it needs duckdb.h; reusex_io links
+# DuckDB PRIVATE and the imported target lives in the libs/reusex scope.
+if(REUSEX_HAVE_DUCKDB)
+    find_package(DuckDB CONFIG REQUIRED)
+    target_link_libraries(reusex_unit_tests PRIVATE duckdb)
+endif()
+
 target_include_directories(reusex_unit_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/reusex/include
     ${CMAKE_BINARY_DIR}/generated

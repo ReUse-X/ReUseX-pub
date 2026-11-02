@@ -6,6 +6,7 @@
 // are hand-written synthetic data mirroring the v3 wire format (reference
 // stubs, @-detached keys, DataChunks, __closure); no customer data.
 
+#include <reusex/io/speckle_bundle.hpp>
 #include <reusex/io/speckle_reader.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -435,14 +436,20 @@ TEST_CASE("BundleVersionUnsupported_Message_IsStableAndActionable",
 TEST_CASE("SpeckleReader_BundleReference_ThrowsBeforeAnyRequest",
           "[io][speckle]") {
   // example.invalid never resolves: any request would fail with a plain
-  // runtime_error, so BundleVersionUnsupported proves none was made.
+  // runtime_error, so BundleVersionUnsupported (no DuckDB) or
+  // invalid_argument (DuckDB: use fetch_bundle_tree) proves none was made.
   SpeckleReader reader("https://example.invalid", "t");
-  CHECK_THROWS_AS(reader.fetch_object_tree("p1", "bundle.p1.m1.v1"),
-                  BundleVersionUnsupported);
-  CHECK_THROWS_AS(reader.fetch_object("p1", "bundle.p1.m1.v1"),
-                  BundleVersionUnsupported);
-  CHECK_THROWS_AS(reader.fetch_object_tree("p1", "bundle.../../graphql"),
-                  BundleVersionUnsupported);
+  for (const char *ref : {"bundle.p1.m1.v1", "bundle.../../graphql"}) {
+    if (has_bundle_support()) {
+      CHECK_THROWS_AS(reader.fetch_object_tree("p1", ref),
+                      std::invalid_argument);
+      CHECK_THROWS_AS(reader.fetch_object("p1", ref), std::invalid_argument);
+    } else {
+      CHECK_THROWS_AS(reader.fetch_object_tree("p1", ref),
+                      BundleVersionUnsupported);
+      CHECK_THROWS_AS(reader.fetch_object("p1", ref), BundleVersionUnsupported);
+    }
+  }
 }
 
 TEST_CASE("ParseVersions_BundleReferencedObject_IsFlaggedAsBundle",
@@ -694,11 +701,11 @@ TEST_CASE("SpeckleReader_LiveServer_BundleVersionIsRefusedClearly",
   CHECK(ref->project == project);
   CHECK(ref->model == model);
   CHECK(ref->version == version_id);
-  try {
-    (void)reader.fetch_object_tree(project, version.referenced_object);
-    FAIL("expected BundleVersionUnsupported");
-  } catch (const BundleVersionUnsupported &e) {
-    std::cout << "version " << version.id << " (" << version.source_application
-              << ", " << version.created_at << "): " << e.what() << "\n";
-  }
+  // Never sent to /objects: refused before any request either way.
+  CHECK_THROWS(reader.fetch_object_tree(project, version.referenced_object));
+  const auto files = reader.list_bundle_artifacts(*ref);
+  CHECK_FALSE(files.empty());
+  std::cout << "version " << version.id << " (" << version.source_application
+            << ", " << version.created_at << "): " << files.size()
+            << " bundle files listed\n";
 }

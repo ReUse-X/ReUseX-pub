@@ -1122,15 +1122,34 @@ model, version, root object). The run's `StageResult::outputs` (both import
 stages) are `{table, storeys|walls|openings|spaces, rows written}` and
 `{mesh, <name>}` for every mesh saved, so a client refreshes what changed.
 
-**Bundle-only versions are refused.** A version whose `referencedObject` is
-`bundle.<project>.<model>.<version>` (Speckle's Parquet artefact bundle, no
-legacy object graph) cannot be read yet (reusex-fo1t): the stage fails with
-`io::speckle::BundleVersionUnsupported` right after the version query:
-nothing is downloaded and no table or mesh is touched (a run with a
-`pipeline_log` row records the failure there). Its message starts with
-`kBundleUnsupportedMessage` ("Denne Speckle-version er gemt i Speckles nye
-bundle-format, som ReUseX endnu ikke kan læse.") and ends with the tag
-`[speckle-bundle-unsupported]`, which a front end may match on.
+**Bundle-only versions** (reusex-fo1t). A version whose `referencedObject`
+is `bundle.<project>.<model>.<version>` has no legacy object graph: its data
+is Speckle's Parquet artefact bundle. With DuckDB (`REUSEX_HAVE_DUCKDB`) the
+stage reads it (`io/speckle_bundle.hpp`): the listing `GET
+/api/v2/projects/{p}/models/{m}/versions/{v}/artifacts` (with the token),
+every non-viewer `*.parquet` file from its presigned URL **without** the
+token (https on the server's own host or an object-storage host:
+`*.digitaloceanspaces.com`, `*.amazonaws.com`, `*.r2.cloudflarestorage.com`,
+`storage.googleapis.com`, `*.blob.core.windows.net`), all files together
+under the reader's download limit, into a private temporary directory read
+by an in-memory DuckDB locked to that directory (no extension autoload or
+install, external access off). The tables are projected onto the Revit
+connector's tree (`project_bundle_to_revit_tree`: EAV paths as nested
+properties, `properties.Parameters.*` as Revit parameters, LEVEL nodes +
+`ON_LEVEL` as `levelProxies`, `HOSTED_ON` as `parentApplicationId`,
+`SUBELEMENT` as nesting, DEFINITION / INSTANCE nodes as instance proxies,
+SGEO meshes as `displayValue`) and mapped by the same `import_revit()`, so
+the stored rows and meshes follow the rules above. Differences: the
+bundle's levels carry no `LEVEL_IS_BUILDING_STORY`, so every level becomes
+a storey, and a storey's GUID derives from the level name (no level
+applicationId). The meshes' parameters carry `format: bundle`. Without
+DuckDB the stage fails with `io::speckle::BundleVersionUnsupported` right
+after the version query: nothing is downloaded and no table or mesh is
+touched (a run with a `pipeline_log` row records the failure there). Its
+message starts with `kBundleUnsupportedMessage` ("Denne Speckle-version er
+gemt i Speckles nye bundle-format, som ReUseX endnu ikke kan læse.") and
+ends with the tag `[speckle-bundle-unsupported]`, which a front end may
+match on. The SDKs' `version.received` mutation is never sent.
 
 **The token is never a parameter.** Job parameters are persisted (job
 history, `pipeline_log.parameters`), so the Speckle token is resolved per run
