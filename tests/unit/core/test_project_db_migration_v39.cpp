@@ -220,7 +220,7 @@ TEST_CASE("MigrationV39_V38Project_KeepsRowsFlat",
     CHECK(ro.wall_by_guid(wall_guid).has_value());
   }
   ProjectDB db(tmp.path);
-  CHECK(db.schema_version() == 39);
+  CHECK(db.schema_version() == ProjectDB::latest_schema_version());
   REQUIRE(db.spaces().size() == 1);
   CHECK(db.spaces()[0].ceiling_planes.empty());
   CHECK(db.spaces()[0].z_ceiling == 2.5);

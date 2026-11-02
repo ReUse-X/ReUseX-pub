@@ -65,6 +65,9 @@ enum class JobStage {
   /// IFC file -> imported storeys / walls / openings / spaces +
   /// `imported/ifc/<class>` meshes (needs web-ifc, REUSEX_HAVE_WEB_IFC).
   import_ifc,
+  /// RTAB-Map session database -> sensor frames of one more session,
+  /// appended detached (io::import_rtabmap, append_session; reusex-y2lg.30).
+  import_rtabmap,
 };
 
 /// Canonical lower-case stage name (the token used on the wire and the CLI).

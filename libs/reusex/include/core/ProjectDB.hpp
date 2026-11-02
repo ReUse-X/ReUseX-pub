@@ -206,6 +206,21 @@ class ProjectDB {
   /// Returns {node_id, scan_id} pairs ordered by node_id.
   /// scan_id is 0 when the frame has no recorded scan (schema < v17).
   std::vector<std::pair<int, int>> sensor_frame_ids_with_scan() const;
+
+  /// One frame of posed_frames().
+  struct PosedFrame {
+    int node_id = 0;
+    int scan_id = 0;         ///< 0 when none is recorded
+    double timestamp = -1.0; ///< -1 when unknown
+    std::array<double, 16> transform{};
+    /// As initial_pose(): nullopt when NULL or not rigid.
+    std::optional<std::array<double, 16>> initial;
+  };
+
+  /// Every frame whose `transform` passes has_sensor_frame_pose(), in node
+  /// order, read in one query: the bulk reader of the scan-repair tools
+  /// (core/pose_versions.hpp, core/pose_blocks.hpp).
+  std::vector<PosedFrame> posed_frames() const;
   cv::Mat sensor_frame_image(int nodeId) const;
   cv::Mat sensor_frame_depth(int nodeId) const;
   cv::Mat sensor_frame_confidence(int nodeId) const;
@@ -761,6 +776,75 @@ class ProjectDB {
   /// @throws std::runtime_error on a pre-v30 project opened read-only, or
   ///         when the stored value is not a UUID.
   std::string project_guid() const;
+
+  // --- Trajectory blocks and pose versions (schema v40, reusex-y2lg) ---
+  //
+  // Plain storage. The rules (blocks partition each session's frames, what a
+  // version snapshot holds, undo / redo) live in core/pose_blocks.hpp and
+  // core/pose_versions.hpp.
+
+  /// One row of `pose_blocks`: a run of consecutive frames of one session
+  /// (scan) that the scan-repair tools act on as a unit (reusex-y2lg.1).
+  struct PoseBlockRecord {
+    int id = 0; ///< row id, filled by the reader; ignored on write
+    std::string name;
+    int first_node = 0; ///< inclusive
+    int last_node = 0;  ///< inclusive
+    int scan_id = 0;
+    /// Cut from the block before it: no odometry across the joint.
+    bool detached = false;
+    bool operator==(const PoseBlockRecord &) const = default;
+  };
+
+  /// Stored blocks ordered by first_node. Empty when none are stored or the
+  /// project predates v40.
+  std::vector<PoseBlockRecord> pose_blocks() const;
+
+  /// Replace every stored block by @p blocks (ids are reassigned 1..n in
+  /// first_node order). One SAVEPOINT.
+  /// @throws std::invalid_argument when a block has first_node > last_node;
+  ///         std::runtime_error on a read-only or pre-v40 project.
+  void replace_pose_blocks(const std::vector<PoseBlockRecord> &blocks);
+
+  /// One row of `pose_versions` without its snapshot.
+  struct PoseVersionRecord {
+    int64_t id = 0;        ///< row id, filled by the reader
+    int64_t parent_id = 0; ///< 0 = none
+    /// import | baseline | external | apply | odometry | restore | ...
+    std::string kind;
+    std::string label;
+    std::string author;
+    std::string created_at;          ///< ISO-8601 UTC, set on insert
+    std::string metrics_json = "{}"; ///< a JSON object
+    int frame_count = 0;
+    int edge_count = 0;
+  };
+
+  /// The state a version holds, packed by core/pose_versions.hpp.
+  struct PoseVersionSnapshot {
+    std::vector<std::uint8_t> frames;
+    std::vector<std::uint8_t> edges;
+    std::optional<std::string> edits; ///< nullopt: no working edits stored
+  };
+
+  /// Insert a version. @returns its id.
+  /// @throws std::runtime_error on a read-only or pre-v40 project.
+  int64_t add_pose_version(const PoseVersionRecord &record,
+                           const PoseVersionSnapshot &snapshot);
+  /// Every version ordered by id. Empty before v40.
+  std::vector<PoseVersionRecord> pose_versions() const;
+  std::optional<PoseVersionRecord> pose_version(int64_t id) const;
+  std::optional<PoseVersionSnapshot> pose_version_snapshot(int64_t id) const;
+
+  /// Replace every `pose_graph_edges` row by @p edges, keeping each edge's
+  /// `id`, columns and direction exactly as given (no canonicalisation, no
+  /// validation beyond the table's constraints): the restore half of a pose
+  /// version. One SAVEPOINT.
+  void replace_pose_graph_edges(std::span<const PoseGraphEdge> edges);
+
+  /// Set sensor_frames.initial_transform to NULL (a version restoring a
+  /// frame that had no snapshot). @throws like set_initial_pose().
+  void clear_initial_pose(int nodeId);
 
   // --- Storeys (schema v30, solid-model WP1) ---
 

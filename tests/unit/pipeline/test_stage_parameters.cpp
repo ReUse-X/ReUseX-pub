@@ -374,7 +374,9 @@ TEST_CASE("StageParameters_OnlyAnnotatePromptsAndImportSourcesAreRequired",
     return (stage == JobStage::annotate && key == "prompts") ||
            (stage == JobStage::import_speckle &&
             (key == "project" || key == "model")) ||
-           (stage == JobStage::import_ifc && key == "path");
+           ((stage == JobStage::import_ifc ||
+             stage == JobStage::import_rtabmap) &&
+            key == "path");
   };
   for (const auto &name : job_stage_names()) {
     const auto stage = parse_job_stage(name);

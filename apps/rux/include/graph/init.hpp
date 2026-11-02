@@ -5,6 +5,7 @@
 #pragma once
 #include "../global-params.hpp"
 
+#include <reusex/core/pose_repair.hpp>
 #include <reusex/slam/pose_graph.hpp>
 
 #include <CLI/CLI.hpp>
@@ -12,6 +13,10 @@
 
 struct SubcommandGraphInitOptions {
   bool force = reusex::slam::InitPoseGraphOptions{}.force;
+  /// core::rebuild_odometry instead of init (reusex-y2lg.16).
+  bool rebuild_odometry = false;
+  bool from_current = reusex::core::RebuildOdometryOptions{}.from_current;
+  bool json = false;
 };
 
 void setup_subcommand_graph_init(CLI::App &parent,
