@@ -724,7 +724,13 @@ the flat part, or the highest point of the planes over the space, and
 `volume` is integrated under the sloped ceiling; the fit is in `metadata` as
 `ceiling_fit`; `fit_ceiling_planes` off, or no candidate, leaves the ceiling
 flat; a detected space that carries a stored row's lock is fitted too, a
-locked row kept as stored keeps its own), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
+locked row kept as stored keeps its own; eaves, reusex-ow8p: a plane a
+neighbour took (within 0.6 m) runs on into a space whose seen ceiling does
+not contradict it, `ceiling_fit.extended_from`, so the strip between a knee
+partition and the facade slopes down to the facade; the storey's walls
+under a slope, outside it, are measured against it from the cloud, and
+the space's `metadata.roof` lists its knee walls (top at the slope) and
+dormers (`core::RoofEdges`: wall, stretch, flat ceiling height, plan)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
 `rooms` label it was made from), `confidence` (the share of its area that
 comes from wall-bounded faces, the rest is raster) and `metadata` (that share
 and the furniture holes). A boundary names its space by row (it goes with
@@ -789,7 +795,12 @@ ceiling of the spaces beside it at each point of its axis, every bend kept
 thickness; the roof over a sloped space (and the walls whose top follows it)
 is the layer between its ceiling and the ceiling raised by
 `slab_thickness_m`, on whichever storey the space is (the flat roof stays
-on the top storey). A
+on the top storey). Eaves (reusex-ow8p, a space's `metadata.roof`): a
+detected unlocked knee wall not beside its space takes the space's ceiling
+on its axis as its top; over a dormer's stretch the wall rises to the
+dormer's ceiling; the dormer gets a flat roof at that height over its plan
+and its wall, cut out of the sloped roof it rises through, and a space's
+volume takes in the part of a dormer's plan inside its polygon. A
 wall of unknown thickness (`-1`, its axis is the seen face) grows
 `unknown_wall_thickness_m` away from the space it faces; wall ends at a
 corner or tee run on to the far face of the wall they meet.

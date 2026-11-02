@@ -19,6 +19,13 @@
 /// not representable; it would need a union, not a minimum. A wall's top is
 /// a polyline along its axis, so gable walls (a peak) and side walls under a
 /// mono pitch are both one profile.
+///
+/// The eaves of a sloped ceiling (reusex-ow8p) ride along in the space's
+/// metadata, under "roof" (RoofEdges): the facade walls that stand under its
+/// slope (knee walls: their top is where the slope meets them) and its
+/// dormers (a facade stretch that rises to a flat dormer ceiling above the
+/// slope). Both are measured from the cloud by fit_sloped_ceilings() and
+/// drawn by build_solids().
 
 #include "reusex/core/solid_model.hpp"
 
@@ -31,6 +38,42 @@ namespace reusex::core {
 /// The ceiling of @p space at (x, y) in its level frame:
 /// min(z_ceiling, every plane's z at (x, y)).
 double ceiling_at(const SpaceRecord &space, double x, double y);
+
+/// A dormer in a sloped ceiling (reusex-ow8p), level frame: a stretch
+/// [s0, s1] of facade wall @p wall (s along its axis from (x0, y0)) that
+/// rises to the dormer's flat ceiling @p z instead of stopping at the knee
+/// line. @p outline is the dormer's plan: the wall axis at s0 and s1, then
+/// inwards to where the slope reaches z (either orientation).
+struct Dormer {
+  std::string wall;
+  double s0 = 0.0, s1 = 0.0;
+  double z = 0.0;
+  std::vector<PlanPoint> outline; ///< {axis s0, axis s1, inner s1, inner s0}
+};
+
+/// What a sloped ceiling does at the facade (reusex-ow8p): the walls under
+/// its slope (their top follows it) and its dormers.
+struct RoofEdges {
+  std::vector<std::string> knee_walls;
+  std::vector<Dormer> dormers;
+  [[nodiscard]] bool empty() const {
+    return knee_walls.empty() && dormers.empty();
+  }
+};
+
+/// @p space's RoofEdges, from its metadata ("roof"); empty when there are
+/// none or the metadata does not hold a valid "roof" entry.
+RoofEdges roof_edges(const SpaceRecord &space);
+
+/// @p metadata (a JSON object, or "") with "roof" set to @p edges, or
+/// removed when @p edges is empty.
+std::string with_roof_edges(const std::string &metadata,
+                            const RoofEdges &edges);
+
+/// The ceiling of @p space at (x, y) with its dormers: ceiling_at(), raised
+/// to a dormer's z inside its outline.
+double ceiling_at(const SpaceRecord &space, const std::vector<Dormer> &dormers,
+                  double x, double y);
 
 /// The top of @p wall at @p s along its axis from (x0, y0): the top profile
 /// interpolated (constant past its ends), capped at z_base + height; that

@@ -640,3 +640,131 @@ TEST_CASE("Solids_SlopedCeiling_RoofOnALowerStorey",
   CHECK(inside_any(roofs, 3, 1.0, 1.15 + 0.7002 + 0.1));
   CHECK(inside_any(roofs, 8, 2.0, 2.3));
 }
+
+// Eaves (reusex-ow8p): an attic, x 0..8, y 0..6, with 45 deg slopes off a
+// flat centre (2.5 m) down to 0.55 m at both facades, and a dormer in the
+// south facade over x 3..5 whose flat ceiling (1.6 m) runs in to where the
+// slope reaches it (y = 1.05). The spaces stage measured the knee walls and
+// the dormer from the cloud (core::RoofEdges in the space's metadata).
+
+namespace {
+
+core::SolidModel eaves_attic(bool bay_in_room) {
+  core::SolidModel m;
+  m.storeys = {storey(0, 0.0, 2.6)};
+  const double y0 = bay_in_room ? 0.0 : 1.0;
+  auto room = space("room", {{0, y0}, {8, y0}, {8, 6}, {0, 6}}, 0.0, 2.5);
+  room.area = 8.0 * (6.0 - y0);
+  core::CeilingPlane south, north;
+  south.at = {0, 0, 0.55};
+  south.slope = {0, 1};
+  north.at = {0, 6, 0.55};
+  north.slope = {0, -1};
+  room.ceiling_planes = {south, north};
+  core::RoofEdges edges;
+  edges.knee_walls = {"w-s", "w-n"};
+  core::Dormer d;
+  d.wall = "w-s";
+  d.s0 = 3.0;
+  d.s1 = 5.0;
+  d.z = 1.6;
+  d.outline = {{3, 0}, {5, 0}, {5, 1.05}, {3, 1.05}};
+  edges.dormers = {d};
+  room.metadata = core::with_roof_edges("", edges);
+  m.spaces = {room};
+  const auto detected = [](core::WallRecord w) {
+    w.source = "detected";
+    w.is_external = true;
+    return w;
+  };
+  m.walls = {detected(wall("w-s", 0, 0, 8, 0, 0.3, 2.6)),
+             detected(wall("w-n", 8, 6, 0, 6, 0.3, 2.6))};
+  if (!bay_in_room) // the knee partition the bay is behind
+    m.walls.push_back(detected(wall("w-p", 0, 1, 8, 1, 0.1, 2.6)));
+  return m;
+}
+
+std::vector<const ElementSolid *> roofs_of(const geometry::SolidsResult &r) {
+  std::vector<const ElementSolid *> v;
+  for (const auto &s : r.slabs)
+    if (s.predefined == "ROOF")
+      v.push_back(&s);
+  return v;
+}
+
+} // namespace
+
+TEST_CASE("Solids_Eaves_KneeWallStopsAtTheSlopeAndRisesAtTheDormer",
+          "[reconstruction][solids][sloped][eaves]") {
+  // The bay y 0..1 belongs to no space (Sygehusgrunden's roof storey): the
+  // facade is not beside the room, yet stops where its slope meets it.
+  SolidsOptions o;
+  o.slab_thickness_m = 0.2;
+  o.extend_at_joins = false;
+  const auto r = build_solids(eaves_attic(false), o);
+  CHECK(r.not_closed == 0);
+  const auto &ws = wall_solid(r, "w-s");
+  REQUIRE(ws.closed);
+  CHECK(side(ws, 1.0, 0.0, 0.50) == CGAL::ON_BOUNDED_SIDE); // knee wall
+  CHECK(side(ws, 1.0, 0.0, 0.60) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(ws, 7.0, 0.0, 0.50) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(ws, 7.0, 0.0, 0.60) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(ws, 4.0, 0.0, 1.55) == CGAL::ON_BOUNDED_SIDE); // dormer
+  CHECK(side(ws, 4.0, 0.0, 1.65) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK_FALSE(ws.top.empty());
+  // The partition and the north facade take the slope they stand under.
+  const auto &wp = wall_solid(r, "w-p");
+  CHECK(side(wp, 1.0, 1.0, 1.50) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(wp, 1.0, 1.0, 1.60) == CGAL::ON_UNBOUNDED_SIDE);
+  const auto &wn = wall_solid(r, "w-n");
+  CHECK(side(wn, 4.0, 6.0, 0.50) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(wn, 4.0, 6.0, 0.60) == CGAL::ON_UNBOUNDED_SIDE);
+
+  const auto roofs = roofs_of(r);
+  for (const auto *s : roofs)
+    CHECK(s->closed);
+  // The dormer's own roof, flat at its ceiling, over the bay and its wall.
+  CHECK(inside_any(roofs, 4.0, 0.5, 1.7));
+  CHECK(inside_any(roofs, 4.0, 0.0, 1.7));
+  // The main slope is cut around it.
+  CHECK_FALSE(inside_any(roofs, 4.0, 0.5, 1.15));
+  CHECK_FALSE(inside_any(roofs, 4.0, 0.0, 0.65));
+  // Elsewhere the roof follows the slope, over the room and the knee wall.
+  CHECK(inside_any(roofs, 4.0, 1.5, 2.15));
+  CHECK(inside_any(roofs, 1.0, 0.0, 0.65));
+  CHECK_FALSE(inside_any(roofs, 1.0, 0.0, 0.50));
+  CHECK(inside_any(roofs, 4.0, 3.0, 2.6));
+}
+
+TEST_CASE("Solids_Eaves_DormerRaisesTheRoomItIsIn",
+          "[reconstruction][solids][sloped][eaves]") {
+  SolidsOptions o;
+  o.slab_thickness_m = 0.2;
+  o.extend_at_joins = false;
+  const auto m = eaves_attic(true);
+  const auto r = build_solids(m, o);
+  CHECK(r.not_closed == 0);
+  const ElementSolid &room = space_solid(r, "room");
+  REQUIRE(room.closed);
+  CHECK(side(room, 4.0, 0.5, 1.50) == CGAL::ON_BOUNDED_SIDE); // in the dormer
+  CHECK(side(room, 4.0, 0.5, 1.70) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(room, 1.0, 0.5, 1.00) == CGAL::ON_BOUNDED_SIDE); // under slope
+  CHECK(side(room, 1.0, 0.5, 1.10) == CGAL::ON_UNBOUNDED_SIDE);
+  // Volume: the slope's, plus the dormer's wedge above it.
+  const auto edges = core::roof_edges(m.spaces[0]);
+  double v = 0.0;
+  for (double x = 0.0025; x < 8.0; x += 0.005)
+    for (double y = 0.0025; y < 6.0; y += 0.05)
+      v += 0.005 * 0.05 * core::ceiling_at(m.spaces[0], edges.dormers, x, y);
+  CHECK_THAT(room.volume, WithinAbs(v, 0.01 * v));
+  // The facade beside the room: knee, then up to the dormer's ceiling.
+  const auto &ws = wall_solid(r, "w-s");
+  CHECK(side(ws, 1.0, 0.0, 0.50) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(ws, 1.0, 0.0, 0.60) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(ws, 4.0, 0.0, 1.55) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(ws, 4.0, 0.0, 1.65) == CGAL::ON_UNBOUNDED_SIDE);
+  const auto roofs = roofs_of(r);
+  CHECK(inside_any(roofs, 4.0, 0.5, 1.7));
+  CHECK_FALSE(inside_any(roofs, 4.0, 0.5, 1.15));
+  CHECK(inside_any(roofs, 1.0, 0.5, 1.15));
+}

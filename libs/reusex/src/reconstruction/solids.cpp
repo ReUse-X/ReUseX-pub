@@ -688,32 +688,22 @@ ElementSolid build_wall(const WallBox &b,
   return e;
 }
 
-/// A detected wall beside a space with a sloped ceiling takes its top from
-/// the ceilings it meets (gable and knee walls, reusex-546): at every s the
-/// highest ceiling of the spaces on either side there, evaluated on the
-/// axis. Sampled every 0.25 m plus where each sloped space's ceiling bends
-/// along the axis (two of its planes, or a plane and its cap, meet), so a
-/// gable's peak is kept exactly; capped at z1, simplified to its bends.
-void follow_sloped_ceilings(WallBox &b, const core::SolidModel &model,
-                            const std::vector<std::size_t> &beside,
-                            double off) {
-  std::vector<std::size_t> sloped;
-  for (const auto si : beside)
-    if (!model.spaces[si].ceiling_planes.empty())
-      sloped.push_back(si);
-  if (sloped.empty())
-    return;
+/// Where the ceilings of @p spaces bend along @p b's axis (two of a space's
+/// planes, or a plane and its cap, meet), plus every 0.25 m and the ends:
+/// the s values a top that follows them is sampled at.
+std::vector<double>
+ceiling_breaks(const WallBox &b,
+               const std::vector<const core::SpaceRecord *> &spaces) {
   std::vector<double> ss{b.s0, b.s1};
   for (double v = std::ceil(b.s0 / 0.25) * 0.25; v < b.s1; v += 0.25)
     ss.push_back(v);
-  // Bends of each sloped ceiling along the axis line.
   const auto along = [&](const core::SpaceRecord &s, std::size_t k, double t) {
     const Vec2 p = b.at(t, 0.0);
     return k < s.ceiling_planes.size() ? s.ceiling_planes[k].z_at(p.x(), p.y())
                                        : s.z_ceiling;
   };
-  for (const auto si : sloped) {
-    const auto &s = model.spaces[si];
+  for (const auto *sp : spaces) {
+    const auto &s = *sp;
     const std::size_t n = s.ceiling_planes.size() + 1; // planes + the cap
     for (std::size_t i = 0; i < n; ++i)
       for (std::size_t j = i + 1; j < n; ++j) {
@@ -730,6 +720,44 @@ void follow_sloped_ceilings(WallBox &b, const core::SolidModel &model,
   ss.erase(std::unique(ss.begin(), ss.end(),
                        [](double x, double y) { return y - x < 1e-6; }),
            ss.end());
+  return ss;
+}
+
+/// @p top without the points on a straight line between their neighbours
+/// (past its ends a top holds its last value, top_at()).
+std::vector<Vec2> simplify_top(const std::vector<Vec2> &top) {
+  if (top.size() < 3)
+    return top;
+  std::vector<Vec2> simple{top.front()};
+  for (std::size_t i = 1; i + 1 < top.size(); ++i) {
+    const Vec2 &a = simple.back(), &c = top[i + 1], &q = top[i];
+    const double w = (q.x() - a.x()) / (c.x() - a.x());
+    if (std::abs(a.y() + w * (c.y() - a.y()) - q.y()) > 1e-4)
+      simple.push_back(q);
+  }
+  simple.push_back(top.back());
+  return simple;
+}
+
+/// A detected wall beside a space with a sloped ceiling takes its top from
+/// the ceilings it meets (gable and knee walls, reusex-546): at every s the
+/// highest ceiling of the spaces on either side there, evaluated on the
+/// axis. Sampled every 0.25 m plus where each sloped space's ceiling bends
+/// along the axis (two of its planes, or a plane and its cap, meet), so a
+/// gable's peak is kept exactly; capped at z1, simplified to its bends.
+void follow_sloped_ceilings(WallBox &b, const core::SolidModel &model,
+                            const std::vector<std::size_t> &beside,
+                            double off) {
+  std::vector<std::size_t> sloped;
+  for (const auto si : beside)
+    if (!model.spaces[si].ceiling_planes.empty())
+      sloped.push_back(si);
+  if (sloped.empty())
+    return;
+  std::vector<const core::SpaceRecord *> of;
+  for (const auto si : sloped)
+    of.push_back(&model.spaces[si]);
+  const auto ss = ceiling_breaks(b, of);
 
   const int storey = b.wall->storey;
   std::vector<Vec2> top;
@@ -757,17 +785,7 @@ void follow_sloped_ceilings(WallBox &b, const core::SolidModel &model,
   }
   if (top.size() < 2 || best_space < 0)
     return;
-  // Past the probed stretch the top holds its last value (top_at); drop
-  // points on a straight line between their neighbours.
-  std::vector<Vec2> simple{top.front()};
-  for (std::size_t i = 1; i + 1 < top.size(); ++i) {
-    const Vec2 &a = simple.back(), &c = top[i + 1], &q = top[i];
-    const double w = (q.x() - a.x()) / (c.x() - a.x());
-    if (std::abs(a.y() + w * (c.y() - a.y()) - q.y()) > 1e-4)
-      simple.push_back(q);
-  }
-  simple.push_back(top.back());
-  b.top = std::move(simple);
+  b.top = simplify_top(top);
   if (has_sloped_top(b))
     b.slope_space = best_space;
   else
@@ -1061,6 +1079,121 @@ std::string_view to_string(SolidType type) {
   return "unknown";
 }
 
+// ── Eaves: knee walls and dormers (reusex-ow8p) ───────────────────────────
+
+/// A knee wall under @p space's slope, not beside the space (the strip
+/// between them belongs to no space): its top is the space's ceiling on its
+/// axis, where the slope meets the facade, capped at z1.
+void follow_slope_over(WallBox &b, const core::SpaceRecord &space) {
+  std::vector<Vec2> top;
+  for (const double sv : ceiling_breaks(b, {&space})) {
+    const Vec2 p = b.at(sv, 0.0);
+    top.emplace_back(sv, std::clamp(core::ceiling_at(space, p.x(), p.y()),
+                                    b.z0 + 0.05, b.z1));
+  }
+  if (top.size() >= 2)
+    b.top = simplify_top(top);
+}
+
+/// @p b's top raised to each dormer's ceiling over its stretch of the wall:
+/// the facade rises through the slope there.
+void raise_for_dormers(WallBox &b,
+                       const std::vector<const core::Dormer *> &dormers) {
+  if (dormers.empty())
+    return;
+  constexpr double eps = 1e-3;
+  std::vector<double> ss = top_breaks(b);
+  const std::vector<double> base = ss;
+  for (const auto *d : dormers) {
+    for (const double v : {d->s0 - eps, d->s0, d->s1, d->s1 + eps})
+      if (v > b.s0 && v < b.s1)
+        ss.push_back(v);
+    // Where the top crosses the dormer's ceiling inside its stretch.
+    for (std::size_t i = 1; i < base.size(); ++i) {
+      const double a = base[i - 1], c = base[i];
+      const double za = b.top_at(a) - d->z, zc = b.top_at(c) - d->z;
+      if (za * zc < 0.0) {
+        const double t = a + za / (za - zc) * (c - a);
+        if (t > d->s0 && t < d->s1)
+          ss.push_back(t);
+      }
+    }
+  }
+  std::sort(ss.begin(), ss.end());
+  ss.erase(std::unique(ss.begin(), ss.end(),
+                       [](double x, double y) { return y - x < 1e-9; }),
+           ss.end());
+  std::vector<Vec2> top;
+  for (const double sv : ss) {
+    double z = b.top_at(sv);
+    for (const auto *d : dormers)
+      if (sv >= d->s0 && sv <= d->s1)
+        z = std::max(z, std::min(d->z, b.z1));
+    top.emplace_back(sv, z);
+  }
+  b.top = simplify_top(top);
+}
+
+/// A dormer's plan reaching out over its facade wall's footprint, so its
+/// roof covers the wall it stands on.
+Ring dormer_roof_ring(const core::Dormer &d, const WallBox *wall) {
+  Ring r = to_ring(d.outline);
+  if (r.size() != 4 || wall == nullptr)
+    return r;
+  const Vec2 in = 0.5 * ((r[3] - r[0]) + (r[2] - r[1]));
+  if (!(in.norm() > 1e-6))
+    return r;
+  const Vec2 out = -in.normalized() *
+                   (std::max(std::abs(wall->lo), std::abs(wall->hi)) + 0.01);
+  r[0] += out;
+  r[1] += out;
+  return r;
+}
+
+/// The space's volume with its dormers added: the part of each dormer's
+/// plan inside the space, from its floor to the dormer's ceiling, joined on
+/// exactly. False (and @p m untouched) when a boolean fails.
+bool add_dormers(Mesh &m, const core::SpaceRecord &space,
+                 const std::vector<core::Dormer> &dormers,
+                 const SolidsOptions &opts) {
+  std::size_t not_simple = 0;
+  std::vector<Ring> outer{to_ring(space.polygon.outer)};
+  EPolygonSet in_space = ring_set(outer, not_simple);
+  std::vector<Ring> holes;
+  for (const auto &h : space.polygon.holes)
+    holes.push_back(to_ring(h));
+  if (!holes.empty())
+    in_space.difference(ring_set(holes, not_simple));
+  EMesh acc = to_exact(m);
+  bool any = false;
+  for (const auto &d : dormers) {
+    if (!(d.z > space.z_floor))
+      continue;
+    EPolygonSet part = ring_set({to_ring(d.outline)}, not_simple);
+    part.intersection(in_space);
+    for (const auto &piece : set_pieces(part, opts)) {
+      auto prism = extrude(piece.outer, piece.holes, space.z_floor, d.z);
+      if (!prism)
+        continue;
+      EMesh add = to_exact(*prism), out;
+      try {
+        if (!PMP::corefine_and_compute_union(acc, add, out) ||
+            !CGAL::is_closed(out))
+          return false;
+      } catch (const std::exception &e) {
+        debug("solids: space {}: joining a dormer threw: {}", space.guid,
+              e.what());
+        return false;
+      }
+      acc = std::move(out);
+      any = true;
+    }
+  }
+  if (any)
+    m = to_inexact(acc);
+  return true;
+}
+
 SolidsResult build_solids(const core::SolidModel &model,
                           const SolidsOptions &opts) {
   SolidsResult result;
@@ -1140,6 +1273,58 @@ SolidsResult build_solids(const core::SolidModel &model,
       }
     }
   }
+  // Eaves (reusex-ow8p): a facade wall under a slope that is not beside its
+  // space (the strip between them belongs to no space) stops where the slope
+  // meets it, a knee wall; over a dormer it rises to the dormer's ceiling.
+  // Both were measured from the cloud by the spaces stage.
+  std::vector<core::RoofEdges> roof_edges(model.spaces.size());
+  for (std::size_t si = 0; si < model.spaces.size(); ++si)
+    roof_edges[si] = core::roof_edges(model.spaces[si]);
+  std::unordered_map<std::string, std::size_t> box_of;
+  for (std::size_t i = 0; i < boxes.size(); ++i)
+    if (boxes[i].valid)
+      box_of.emplace(boxes[i].wall->guid, i);
+  const auto follows = [&](const WallBox &b) {
+    return opts.walls_follow_spaces && !b.wall->locked &&
+           b.wall->source == "detected";
+  };
+  std::map<std::size_t, std::vector<const core::Dormer *>> dormers_of_box;
+  std::map<std::size_t, int> dormer_space_of_box;
+  for (std::size_t si = 0; si < model.spaces.size(); ++si) {
+    for (const auto &g : roof_edges[si].knee_walls) {
+      const auto it = box_of.find(g);
+      if (it == box_of.end())
+        continue;
+      WallBox &b = boxes[it->second];
+      if (!follows(b) || b.slope_space >= 0 ||
+          b.wall->storey != model.spaces[si].storey)
+        continue;
+      follow_slope_over(b, model.spaces[si]);
+      if (has_sloped_top(b)) {
+        b.slope_space = static_cast<int>(si);
+        debug("solids: wall {} is a knee wall under space {}: {:.2f}..{:.2f} "
+              "m above its base",
+              g, model.spaces[si].guid, b.top_at(b.s0) - b.z0,
+              b.top_at(b.s1) - b.z0);
+      } else {
+        b.top.clear();
+      }
+    }
+    for (const auto &d : roof_edges[si].dormers) {
+      const auto it = box_of.find(d.wall);
+      if (it == box_of.end() || !follows(boxes[it->second]))
+        continue;
+      dormers_of_box[it->second].push_back(&d);
+      dormer_space_of_box.emplace(it->second, static_cast<int>(si));
+    }
+  }
+  for (const auto &[i, ds] : dormers_of_box) {
+    WallBox &b = boxes[i];
+    raise_for_dormers(b, ds);
+    if (b.slope_space < 0)
+      b.slope_space = dormer_space_of_box[i];
+  }
+
   // The roof over a wall beside a sloped space goes with that space's roof
   // (the largest such space beside it), so it follows the same planes.
   for (auto &b : boxes) {
@@ -1224,6 +1409,12 @@ SolidsResult build_solids(const core::SolidModel &model,
              s.guid, s.z_ceiling);
         *m = std::move(keep);
       }
+      // Its dormers rise above the slope (reusex-ow8p).
+      const auto edges = core::roof_edges(s);
+      if (!edges.dormers.empty() && !add_dormers(*m, s, edges.dormers, opts))
+        warn("solids: space {}: its {} dormer(s) could not be joined to its "
+             "volume; it stops at the slope there",
+             s.guid, edges.dormers.size());
     }
     finish(e, *m, T);
     result.spaces.push_back(std::move(e));
@@ -1264,6 +1455,21 @@ SolidsResult build_solids(const core::SolidModel &model,
           roof_space.push_back(si);
         }
         any_space = true;
+      }
+    }
+    // Dormer roofs (reusex-ow8p), last again: each takes its plan from the
+    // sloped roof it rises through. roof_z: a dormer roof's height.
+    std::vector<double> roof_z(roof_rings.size(),
+                               std::numeric_limits<double>::quiet_NaN());
+    for (std::size_t si = 0; si < model.spaces.size(); ++si) {
+      if (model.spaces[si].storey != st.idx)
+        continue;
+      for (const auto &d : roof_edges[si].dormers) {
+        const auto it = box_of.find(d.wall);
+        const WallBox *wb = it == box_of.end() ? nullptr : &boxes[it->second];
+        roof_rings.push_back({dormer_roof_ring(d, wb)});
+        roof_space.push_back(kFlat);
+        roof_z.push_back(d.z);
       }
     }
     std::vector<Ring> wall_rings;
@@ -1344,7 +1550,11 @@ SolidsResult build_solids(const core::SolidModel &model,
       int roof_part = 0;
       for (std::size_t lv = 0; lv < roofs.size(); ++lv)
         for (const auto &piece : roofs[lv]) {
-          if (lv < roof_space.size() && roof_space[lv] != kFlat)
+          if (lv < roof_z.size() && std::isfinite(roof_z[lv]))
+            result.slabs.push_back(build_slab(st, piece, roof_part++,
+                                              roof_z[lv], opts.slab_thickness_m,
+                                              "ROOF", frames));
+          else if (lv < roof_space.size() && roof_space[lv] != kFlat)
             result.slabs.push_back(build_sloped_roof(
                 st, piece, roof_part++, model.spaces[roof_space[lv]],
                 opts.slab_thickness_m, frames));
