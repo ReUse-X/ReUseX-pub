@@ -421,3 +421,31 @@ TEST_CASE("SlopedCeilings_Eaves_DormerRisesThroughTheSlope",
       v += 0.01 * core::ceiling_at(r, edges.dormers, x, y);
   CHECK_THAT(r.volume, WithinAbs(v, 0.02 * v));
 }
+
+TEST_CASE("SlopedCeilings_RoofEdges_RoundTripInMetadata",
+          "[segmentation][spaces][sloped][eaves]") {
+  core::RoofEdges e;
+  e.knee_walls = {"w1"};
+  core::Dormer d;
+  d.wall = "w1";
+  d.s0 = 1.0;
+  d.s1 = 2.5;
+  d.z = 2.1;
+  d.outline = {{1, 0}, {2.5, 0}, {2.5, 1}, {1, 1}};
+  e.dormers = {d};
+  core::SpaceRecord s;
+  s.metadata = core::with_roof_edges(R"({"z_floor_cells": 12})", e);
+  const auto back = core::roof_edges(s);
+  REQUIRE(back.dormers.size() == 1);
+  CHECK(back.knee_walls == e.knee_walls);
+  CHECK(back.dormers[0].wall == "w1");
+  CHECK(back.dormers[0].s1 == 2.5);
+  CHECK(back.dormers[0].outline.size() == 4);
+  CHECK(s.metadata.find("z_floor_cells") != std::string::npos);
+  // No edges: a stale "roof" goes, anything else stays as it is.
+  CHECK(core::with_roof_edges(s.metadata, {}) == R"({"z_floor_cells":12})");
+  CHECK(core::with_roof_edges("", {}).empty());
+  CHECK(core::with_roof_edges("not json", {}) == "not json");
+  s.metadata = "not json";
+  CHECK(core::roof_edges(s).empty());
+}

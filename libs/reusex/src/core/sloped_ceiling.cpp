@@ -67,6 +67,16 @@ RoofEdges roof_edges(const SpaceRecord &space) {
 
 std::string with_roof_edges(const std::string &metadata,
                             const RoofEdges &edges) {
+  if (edges.empty()) {
+    // Nothing to set: drop a stale "roof", leave anything else as it is.
+    try {
+      json j = json::parse(metadata);
+      if (j.is_object() && j.erase("roof") > 0)
+        return j.dump();
+    } catch (const std::exception &) {
+    }
+    return metadata;
+  }
   json j = json::object();
   if (!metadata.empty()) {
     try {
@@ -76,10 +86,6 @@ std::string with_roof_edges(const std::string &metadata,
     }
     if (!j.is_object())
       j = json::object();
-  }
-  if (edges.empty()) {
-    j.erase("roof");
-    return j.empty() && metadata.empty() ? std::string() : j.dump();
   }
   json dormers = json::array();
   for (const auto &d : edges.dormers) {
