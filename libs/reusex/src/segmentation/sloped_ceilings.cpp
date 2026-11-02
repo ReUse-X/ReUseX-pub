@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -117,6 +118,100 @@ struct Candidate {
   std::vector<Eigen::Vector3d> pts; ///< inliers, level frame
 };
 
+// ── Eaves (reusex-ow8p) ─────────────────────────────────────────────────────
+
+constexpr double kNeighbourGap = 0.6; ///< spaces this close are neighbours [m]
+constexpr double kCutMin = 0.1;       ///< a plane cuts a cell this far down [m]
+constexpr int kMinCutCells = 10;      ///< ... in at least this many cells
+constexpr double kAgree = 0.15;       ///< an observation this close agrees [m]
+constexpr double kMaxContra = 0.2;    ///< share of cut cells seen above
+constexpr double kMaxContraGain = 0.35;  ///< ... when it fits much better
+constexpr double kEavesReach = 2.5;      ///< facade to its sloped space [m]
+constexpr double kAlongSin = 0.342;      ///< sin 20 deg: along the contours
+constexpr double kBin = 0.25;            ///< wall top bins along the axis [m]
+constexpr double kRise = 0.35;           ///< a dormer rises this over the knee
+constexpr double kMinDormer = 0.75;      ///< shortest dormer [m]
+constexpr double kDormerCeilShare = 0.2; ///< ceiling seen over the bay
+constexpr int kMinCheekPoints = 15;      ///< a cheek wall's points
+constexpr double kKneeShare = 0.8;       ///< wall bins at the knee line
+
+double seg_dist(const core::PlanPoint &p, const core::PlanPoint &a,
+                const core::PlanPoint &b) {
+  const double dx = b[0] - a[0], dy = b[1] - a[1];
+  const double l2 = dx * dx + dy * dy;
+  double t = l2 > 0.0 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2 : 0.0;
+  t = std::clamp(t, 0.0, 1.0);
+  return std::hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+}
+
+/// Distance from @p p to the ring @p r (0 inside it).
+double ring_dist(const std::vector<core::PlanPoint> &r,
+                 const core::PlanPoint &p) {
+  if (r.size() < 3)
+    return kInf;
+  if (in_ring(r, p[0], p[1]))
+    return 0.0;
+  double d = kInf;
+  for (std::size_t i = 0, j = r.size() - 1; i < r.size(); j = i++)
+    d = std::min(d, seg_dist(p, r[j], r[i]));
+  return d;
+}
+
+/// The gap between two rings (0 when they touch or overlap).
+double ring_gap(const std::vector<core::PlanPoint> &a,
+                const std::vector<core::PlanPoint> &b) {
+  double d = kInf;
+  for (const auto &p : a)
+    d = std::min(d, ring_dist(b, p));
+  for (const auto &p : b)
+    d = std::min(d, ring_dist(a, p));
+  return d;
+}
+
+bool same_plane(const core::CeilingPlane &a, const core::CeilingPlane &b) {
+  return a.at == b.at && a.slope == b.slope;
+}
+
+double median(std::vector<double> v) {
+  if (v.empty())
+    return std::numeric_limits<double>::quiet_NaN();
+  const auto m = v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2);
+  std::nth_element(v.begin(), m, v.end());
+  return *m;
+}
+
+/// A level-frame point and its normal, for the facade measurements.
+struct LevelPoint {
+  Eigen::Vector3f q, n;
+};
+
+/// The storey's points in 0.5 m buckets.
+struct Buckets {
+  static constexpr double kSize = 0.5;
+  std::unordered_map<std::int64_t, std::vector<std::uint32_t>> map;
+  static std::int64_t key(int c, int r) {
+    return (static_cast<std::int64_t>(c) << 32) ^ static_cast<std::uint32_t>(r);
+  }
+  void add(double x, double y, std::uint32_t i) {
+    map[key(static_cast<int>(std::floor(x / kSize)),
+            static_cast<int>(std::floor(y / kSize)))]
+        .push_back(i);
+  }
+  /// Every point index in buckets touching [x0, x1] x [y0, y1].
+  template <class F>
+  void each(double x0, double y0, double x1, double y1, F &&f) const {
+    const int c0 = static_cast<int>(std::floor(x0 / kSize));
+    const int c1 = static_cast<int>(std::floor(x1 / kSize));
+    const int r0 = static_cast<int>(std::floor(y0 / kSize));
+    const int r1 = static_cast<int>(std::floor(y1 / kSize));
+    for (int c = c0; c <= c1; ++c)
+      for (int r = r0; r <= r1; ++r)
+        if (const auto it = map.find(key(c, r)); it != map.end())
+          for (const auto i : it->second)
+            f(i);
+  }
+};
+
 } // namespace
 
 SlopedCeilingStats fit_sloped_ceilings(
@@ -124,7 +219,8 @@ SlopedCeilingStats fit_sloped_ceilings(
     const std::vector<core::StoreyRecord> &storeys, const Cloud &cloud,
     const CloudN &normals, const CloudL &plane_labels,
     const std::vector<int> &ceiling_labels,
-    const std::vector<int> &ceiling_storeys, const SpacesOptions &o) {
+    const std::vector<int> &ceiling_storeys, const SpacesOptions &o,
+    const std::vector<core::WallRecord> *walls) {
   if (cloud.size() != normals.size() || cloud.size() != plane_labels.size())
     throw std::invalid_argument(fmt::format(
         "fit_sloped_ceilings: cloud has {} points, normals {}, plane labels {}",
@@ -212,6 +308,9 @@ SlopedCeilingStats fit_sloped_ceilings(
     // samples[cell] = heights observed there.
     std::unordered_map<long, std::vector<float>> samples;
     std::vector<std::pair<long, std::size_t>> inlier_cells; // (cell, cand)
+    // Every point of the storey, for the facade measurements (eaves).
+    std::vector<LevelPoint> lpts;
+    Buckets buckets;
     for (std::size_t i = 0; i < cloud.size(); ++i) {
       const auto &p = cloud.points[i];
       if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
@@ -230,11 +329,16 @@ SlopedCeilingStats fit_sloped_ceilings(
           inlier_cells.emplace_back(cell, it->second);
         // A flat ceiling plane's points are horizontal samples below.
       }
-      if (sp < 0)
-        continue;
       const auto &nn = normals.points[i];
       const Eigen::Vector3d nl =
           rot * Eigen::Vector3d(nn.normal_x, nn.normal_y, nn.normal_z);
+      if (walls != nullptr && std::isfinite(nl.z()) &&
+          q.z() > st.z_floor - 0.3) {
+        buckets.add(q.x(), q.y(), static_cast<std::uint32_t>(lpts.size()));
+        lpts.push_back({q.cast<float>(), nl.cast<float>()});
+      }
+      if (sp < 0)
+        continue;
       if (!std::isfinite(nl.z()) || std::abs(nl.z()) <= 0.8)
         continue;
       if (q.z() >=
@@ -291,24 +395,33 @@ SlopedCeilingStats fit_sloped_ceilings(
       }
     }
 
+    const auto centre = [&](int cell) {
+      return std::pair<double, double>{x0 + (cell % W + 0.5) * kCell,
+                                       y0 + (cell / W + 0.5) * kCell};
+    };
+    // A cell's ceiling observation: the 80th percentile of its samples.
+    const auto observed = [&](int cell) -> std::optional<double> {
+      const auto it = samples.find(cell);
+      if (it == samples.end() || it->second.empty())
+        return std::nullopt;
+      auto &v = it->second;
+      const auto q = v.begin() + static_cast<std::ptrdiff_t>(
+                                     0.8 * static_cast<double>(v.size() - 1));
+      std::nth_element(v.begin(), q, v.end());
+      return static_cast<double>(*q);
+    };
+    std::vector<std::vector<int>> taken_labels(spaces.size());
     for (const auto si : mine) {
       auto &s = spaces[si];
       const auto &cells = cells_of[si];
       if (cells.empty())
         continue;
       std::vector<Obs> obs;
-      for (const int cell : cells) {
-        const auto it = samples.find(cell);
-        if (it == samples.end() || it->second.empty())
-          continue;
-        auto &v = it->second;
-        const auto q = v.begin() + static_cast<std::ptrdiff_t>(
-                                       0.8 * static_cast<double>(v.size() - 1));
-        std::nth_element(v.begin(), q, v.end());
-        const int c = cell % W, r = cell / W;
-        obs.push_back({x0 + (c + 0.5) * kCell, y0 + (r + 0.5) * kCell,
-                       static_cast<double>(*q)});
-      }
+      for (const int cell : cells)
+        if (const auto z = observed(cell)) {
+          const auto [x, y] = centre(cell);
+          obs.push_back({x, y, *z});
+        }
       if (static_cast<int>(obs.size()) < o.height_min_cells)
         continue;
       const double min_cells =
@@ -390,6 +503,8 @@ SlopedCeilingStats fit_sloped_ceilings(
         continue;
       s.ceiling_planes = taken;
       s.z_ceiling = cap;
+      for (const auto k : taken_k)
+        taken_labels[si].push_back(cands[k].label);
       double sum = 0.0;
       for (const int cell : cells) {
         const int c = cell % W, r = cell / W;
@@ -414,11 +529,376 @@ SlopedCeilingStats fit_sloped_ceilings(
             "mean ceiling error {:.3f} -> {:.3f} m over {} cells",
             s.guid, taken.size(), cap, flat_err / n, err / n, obs.size());
     }
+
+    // ── Eaves (reusex-ow8p) ─────────────────────────────────────────────
+    // The volume of space @p si over its raster, its dormers raised.
+    const auto revolume = [&](std::size_t si,
+                              const std::vector<core::Dormer> &dormers) {
+      auto &s = spaces[si];
+      const auto &cells = cells_of[si];
+      if (cells.empty() || !(s.area > 0.0))
+        return;
+      double sum = 0.0;
+      for (const int cell : cells) {
+        const auto [x, y] = centre(cell);
+        sum += core::ceiling_at(s, dormers, x, y) - s.z_floor;
+      }
+      s.volume = s.area * sum / static_cast<double>(cells.size());
+    };
+
+    // (1) A slope runs on into the space beside it: the strip between a
+    // knee partition and the facade, its ceiling mostly unseen.
+    std::vector<std::vector<core::CeilingPlane>> fitted(spaces.size());
+    for (const auto si : mine)
+      fitted[si] = spaces[si].ceiling_planes;
+    for (const auto si : mine) {
+      auto &s = spaces[si];
+      const auto &cells = cells_of[si];
+      if (cells.empty())
+        continue;
+      std::unordered_map<int, double> seen;
+      for (const int cell : cells)
+        if (const auto z = observed(cell))
+          seen.emplace(cell, *z);
+      const bool was_flat = s.ceiling_planes.empty();
+      nlohmann::json from = nlohmann::json::array();
+      for (const auto ni : mine) {
+        if (ni == si || fitted[ni].empty() ||
+            ring_gap(s.polygon.outer, spaces[ni].polygon.outer) > kNeighbourGap)
+          continue;
+        for (std::size_t pk = 0; pk < fitted[ni].size(); ++pk) {
+          const auto &p = fitted[ni][pk];
+          if (std::any_of(s.ceiling_planes.begin(), s.ceiling_planes.end(),
+                          [&](const auto &q) { return same_plane(p, q); }))
+            continue;
+          // Where it cuts the ceiling, what is seen must not say otherwise:
+          // few observations over it, and no worse a fit than before.
+          int cut = 0, agree = 0, contra = 0, n_seen = 0;
+          double err_now = 0.0, err_with = 0.0;
+          for (const int cell : cells) {
+            const auto [x, y] = centre(cell);
+            const double zp = p.z_at(x, y);
+            const double now = core::ceiling_at(s, x, y);
+            if (!(zp < now - kCutMin))
+              continue;
+            ++cut;
+            const auto it = seen.find(cell);
+            if (it == seen.end())
+              continue;
+            ++n_seen;
+            err_now += std::abs(it->second - now);
+            err_with += std::abs(it->second - zp);
+            if (it->second > zp + kAgree)
+              ++contra;
+            else if (it->second >= zp - kAgree)
+              ++agree;
+          }
+          if (cut < kMinCutCells)
+            continue;
+          // A plane that fits what is seen much better than the ceiling
+          // there now may leave more of it above (a beam, a light well).
+          const double max_contra =
+              err_with <= (1.0 - o.ceiling_min_gain) * err_now ? kMaxContraGain
+                                                               : kMaxContra;
+          if (contra > std::max(3.0, max_contra * (agree + contra)) ||
+              err_with > err_now + 0.02 * n_seen) {
+            debug("spaces: space {}: not carrying the slope of space {}: of "
+                  "the {} cells it cuts, {} are seen ({} on it, {} above "
+                  "it; mean error {:.3f} -> {:.3f} m)",
+                  s.guid, spaces[ni].guid, cut, n_seen, agree, contra,
+                  err_now / std::max(n_seen, 1),
+                  err_with / std::max(n_seen, 1));
+            continue;
+          }
+          auto trial = s;
+          trial.ceiling_planes.push_back(p);
+          if (std::any_of(s.polygon.outer.begin(), s.polygon.outer.end(),
+                          [&](const auto &v) {
+                            return core::ceiling_at(trial, v[0], v[1]) <
+                                   s.z_floor + kMinHeadroom;
+                          })) {
+            debug("spaces: space {}: the slope of space {} would meet its "
+                  "floor at a polygon vertex; not carried over",
+                  s.guid, spaces[ni].guid);
+            continue;
+          }
+          s.ceiling_planes.push_back(p);
+          ++stats.extended;
+          const int label =
+              pk < taken_labels[ni].size() ? taken_labels[ni][pk] : -1;
+          from.push_back({{"space", spaces[ni].guid},
+                          {"plane", label},
+                          {"cells_cut", cut},
+                          {"seen_agree", agree},
+                          {"seen_above", contra}});
+          debug("spaces: space {}: carried the slope (plane {}) of space {} "
+                "over {} cells ({} seen on it, {} above it)",
+                s.guid, label, spaces[ni].guid, cut, agree, contra);
+        }
+      }
+      if (from.empty())
+        continue;
+      if (was_flat) {
+        ++stats.spaces_sloped;
+        s.metadata = with_fit(s.metadata, {{"extended_from", from}});
+      } else {
+        nlohmann::json fit = nlohmann::json::object();
+        try {
+          const auto j = nlohmann::json::parse(s.metadata);
+          if (j.is_object() && j.contains("ceiling_fit"))
+            fit = j.at("ceiling_fit");
+        } catch (const std::exception &) {
+        }
+        fit["extended_from"] = from;
+        s.metadata = with_fit(s.metadata, fit);
+      }
+      stats.planes += static_cast<int>(from.size());
+      revolume(si, {});
+    }
+
+    // (2) The facades under each slope, measured: knee walls and dormers.
+    if (walls == nullptr)
+      continue;
+    std::vector<std::pair<std::string, std::pair<double, double>>> dormer_runs;
+    for (const auto si : mine) {
+      auto &s = spaces[si];
+      core::RoofEdges edges;
+      for (const auto &p : s.ceiling_planes) {
+        const Eigen::Vector2d g(p.slope[0], p.slope[1]);
+        if (!(g.norm() >
+              std::tan(o.ceiling_min_tilt_deg * std::numbers::pi / 180.0)))
+          continue;
+        for (const auto &w : *walls) {
+          if (w.storey != st.idx)
+            continue;
+          const Eigen::Vector2d p0(w.x0, w.y0), p1(w.x1, w.y1);
+          const double len = (p1 - p0).norm();
+          if (!(len > 0.5) || !std::isfinite(len))
+            continue;
+          const Eigen::Vector2d d = (p1 - p0) / len;
+          if (std::abs(d.dot(g) / g.norm()) > kAlongSin)
+            continue;
+          Eigen::Vector2d n(-d.y(), d.x()); // uphill, into the building
+          if (n.dot(g) < 0.0)
+            n = -n;
+          const double gn = n.dot(g);
+          const double half = w.thickness > 0.0 ? 0.5 * w.thickness : 0.0;
+          const Eigen::Vector2d mid = p0 + d * (0.5 * len);
+          const double knee_mid = core::ceiling_at(s, mid.x(), mid.y());
+          if (!(knee_mid < s.z_ceiling - 0.3) ||
+              !(knee_mid > s.z_floor + kMinHeadroom) ||
+              ring_dist(s.polygon.outer, {mid.x(), mid.y()}) > kEavesReach)
+            continue;
+          // A facade: no space of the storey outside it, and inside it this
+          // space or none (a bay no room reached), not a room of its own.
+          const Eigen::Vector2d out = mid - n * (half + 0.3);
+          const Eigen::Vector2d in = mid + n * (half + 0.3);
+          if (std::any_of(mine.begin(), mine.end(), [&](std::size_t k) {
+                return in_space(spaces[k], out.x(), out.y()) ||
+                       (k != si && in_space(spaces[k], in.x(), in.y()));
+              }))
+            continue;
+          if (std::find(edges.knee_walls.begin(), edges.knee_walls.end(),
+                        w.guid) != edges.knee_walls.end())
+            continue;
+
+          // The wall's top per bin: the 95th percentile of its points.
+          const double tol = w.thickness > 0.0 ? half + 0.1 : 0.25;
+          const int nb = std::max(1, static_cast<int>(std::ceil(len / kBin)));
+          std::vector<std::vector<double>> zs(static_cast<std::size_t>(nb));
+          const Eigen::Vector2d lo = p0.cwiseMin(p1).array() - tol;
+          const Eigen::Vector2d hi = p0.cwiseMax(p1).array() + tol;
+          buckets.each(lo.x(), lo.y(), hi.x(), hi.y(), [&](std::uint32_t i) {
+            const auto &lp = lpts[i];
+            const Eigen::Vector2d r(lp.q.x() - p0.x(), lp.q.y() - p0.y());
+            const double sv = r.dot(d), t = r.dot(n);
+            if (sv < 0.0 || sv >= len || std::abs(t) > tol ||
+                std::abs(lp.n.z()) >= 0.5 || lp.q.z() < s.z_floor + 0.1 ||
+                lp.q.z() > s.z_ceiling + 0.3)
+              return;
+            zs[static_cast<std::size_t>(
+                   std::min(nb - 1, static_cast<int>(sv / kBin)))]
+                .push_back(lp.q.z());
+          });
+          std::vector<double> top(static_cast<std::size_t>(nb), kInf);
+          std::vector<double> knee(static_cast<std::size_t>(nb));
+          for (int b = 0; b < nb; ++b) {
+            auto &v = zs[static_cast<std::size_t>(b)];
+            const Eigen::Vector2d c = p0 + d * std::min(len, (b + 0.5) * kBin);
+            knee[static_cast<std::size_t>(b)] =
+                core::ceiling_at(s, c.x(), c.y());
+            if (v.size() < 5)
+              continue;
+            const auto q =
+                v.begin() + static_cast<std::ptrdiff_t>(
+                                0.95 * static_cast<double>(v.size() - 1));
+            std::nth_element(v.begin(), q, v.end());
+            top[static_cast<std::size_t>(b)] = *q;
+          }
+          const auto rises = [&](int b) {
+            const auto k = static_cast<std::size_t>(b);
+            return std::isfinite(top[k]) && top[k] > knee[k] + kRise;
+          };
+          // Rising runs, bridging one unseen bin.
+          std::vector<bool> dormer_bin(static_cast<std::size_t>(nb), false);
+          for (int b = 0; b < nb;) {
+            if (!rises(b)) {
+              ++b;
+              continue;
+            }
+            int e = b;
+            while (e + 1 < nb &&
+                   (rises(e + 1) ||
+                    (e + 2 < nb &&
+                     !std::isfinite(top[static_cast<std::size_t>(e + 1)]) &&
+                     rises(e + 2))))
+              e += rises(e + 1) ? 1 : 2;
+            const double s0 = b * kBin, s1 = std::min(len, (e + 1) * kBin);
+            const int next = e + 1;
+            if (s1 - s0 < kMinDormer) {
+              b = next;
+              continue;
+            }
+            // Inside the stretch: this space or none, as for the wall.
+            const Eigen::Vector2d run_in =
+                p0 + d * (0.5 * (s0 + s1)) + n * (half + 0.3);
+            if (std::any_of(mine.begin(), mine.end(), [&](std::size_t k) {
+                  return k != si && in_space(spaces[k], run_in.x(), run_in.y());
+                })) {
+              b = next;
+              continue;
+            }
+            std::vector<double> tops;
+            for (int k = b; k <= e; ++k)
+              if (std::isfinite(top[static_cast<std::size_t>(k)]))
+                tops.push_back(top[static_cast<std::size_t>(k)]);
+            const double zd0 = median(tops);
+            const Eigen::Vector2d a0 = p0 + d * (0.5 * (s0 + s1));
+            const double depth0 = (zd0 - p.z_at(a0.x(), a0.y())) / gn;
+            if (!(depth0 > 0.2) || !(depth0 < 4.0) ||
+                !(zd0 <= s.z_ceiling + 0.05)) {
+              b = next;
+              continue;
+            }
+            // Evidence: its flat ceiling over the bay, or a cheek wall.
+            std::vector<double> ceil_z;
+            std::set<std::pair<int, int>> ceil_cells;
+            int cheek = 0;
+            const Eigen::Vector2d c0 = p0 + d * s0, c1 = p0 + d * s1;
+            const Eigen::Vector2d far0 = c0 + n * (depth0 + 0.2),
+                                  far1 = c1 + n * (depth0 + 0.2);
+            const Eigen::Vector2d blo =
+                c0.cwiseMin(c1).cwiseMin(far0).cwiseMin(far1).array() - 0.3;
+            const Eigen::Vector2d bhi =
+                c0.cwiseMax(c1).cwiseMax(far0).cwiseMax(far1).array() + 0.3;
+            buckets.each(
+                blo.x(), blo.y(), bhi.x(), bhi.y(), [&](std::uint32_t i) {
+                  const auto &lp = lpts[i];
+                  const Eigen::Vector2d r(lp.q.x() - p0.x(), lp.q.y() - p0.y());
+                  const double sv = r.dot(d), t = r.dot(n);
+                  const double z = lp.q.z();
+                  if (t < 0.05 || t > depth0 + 0.1)
+                    return;
+                  const double under = p.z_at(lp.q.x(), lp.q.y());
+                  if (std::abs(lp.n.z()) > 0.8 && sv >= s0 && sv <= s1 &&
+                      std::abs(z - zd0) < 0.25 && z > under + 0.1) {
+                    ceil_z.push_back(z);
+                    ceil_cells.emplace(static_cast<int>(std::floor(sv / kCell)),
+                                       static_cast<int>(std::floor(t / kCell)));
+                  } else if (std::abs(lp.n.z()) < 0.4 &&
+                             std::abs(lp.n.x() * d.x() + lp.n.y() * d.y()) >
+                                 0.8 &&
+                             (std::abs(sv - s0) < 0.2 ||
+                              std::abs(sv - s1) < 0.2) &&
+                             z > under + 0.05 && z < zd0 + 0.1) {
+                    ++cheek;
+                  }
+                });
+            const double bay_cells =
+                std::max(1.0, (s1 - s0) / kCell *
+                                  std::max(depth0 - 0.05, kCell) / kCell);
+            const bool ceiling_seen = static_cast<double>(ceil_cells.size()) >=
+                                      kDormerCeilShare * bay_cells;
+            if (!ceiling_seen && cheek < kMinCheekPoints) {
+              debug("spaces: wall {} rises over the knee line of space {} "
+                    "at s {:.2f}..{:.2f} (to {:.2f} m) but shows no dormer "
+                    "ceiling or cheek; not a dormer",
+                    w.guid, s.guid, s0, s1, zd0);
+              b = next;
+              continue;
+            }
+            const double zd =
+                ceiling_seen && ceil_z.size() >= 20 ? median(ceil_z) : zd0;
+            const double depth = (zd - p.z_at(a0.x(), a0.y())) / gn;
+            const bool taken = std::any_of(
+                dormer_runs.begin(), dormer_runs.end(), [&](const auto &r) {
+                  return r.first == w.guid && r.second.first < s1 &&
+                         r.second.second > s0;
+                });
+            if (!taken && depth > 0.2) {
+              core::Dormer dm;
+              dm.wall = w.guid;
+              dm.s0 = s0;
+              dm.s1 = s1;
+              dm.z = zd;
+              const Eigen::Vector2d i0 = c0 + n * depth, i1 = c1 + n * depth;
+              dm.outline = {{c0.x(), c0.y()},
+                            {c1.x(), c1.y()},
+                            {i1.x(), i1.y()},
+                            {i0.x(), i0.y()}};
+              for (int k = b; k <= e; ++k)
+                dormer_bin[static_cast<std::size_t>(k)] = true;
+              dormer_runs.push_back({w.guid, {s0, s1}});
+              info("spaces: space {}: dormer in wall {} over s {:.2f}..{:.2f} "
+                   "m, its ceiling at {:.2f} m (knee line {:.2f} m), {:.2f} m "
+                   "deep; ceiling seen in {} of {:.0f} cells, {} cheek points",
+                   s.guid, w.guid, s0, s1, zd, p.z_at(a0.x(), a0.y()), depth,
+                   ceil_cells.size(), bay_cells, cheek);
+              edges.dormers.push_back(std::move(dm));
+              ++stats.dormers;
+            }
+            b = next;
+          }
+          // A knee wall: its other stretches stay at the knee line.
+          int seen_bins = 0, at_knee = 0;
+          std::vector<double> gaps;
+          for (int b = 0; b < nb; ++b) {
+            const auto k = static_cast<std::size_t>(b);
+            if (dormer_bin[k] || !std::isfinite(top[k]))
+              continue;
+            ++seen_bins;
+            if (top[k] <= knee[k] + kRise) {
+              ++at_knee;
+              gaps.push_back(top[k] - knee[k]);
+            }
+          }
+          const bool any_dormer =
+              std::find(dormer_bin.begin(), dormer_bin.end(), true) !=
+              dormer_bin.end();
+          if ((seen_bins >= 2 &&
+               at_knee >= kKneeShare * static_cast<double>(seen_bins)) ||
+              (seen_bins == 0 && any_dormer)) {
+            edges.knee_walls.push_back(w.guid);
+            ++stats.knee_walls;
+            debug("spaces: space {}: wall {} is a knee wall: {} of {} seen "
+                  "bins at its knee line ({:.2f} m above the floor at its "
+                  "middle; tops {:+.2f} m off it, median)",
+                  s.guid, w.guid, at_knee, seen_bins, knee_mid - s.z_floor,
+                  gaps.empty() ? 0.0 : median(gaps));
+          }
+        }
+      }
+      s.metadata = core::with_roof_edges(s.metadata, edges);
+      if (!edges.dormers.empty())
+        revolume(si, edges.dormers);
+    }
   }
   if (stats.spaces_sloped > 0)
     info("spaces: sloped ceilings: {} space(s) took {} plane(s) of {} tilted "
-         "ceiling candidate(s)",
-         stats.spaces_sloped, stats.planes, stats.candidates);
+         "ceiling candidate(s), {} carried on from a neighbour; {} knee "
+         "wall(s), {} dormer(s)",
+         stats.spaces_sloped, stats.planes, stats.candidates, stats.extended,
+         stats.knee_walls, stats.dormers);
   return stats;
 }
 
