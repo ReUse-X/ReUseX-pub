@@ -921,6 +921,14 @@ import_speckle_revit(ProjectDB &db, const SpeckleRevitImportOptions &opt,
   core::info("import_speckle_revit: project {} model {} version {} ({}, {})",
              opt.project, opt.model, res.version.id,
              res.version.source_application, res.version.created_at);
+  // A bundle-only version has no object graph; refuse it before anything is
+  // written to the project (reusex-fo1t).
+  if (res.version.is_bundle()) {
+    core::warn("import_speckle_revit: version {} is bundle-only "
+               "(referencedObject starts with 'bundle.'); not supported yet",
+               res.version.id);
+    throw BundleVersionUnsupported(res.version.referenced_object);
+  }
 
   const json source = {{"source", "speckle"},
                        {"server", reader.server_url()},

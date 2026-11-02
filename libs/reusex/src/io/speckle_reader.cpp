@@ -13,11 +13,13 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -71,6 +73,55 @@ bool is_valid_speckle_id(std::string_view id) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
            (c >= 'A' && c <= 'Z');
   });
+}
+
+namespace {
+constexpr std::string_view kBundlePrefix = "bundle.";
+
+std::string bundle_unsupported_message(std::string_view reference) {
+  std::string shown(reference.substr(0, 200));
+  // Only the validated form is echoed verbatim; anything else could carry
+  // control characters into a log line.
+  if (!parse_bundle_reference(reference))
+    shown = "(ugyldig bundle-reference)";
+  return fmt::format(
+      "{} Vælg en ældre version af modellen, der er sendt i det klassiske "
+      "objektformat, eller eksportér modellen som IFC og importér den med "
+      "'rux import ifc'. (referencedObject: {}) {}",
+      kBundleUnsupportedMessage, shown, kBundleUnsupportedTag);
+}
+} // anonymous namespace
+
+std::optional<BundleReference> parse_bundle_reference(std::string_view ref) {
+  if (!ref.starts_with(kBundlePrefix))
+    return std::nullopt;
+  ref.remove_prefix(kBundlePrefix.size());
+  std::array<std::string_view, 3> parts;
+  for (std::size_t i = 0; i < parts.size(); ++i) {
+    const auto dot = ref.find('.');
+    const bool last = i + 1 == parts.size();
+    if (last != (dot == std::string_view::npos))
+      return std::nullopt; // too few or too many parts
+    parts[i] = ref.substr(0, dot);
+    if (!is_valid_speckle_id(parts[i]))
+      return std::nullopt;
+    if (!last)
+      ref.remove_prefix(dot + 1);
+  }
+  return BundleReference{std::string(parts[0]), std::string(parts[1]),
+                         std::string(parts[2])};
+}
+
+bool is_bundle_reference(std::string_view ref) {
+  return ref.starts_with(kBundlePrefix);
+}
+
+BundleVersionUnsupported::BundleVersionUnsupported(const std::string &reference)
+    : std::runtime_error(bundle_unsupported_message(reference)),
+      reference_(reference.substr(0, 200)) {}
+
+bool VersionInfo::is_bundle() const {
+  return is_bundle_reference(referenced_object);
 }
 
 bool is_query_document(std::string_view doc) {
@@ -160,6 +211,10 @@ std::string http_error_message(long status, const std::string &what,
     reason = "not authenticated — the token is missing or invalid";
   else if (status == 403)
     reason = fmt::format("token invalid or no access to project '{}'", project);
+  else if (status == 404 &&
+           body.find("BUNDLE_REFERENCE_NOT_FOUND") != std::string::npos)
+    reason =
+        fmt::format("{} {}", kBundleUnsupportedMessage, kBundleUnsupportedTag);
   else if (status == 404)
     reason = "not found — check the project and object ids";
   else
@@ -1049,6 +1104,8 @@ VersionInfo SpeckleReader::latest_version(const std::string &project,
 ObjectTree
 SpeckleReader::fetch_object_tree(const std::string &project,
                                  const std::string &object_id) const {
+  if (is_bundle_reference(object_id))
+    throw BundleVersionUnsupported(object_id);
   require_id(project, "project");
   require_id(object_id, "object");
   HttpRequest req;
@@ -1076,6 +1133,8 @@ SpeckleReader::fetch_object_tree(const std::string &project,
 
 json SpeckleReader::fetch_object(const std::string &project,
                                  const std::string &object_id) const {
+  if (is_bundle_reference(object_id))
+    throw BundleVersionUnsupported(object_id);
   require_id(project, "project");
   require_id(object_id, "object");
   HttpRequest req;
