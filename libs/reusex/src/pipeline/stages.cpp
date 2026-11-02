@@ -1715,8 +1715,8 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
              planes->size(), cloud->size());
       else
         geometry::fit_sloped_ceilings(sp.spaces, storeys, *cloud, *normals,
-                                      *planes, labels, label_storeys,
-                                      so.spaces);
+                                      *planes, labels, label_storeys, so.spaces,
+                                      &walls);
     }
   }
   info("spaces: {} matched a stored space by footprint ({} locked, {} took "

@@ -274,6 +274,9 @@ struct SlopedCeilingStats {
   int candidates = 0;    ///< ceiling planes tilted within the bounds
   int spaces_sloped = 0; ///< spaces that took at least one plane
   int planes = 0;        ///< planes taken, over all spaces
+  int extended = 0;      ///< planes carried into a neighbouring space
+  int knee_walls = 0;    ///< facade walls found under a slope
+  int dormers = 0;       ///< dormers found
 };
 
 /// Sloped ceilings (reusex-546): give each space the tilted ceiling planes
@@ -297,6 +300,27 @@ struct SlopedCeilingStats {
 /// space handed in is fitted, locked or not: the spaces stage hands it the
 /// detected spaces (one that carries a stored row's lock has the new outline
 /// and heights too, reusex-djf), not the locked rows it keeps as stored.
+///
+/// Eaves (reusex-ow8p). A slope runs on past the wall its room ends at: a
+/// plane one space took is carried into a space beside it (within 0.6 m)
+/// when it cuts that space's ceiling over at least 10 cells and the
+/// ceiling observed there does not contradict it (no worse a fit there, and
+/// no more than a fifth of the observed cells it cuts lie over 0.15 m above
+/// it; 35 % when it cuts the error there by ceiling_min_gain) -- the strip
+/// between a knee partition and the facade, its ceiling mostly unseen,
+/// takes the slope down to the facade. Then, with @p walls, each wall of
+/// the storey that runs along a sloped space's plane (within 20 deg of its
+/// contour lines), on its downhill side within 2.5 m of the space, with no
+/// space outside it and that space or none inside it, is measured from the
+/// cloud: the 95th percentile
+/// height of its points per 0.25 m along it against the plane there (its
+/// knee line). A stretch of at least 0.75 m that rises over 0.35 m above
+/// the knee line, with a flat ceiling (points facing down at the stretch's
+/// height over a fifth of the bay between the wall and where the slope
+/// reaches that height) or a cheek wall at either end, is a dormer (its
+/// ceiling height: the median of those ceiling points, else of the wall's
+/// tops); a wall whose other stretches stay at the knee line is a knee
+/// wall. Both go into the space's metadata as core::RoofEdges ("roof").
 /// @throws std::invalid_argument when cloud, normals and labels sizes differ
 ///         or ceiling_labels and ceiling_storeys do.
 SlopedCeilingStats fit_sloped_ceilings(
@@ -304,6 +328,7 @@ SlopedCeilingStats fit_sloped_ceilings(
     const std::vector<core::StoreyRecord> &storeys, const Cloud &cloud,
     const CloudN &normals, const CloudL &plane_labels,
     const std::vector<int> &ceiling_labels,
-    const std::vector<int> &ceiling_storeys, const SpacesOptions &options = {});
+    const std::vector<int> &ceiling_storeys, const SpacesOptions &options = {},
+    const std::vector<core::WallRecord> *walls = nullptr);
 
 } // namespace reusex::geometry

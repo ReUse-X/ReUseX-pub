@@ -34,6 +34,86 @@ double ceiling_at(const SpaceRecord &space, double x, double y) {
   return z;
 }
 
+RoofEdges roof_edges(const SpaceRecord &space) {
+  RoofEdges out;
+  if (space.metadata.empty())
+    return out;
+  try {
+    const json j = json::parse(space.metadata);
+    if (!j.is_object() || !j.contains("roof") || !j.at("roof").is_object())
+      return out;
+    const json &r = j.at("roof");
+    if (r.contains("knee_walls"))
+      for (const auto &g : r.at("knee_walls"))
+        out.knee_walls.push_back(g.get<std::string>());
+    if (r.contains("dormers"))
+      for (const auto &d : r.at("dormers")) {
+        Dormer x;
+        x.wall = d.at("wall").get<std::string>();
+        x.s0 = number(d.at("s").at(0), "a dormer's s0");
+        x.s1 = number(d.at("s").at(1), "a dormer's s1");
+        x.z = number(d.at("z"), "a dormer's z");
+        for (const auto &p : d.at("outline"))
+          x.outline.push_back({number(p.at(0), "a dormer outline x"),
+                               number(p.at(1), "a dormer outline y")});
+        if (x.outline.size() >= 3 && x.s1 > x.s0)
+          out.dormers.push_back(std::move(x));
+      }
+  } catch (const std::exception &) {
+    return {};
+  }
+  return out;
+}
+
+std::string with_roof_edges(const std::string &metadata,
+                            const RoofEdges &edges) {
+  json j = json::object();
+  if (!metadata.empty()) {
+    try {
+      j = json::parse(metadata);
+    } catch (const std::exception &) {
+      j = json::object();
+    }
+    if (!j.is_object())
+      j = json::object();
+  }
+  if (edges.empty()) {
+    j.erase("roof");
+    return j.empty() && metadata.empty() ? std::string() : j.dump();
+  }
+  json dormers = json::array();
+  for (const auto &d : edges.dormers) {
+    json outline = json::array();
+    for (const auto &p : d.outline)
+      outline.push_back({p[0], p[1]});
+    dormers.push_back({{"wall", d.wall},
+                       {"s", {d.s0, d.s1}},
+                       {"z", d.z},
+                       {"outline", outline}});
+  }
+  j["roof"] = {{"knee_walls", edges.knee_walls}, {"dormers", dormers}};
+  return j.dump();
+}
+
+double ceiling_at(const SpaceRecord &space, const std::vector<Dormer> &dormers,
+                  double x, double y) {
+  double z = ceiling_at(space, x, y);
+  for (const auto &d : dormers) {
+    if (!(d.z > z))
+      continue;
+    bool in = false;
+    const auto &r = d.outline;
+    for (std::size_t i = 0, k = r.size() - 1; i < r.size(); k = i++)
+      if ((r[i][1] > y) != (r[k][1] > y) &&
+          x < (r[k][0] - r[i][0]) * (y - r[i][1]) / (r[k][1] - r[i][1]) +
+                  r[i][0])
+        in = !in;
+    if (in)
+      z = d.z;
+  }
+  return z;
+}
+
 double wall_top_at(const WallRecord &wall, double s) {
   const double cap = wall.z_base + wall.height;
   const auto &t = wall.top;
