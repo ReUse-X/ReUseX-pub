@@ -12,6 +12,8 @@
 #include <cstddef>
 #include <functional>
 #include <map>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -51,6 +53,11 @@ struct VersionInfo {
   std::string source_application;
   std::string created_at; ///< ISO 8601, as the server reports it
   std::string message;
+
+  /// True when `referenced_object` is a bundle reference
+  /// (`bundle.<project>.<model>.<version>`, see `parse_bundle_reference`):
+  /// a bundle-only version, which has no object graph to fetch.
+  [[nodiscard]] bool is_bundle() const;
 };
 
 /// What `ObjectTree::resolve` could not resolve, and what it did.
@@ -174,6 +181,52 @@ std::vector<VersionInfo> parse_versions(const nlohmann::json &data);
 /// into a URL or a query.
 bool is_valid_speckle_id(std::string_view id);
 
+/// What a bundle-only version carries in `referencedObject` instead of an
+/// object hash: `bundle.<projectId>.<modelId>.<versionId>`.
+///
+/// Such a version's data lives in a set of Parquet files served by
+/// `GET /api/v2/projects/{p}/models/{m}/versions/{v}/artifacts` (presigned
+/// storage URLs) and has no legacy object graph: `/objects/...` answers 404
+/// `BUNDLE_REFERENCE_NOT_FOUND`. ReUseX cannot read that format yet
+/// (reusex-fo1t); the reader recognises the reference and throws
+/// `BundleVersionUnsupported` instead of sending it anywhere.
+struct BundleReference {
+  std::string project;
+  std::string model;
+  std::string version;
+};
+
+/// The parts of a bundle reference, or nullopt unless @p ref is exactly
+/// `bundle.<a>.<b>.<c>` with each part a valid Speckle id
+/// (`is_valid_speckle_id`).
+std::optional<BundleReference> parse_bundle_reference(std::string_view ref);
+
+/// True when @p ref starts with `bundle.` (well-formed or not): it names a
+/// bundle, never an object, so it must not go to the `/objects` endpoints.
+bool is_bundle_reference(std::string_view ref);
+
+/// Thrown for a bundle-only version (see `BundleReference`). The message
+/// is stable: it starts with `kBundleUnsupportedMessage` and ends with the
+/// tag `kBundleUnsupportedTag`, which a front end may match on.
+class BundleVersionUnsupported : public std::runtime_error {
+    public:
+  explicit BundleVersionUnsupported(const std::string &reference);
+  /// The reference as given, cut to 200 characters.
+  [[nodiscard]] const std::string &reference() const { return reference_; }
+
+    private:
+  std::string reference_;
+};
+
+/// First sentence of every `BundleVersionUnsupported` message.
+inline constexpr std::string_view kBundleUnsupportedMessage =
+    "Denne Speckle-version er gemt i Speckles nye bundle-format, som ReUseX "
+    "endnu ikke kan læse.";
+/// Machine-readable tag at the end of every `BundleVersionUnsupported`
+/// message.
+inline constexpr std::string_view kBundleUnsupportedTag =
+    "[speckle-bundle-unsupported]";
+
 /// True when `document` holds only GraphQL `query` operations (and
 /// fragments): no `mutation` or `subscription` anywhere (outside strings and
 /// comments) and no anonymous `{ ... }` shorthand. This is what keeps
@@ -261,12 +314,16 @@ class SpeckleReader {
 
   /// Download a root object and its whole closure in one GET
   /// (`/objects/{project}/{object_id}`), streamed into memory.
+  /// @throws BundleVersionUnsupported for a bundle reference
+  ///         (`is_bundle_reference`), before any request.
   [[nodiscard]] ObjectTree
   fetch_object_tree(const std::string &project,
                     const std::string &object_id) const;
 
   /// Download just one object (`/objects/{project}/{object_id}/single`),
   /// unresolved.
+  /// @throws BundleVersionUnsupported for a bundle reference, before any
+  ///         request.
   [[nodiscard]] nlohmann::json fetch_object(const std::string &project,
                                             const std::string &object_id) const;
 

@@ -1111,6 +1111,16 @@ model, version, root object). The run's `StageResult::outputs` (both import
 stages) are `{table, storeys|walls|openings|spaces, rows written}` and
 `{mesh, <name>}` for every mesh saved, so a client refreshes what changed.
 
+**Bundle-only versions are refused.** A version whose `referencedObject` is
+`bundle.<project>.<model>.<version>` (Speckle's Parquet artefact bundle, no
+legacy object graph) cannot be read yet (reusex-fo1t): the stage fails with
+`io::speckle::BundleVersionUnsupported` right after the version query:
+nothing is downloaded and no table or mesh is touched (a run with a
+`pipeline_log` row records the failure there). Its message starts with
+`kBundleUnsupportedMessage` ("Denne Speckle-version er gemt i Speckles nye
+bundle-format, som ReUseX endnu ikke kan læse.") and ends with the tag
+`[speckle-bundle-unsupported]`, which a front end may match on.
+
 **The token is never a parameter.** Job parameters are persisted (job
 history, `pipeline_log.parameters`), so the Speckle token is resolved per run
 by `StageExecutorOptions::speckle_token(ctx, server_url)`, which a multi-user

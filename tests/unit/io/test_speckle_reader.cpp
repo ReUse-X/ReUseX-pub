@@ -387,6 +387,80 @@ TEST_CASE("IsValidSpeckleId_VariousInputs_AcceptsOnlyAlphanumeric",
   CHECK_FALSE(is_valid_speckle_id(std::string(129, 'a')));
 }
 
+TEST_CASE("ParseBundleReference_VariousInputs_AcceptsOnlyTheExactForm",
+          "[io][speckle]") {
+  auto ref = parse_bundle_reference("bundle.p0a1.m2b3.v4c5");
+  REQUIRE(ref);
+  CHECK(ref->project == "p0a1");
+  CHECK(ref->model == "m2b3");
+  CHECK(ref->version == "v4c5");
+  CHECK(parse_bundle_reference("bundle." + std::string(128, 'a') + ".b.c"));
+
+  CHECK_FALSE(parse_bundle_reference(""));
+  CHECK_FALSE(parse_bundle_reference("bundle."));
+  CHECK_FALSE(parse_bundle_reference("bundle.a.b"));
+  CHECK_FALSE(parse_bundle_reference("bundle.a.b.c.d"));
+  CHECK_FALSE(parse_bundle_reference("bundle.a..c"));
+  CHECK_FALSE(parse_bundle_reference("bundle.a.b.c."));
+  CHECK_FALSE(parse_bundle_reference("bundle.a.b/../c.d"));
+  CHECK_FALSE(parse_bundle_reference("bundle.a.b.c?x=1"));
+  CHECK_FALSE(parse_bundle_reference("bundle.a.b.c\n"));
+  CHECK_FALSE(
+      parse_bundle_reference("bundle." + std::string(129, 'a') + ".b.c"));
+  CHECK_FALSE(parse_bundle_reference("Bundle.a.b.c"));
+  CHECK_FALSE(parse_bundle_reference("155e126736a671b12c02d4e3482ae3f6"));
+
+  CHECK(is_bundle_reference("bundle.a.b.c"));
+  CHECK(is_bundle_reference("bundle.not/valid")); // still never an object id
+  CHECK_FALSE(is_bundle_reference("155e126736a671b12c02d4e3482ae3f6"));
+  CHECK_FALSE(is_valid_speckle_id("bundle.a.b.c"));
+}
+
+TEST_CASE("BundleVersionUnsupported_Message_IsStableAndActionable",
+          "[io][speckle]") {
+  const BundleVersionUnsupported e("bundle.p1.m1.v1");
+  const std::string msg = e.what();
+  CHECK(msg.starts_with(kBundleUnsupportedMessage));
+  CHECK(msg.ends_with(kBundleUnsupportedTag));
+  CHECK(msg.find("bundle.p1.m1.v1") != std::string::npos);
+  CHECK(msg.find("rux import ifc") != std::string::npos);
+  CHECK(e.reference() == "bundle.p1.m1.v1");
+
+  // A malformed reference is not echoed (it could carry anything).
+  const BundleVersionUnsupported bad("bundle.\x1b[31m.evil");
+  CHECK(std::string(bad.what()).find("evil") == std::string::npos);
+  CHECK(std::string(bad.what()).ends_with(kBundleUnsupportedTag));
+}
+
+TEST_CASE("SpeckleReader_BundleReference_ThrowsBeforeAnyRequest",
+          "[io][speckle]") {
+  // example.invalid never resolves: any request would fail with a plain
+  // runtime_error, so BundleVersionUnsupported proves none was made.
+  SpeckleReader reader("https://example.invalid", "t");
+  CHECK_THROWS_AS(reader.fetch_object_tree("p1", "bundle.p1.m1.v1"),
+                  BundleVersionUnsupported);
+  CHECK_THROWS_AS(reader.fetch_object("p1", "bundle.p1.m1.v1"),
+                  BundleVersionUnsupported);
+  CHECK_THROWS_AS(reader.fetch_object_tree("p1", "bundle.../../graphql"),
+                  BundleVersionUnsupported);
+}
+
+TEST_CASE("ParseVersions_BundleReferencedObject_IsFlaggedAsBundle",
+          "[io][speckle]") {
+  const json data = json::parse(R"({"project": {"model": {"versions": {
+      "items": [
+        {"id": "v2", "referencedObject": "bundle.p1.m1.v2",
+         "sourceApplication": "revit", "createdAt": "2026-11-01T00:00:00Z",
+         "message": null},
+        {"id": "v1", "referencedObject": "155e126736a671b12c02d4e3482ae3f6",
+         "sourceApplication": "revit", "createdAt": "2026-10-01T00:00:00Z",
+         "message": "classic"}]}}}})");
+  const auto versions = parse_versions(data);
+  REQUIRE(versions.size() == 2);
+  CHECK(versions[0].is_bundle());
+  CHECK_FALSE(versions[1].is_bundle());
+}
+
 TEST_CASE("IsQueryDocument_VariousDocuments_AcceptsOnlyQueries",
           "[io][speckle]") {
   CHECK(is_query_document("query { project(id: \"x\") { id } }"));
@@ -418,6 +492,11 @@ TEST_CASE("HttpErrorMessage_KnownStatuses_ExplainTheCause", "[io][speckle]") {
         std::string::npos);
   CHECK(http_error_message(404, "GET", "p1", "").find("not found") !=
         std::string::npos);
+  const auto bundle = http_error_message(
+      404, "object download", "p1",
+      R"({"error":"BUNDLE_REFERENCE_NOT_FOUND","message":"bundle-only"})");
+  CHECK(bundle.find(kBundleUnsupportedMessage) != std::string::npos);
+  CHECK(bundle.find(kBundleUnsupportedTag) != std::string::npos);
   auto msg = http_error_message(500, "GET", "p1", std::string(1000, 'x'));
   CHECK(msg.find("HTTP 500") != std::string::npos);
   CHECK(msg.size() < 600); // body truncated
@@ -589,4 +668,37 @@ TEST_CASE("SpeckleReader_LiveServer_QueriesAndFetchesLatestVersion",
   rusage usage{};
   getrusage(RUSAGE_SELF, &usage);
   std::cout << "peak RSS " << usage.ru_maxrss / 1024 << " MiB\n";
+}
+
+// Live, read-only check of a bundle-only version. Hidden by default; runs
+// only with `"[.network]"` and SPECKLE_TOKEN, SPECKLE_TEST_BUNDLE_PROJECT,
+// SPECKLE_TEST_BUNDLE_MODEL and SPECKLE_TEST_BUNDLE_VERSION set. One GraphQL
+// query; the object fetch is refused before any request.
+TEST_CASE("SpeckleReader_LiveServer_BundleVersionIsRefusedClearly",
+          "[.network][io][speckle]") {
+  const char *token = std::getenv("SPECKLE_TOKEN");
+  const char *project = std::getenv("SPECKLE_TEST_BUNDLE_PROJECT");
+  const char *model = std::getenv("SPECKLE_TEST_BUNDLE_MODEL");
+  const char *version_id = std::getenv("SPECKLE_TEST_BUNDLE_VERSION");
+  if (!token || !project || !model || !version_id)
+    SKIP("set SPECKLE_TOKEN, SPECKLE_TEST_BUNDLE_PROJECT, "
+         "SPECKLE_TEST_BUNDLE_MODEL and SPECKLE_TEST_BUNDLE_VERSION");
+  const char *server_env = std::getenv("SPECKLE_SERVER");
+  SpeckleReader reader(server_env ? server_env : "https://app.speckle.systems",
+                       token);
+
+  const auto version = reader.query_version(project, model, version_id);
+  REQUIRE(version.is_bundle());
+  const auto ref = parse_bundle_reference(version.referenced_object);
+  REQUIRE(ref);
+  CHECK(ref->project == project);
+  CHECK(ref->model == model);
+  CHECK(ref->version == version_id);
+  try {
+    (void)reader.fetch_object_tree(project, version.referenced_object);
+    FAIL("expected BundleVersionUnsupported");
+  } catch (const BundleVersionUnsupported &e) {
+    std::cout << "version " << version.id << " (" << version.source_application
+              << ", " << version.created_at << "): " << e.what() << "\n";
+  }
 }
