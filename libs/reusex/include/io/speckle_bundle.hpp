@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "reusex/io/speckle_bundle_options.hpp"
 #include "reusex/io/speckle_reader.hpp"
 
 #include <nlohmann/json.hpp>
@@ -172,23 +173,19 @@ struct BundleTables {
   std::vector<BundleGeometry> geometries;
 };
 
-/// Bounds for `read_bundle_directory` (STANDARDS §5: no unbounded work on
-/// server input).
-struct BundleReadOptions {
-  std::size_t max_rows = 20'000'000; ///< per table
-  std::string memory_limit = "4GB";  ///< DuckDB memory_limit
-  int threads = 4;                   ///< DuckDB threads
-};
-
 /// Read a downloaded bundle directory with DuckDB (in-memory database,
 /// extension autoload / autoinstall off, external access off except for
 /// @p dir, configuration locked). Required tables: `*.eav.objects`,
 /// `*.eav.paths`, `*.eav.eav`, `*.envelope.nodes`, `*.envelope.relations`;
 /// optional: `*.eav.type_eav`, `*.eav.object_type`, `*.envelope.meta`,
 /// `*.geometries*.parquet`.
+/// A table is the file `<base><suffix>` whose base has no '.' (geometry
+/// shards: `<base>.geometries*.parquet`). Bounds: `BundleReadOptions` (rows
+/// per table, bytes of strings / blobs overall, DuckDB memory and threads,
+/// cancel token per chunk).
 /// @throws BundleVersionUnsupported when built without DuckDB;
-///         std::runtime_error for a missing required table, a table larger
-///         than `max_rows` or a DuckDB error.
+///         std::runtime_error for a missing required table, a bound
+///         exceeded, a cancel or a DuckDB error.
 BundleTables read_bundle_directory(const std::filesystem::path &dir,
                                    const BundleReadOptions &options = {});
 
@@ -206,6 +203,18 @@ struct BundleProjectionStats {
   std::size_t geometries_missing = 0; ///< referenced but not in the tables
   std::size_t hosted = 0; ///< parentApplicationId filled in from HOSTED_ON
   std::size_t nested = 0; ///< objects nested under a SUBELEMENT parent
+  std::size_t shared_meshes = 0;        ///< DISPLAY meshes of several objects,
+                                        ///< emitted once behind a definition
+  std::size_t instances_unresolved = 0; ///< placements without a definition
+  std::size_t paths_dropped = 0;        ///< property rows over the path bounds
+  std::size_t levels_dropped = 0;       ///< levels no object is ON_LEVEL of
+  std::size_t levels_renamed = 0;       ///< duplicate level names disambiguated
+  std::size_t levels_with_properties = 0; ///< matched to a Levels object
+  std::size_t duplicate_app_ids = 0;      ///< applicationIds suffixed
+  std::size_t mesh_values = 0;            ///< vertex coords + face ints emitted
+  std::size_t expanded_vertices = 0; ///< vertices once placements are baked
+  std::size_t property_rows = 0;     ///< property rows applied
+  std::size_t nodes = 0;             ///< JSON nodes emitted (approximate)
   std::map<std::string, std::size_t> speckle_types; ///< objects per type
 };
 
@@ -225,11 +234,24 @@ struct BundleProjectionStats {
 ///    `properties.parentApplicationId` from HOSTED_ON when the EAV has none,
 ///    and `displayValue`: its DISPLAY meshes and DISPLAY_INSTANCE proxies,
 ///    in `ord` order.
+/// Shared geometry: a DISPLAY mesh of several objects is emitted once, in
+/// `definitionGeometry` behind a definition `shared-<geometry>`, and each
+/// object places it with an identity InstanceProxy. Levels: a LEVEL node no
+/// object is ON_LEVEL of is dropped; duplicate names get " (2)", " (3)" in
+/// (elevation, id) order; a `Levels` object of the same name (if the bundle
+/// has one) lends its applicationId and properties (building storey flag,
+/// elementId, IFC GUID). Duplicate applicationIds get "#2", "#3" in object
+/// order. A property path over the bounds is dropped. A placement whose
+/// instance has no definition is skipped.
 /// Pure: no I/O. Undecodable geometry is skipped, counted and logged at
 /// warn.
+/// @throws std::runtime_error past a `BundleProjectionOptions` budget
+///         (mesh values, expanded vertices, property rows, nodes) or on a
+///         cancel.
 nlohmann::json
 project_bundle_to_revit_tree(const BundleTables &tables,
-                             BundleProjectionStats *stats = nullptr);
+                             BundleProjectionStats *stats = nullptr,
+                             const BundleProjectionOptions &options = {});
 
 // --------------------------------------------------------------- fetch ---
 
@@ -247,9 +269,19 @@ struct BundleFetchReport {
 /// @throws BundleVersionUnsupported when built without DuckDB;
 ///         std::invalid_argument for a malformed reference or one of
 ///         another project; std::runtime_error for HTTP / read errors.
-nlohmann::json fetch_bundle_tree(const SpeckleReader &reader,
-                                 const std::string &project,
-                                 const std::string &reference,
-                                 BundleFetchReport *report = nullptr);
+nlohmann::json
+fetch_bundle_tree(const SpeckleReader &reader, const std::string &project,
+                  const std::string &reference,
+                  BundleFetchReport *report = nullptr,
+                  const BundleReadOptions &read_options = {},
+                  const BundleProjectionOptions &projection_options = {});
+
+namespace detail {
+/// Run one SQL statement in the sandbox `read_bundle_directory` uses for
+/// @p dir; returns "" on success, else DuckDB's error. Exposed for the
+/// sandbox regression tests only.
+std::string bundle_sandbox_query_for_tests(const std::filesystem::path &dir,
+                                           const std::string &sql);
+} // namespace detail
 
 } // namespace reusex::io::speckle

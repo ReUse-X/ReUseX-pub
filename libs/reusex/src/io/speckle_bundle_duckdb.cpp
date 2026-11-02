@@ -42,6 +42,13 @@ BundleTables read_bundle_directory(const std::filesystem::path &,
   throw BundleVersionUnsupported("bundle.");
 }
 
+namespace detail {
+std::string bundle_sandbox_query_for_tests(const std::filesystem::path &,
+                                           const std::string &) {
+  return "built without DuckDB";
+}
+} // namespace detail
+
 #else
 
 namespace {
@@ -60,7 +67,8 @@ std::string sql_string(const std::string &s) {
 
 class Db {
     public:
-  Db(const fs::path &dir, const BundleReadOptions &opt) {
+  Db(const fs::path &dir, const BundleReadOptions &opt)
+      : cancel_(opt.cancel), max_bytes_(opt.max_bytes) {
     duckdb_config cfg = nullptr;
     if (duckdb_create_config(&cfg) == DuckDBError)
       throw std::runtime_error("DuckDB: cannot create a configuration");
@@ -117,15 +125,33 @@ class Db {
 
   duckdb_connection con() const { return con_; }
 
+  /// Count @p n bytes of strings / blobs read against the budget.
+  void account(std::size_t n) {
+    bytes_ += n;
+    if (bytes_ > max_bytes_)
+      throw std::runtime_error(fmt::format(
+          "Speckle bundle: more than {} MiB of strings and blobs (limit "
+          "BundleReadOptions::max_bytes)",
+          max_bytes_ >> 20));
+  }
+  void throw_if_cancelled() const {
+    if (cancel_ && cancel_->load(std::memory_order_acquire))
+      throw std::runtime_error("Speckle bundle read: cancelled");
+  }
+
     private:
   duckdb_database db_ = nullptr;
   duckdb_connection con_ = nullptr;
+  const std::atomic_bool *cancel_ = nullptr;
+  std::size_t max_bytes_ = 0;
+  std::size_t bytes_ = 0;
 };
 
 /// One row of a data chunk, typed by the query's casts.
 class Row {
     public:
-  Row(duckdb_data_chunk chunk, idx_t i) : chunk_(chunk), i_(i) {}
+  Row(duckdb_data_chunk chunk, idx_t i, Db &db)
+      : chunk_(chunk), i_(i), db_(&db) {}
   [[nodiscard]] bool is_null(idx_t col) const {
     auto *v = duckdb_vector_get_validity(vec(col));
     return v && !duckdb_validity_row_is_valid(v, i_);
@@ -152,7 +178,9 @@ class Row {
       return std::nullopt;
     auto *s =
         static_cast<duckdb_string_t *>(duckdb_vector_get_data(vec(col))) + i_;
-    return std::string(duckdb_string_t_data(s), duckdb_string_t_length(*s));
+    const std::uint32_t n = duckdb_string_t_length(*s);
+    db_->account(n);
+    return std::string(duckdb_string_t_data(s), n);
   }
   [[nodiscard]] std::string str_or_empty(idx_t col) const {
     return str(col).value_or(std::string{});
@@ -164,6 +192,7 @@ class Row {
   }
   duckdb_data_chunk chunk_;
   idx_t i_;
+  Db *db_;
 };
 
 template <class F> void Db::for_each_row(const std::string &sql, F &&row) {
@@ -177,8 +206,9 @@ template <class F> void Db::for_each_row(const std::string &sql, F &&row) {
     while (duckdb_data_chunk chunk = duckdb_fetch_chunk(r)) {
       const idx_t n = duckdb_data_chunk_get_size(chunk);
       try {
+        throw_if_cancelled();
         for (idx_t i = 0; i < n; ++i)
-          row(Row(chunk, i));
+          row(Row(chunk, i, *this));
       } catch (...) {
         duckdb_destroy_data_chunk(&chunk);
         throw;
@@ -193,25 +223,40 @@ template <class F> void Db::for_each_row(const std::string &sql, F &&row) {
 }
 
 /// The bundle files whose name ends with @p suffix, sorted.
-std::vector<fs::path> files_ending(const fs::path &dir,
-                                   const std::string &suffix) {
-  std::vector<fs::path> out;
+/// Bundle files in @p dir (regular files, not symlinks, valid names).
+std::vector<std::string> bundle_names(const fs::path &dir) {
+  std::vector<std::string> out;
   for (const auto &e : fs::directory_iterator(dir)) {
     const std::string name = e.path().filename().string();
-    if (e.is_regular_file() && is_bundle_file_name(name) &&
-        name.size() > suffix.size() && name.ends_with(suffix))
-      out.push_back(e.path());
+    if (!e.is_symlink() && e.is_regular_file() && is_bundle_file_name(name))
+      out.push_back(name);
   }
   std::sort(out.begin(), out.end());
   return out;
 }
 
-/// Geometry shards: "*.geometries*.parquet" (one file or several).
+/// The file `<base><suffix>` whose base has no '.' (exact table match:
+/// ".eav.eav.parquet" never matches "<v>.x.eav.eav.parquet").
+std::vector<fs::path> files_ending(const fs::path &dir,
+                                   const std::string &suffix) {
+  std::vector<fs::path> out;
+  for (const auto &name : bundle_names(dir))
+    if (name.size() > suffix.size() && name.ends_with(suffix) &&
+        name.substr(0, name.size() - suffix.size()).find('.') ==
+            std::string::npos)
+      out.push_back(dir / name);
+  return out;
+}
+
+/// Geometry shards: "<base>.geometries*.parquet" (one file or several).
 std::vector<fs::path> geometry_files(const fs::path &dir) {
   std::vector<fs::path> out;
-  for (const auto &p : files_ending(dir, ".parquet"))
-    if (p.filename().string().find(".geometries") != std::string::npos)
-      out.push_back(p);
+  for (const auto &name : bundle_names(dir)) {
+    const auto dot = name.find('.');
+    if (dot != std::string::npos && dot > 0 &&
+        name.compare(dot, 11, ".geometries") == 0 && name.ends_with(".parquet"))
+      out.push_back(dir / name);
+  }
   return out;
 }
 
@@ -424,6 +469,19 @@ BundleTables read_bundle_directory(const fs::path &dir,
              sw.elapsed());
   return out;
 }
+
+namespace detail {
+std::string bundle_sandbox_query_for_tests(const fs::path &dir,
+                                           const std::string &sql) {
+  Db db(fs::canonical(dir), BundleReadOptions{});
+  try {
+    db.exec(sql);
+  } catch (const std::exception &e) {
+    return e.what();
+  }
+  return {};
+}
+} // namespace detail
 
 #endif // REUSEX_HAVE_DUCKDB
 

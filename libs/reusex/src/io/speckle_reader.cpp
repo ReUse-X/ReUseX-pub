@@ -219,6 +219,8 @@ std::string http_error_message(long status, const std::string &what,
         fmt::format("{} {}", kBundleUnsupportedMessage, kBundleUnsupportedTag);
   else if (status == 404)
     reason = "not found — check the project and object ids";
+  else if (status >= 300 && status < 400)
+    reason = "redirect refused (bundle downloads do not follow redirects)";
   else
     reason = "unexpected response";
   constexpr std::size_t max_body = 300;
@@ -358,6 +360,9 @@ struct HttpRequest {
   /// The URL as messages show it (a presigned URL's query is its
   /// signature); empty = `url`.
   std::string shown_url;
+  /// Follow redirects (to https only). Off for presigned artifact URLs: a
+  /// redirect could leave the vetted storage host.
+  bool follow_redirects = true;
   [[nodiscard]] const std::string &url_for_messages() const {
     return shown_url.empty() ? url : shown_url;
   }
@@ -439,7 +444,7 @@ std::string http_perform(const HttpRequest &req) {
   const bool plain_http = lower(req.url).rfind("http://", 0) == 0;
   curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, plain_http ? "http" : "https");
   curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, req.follow_redirects ? 1L : 0L);
   curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
   // Required for signal-based timeout to work in multithreaded programs.
   curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
@@ -1367,6 +1372,7 @@ std::size_t SpeckleReader::download_bundle(
     req.what = fmt::format("bundle file '{}'", f.name);
     req.project = ref.project;
     req.accept = "*/*";
+    req.follow_redirects = false; // never leave the vetted storage host
     req.long_transfer = true;
     req.max_bytes = max_download_bytes_ - total;
     req.cancel = cancel_;

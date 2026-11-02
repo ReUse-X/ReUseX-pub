@@ -18,11 +18,19 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <nlohmann/json.hpp>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -30,7 +38,9 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef REUSEX_HAVE_DUCKDB
@@ -564,6 +574,423 @@ TEST_CASE("ProjectBundle_BadGeometry_IsSkippedAndCounted",
     CHECK(e["displayValue"].empty());
 }
 
+// ============================================================ budgets ===
+
+namespace {
+
+/// A box mesh (8 vertices, 12 triangles) as an SGEO blob.
+std::string box_blob() {
+  std::vector<double> v;
+  for (int i = 0; i < 8; ++i)
+    v.insert(v.end(), {double(i & 1), double((i >> 1) & 1), double(i >> 2)});
+  std::vector<std::int32_t> f;
+  for (int t = 0; t < 12; ++t)
+    f.insert(f.end(), {3, t % 8, (t + 1) % 8, (t + 2) % 8});
+  return sgeo_mesh(v, f, "m");
+}
+
+/// @p n objects (category Walls) that all DISPLAY one geometry.
+BundleTables fan_out(std::size_t n) {
+  BundleTables t;
+  t.paths = {{0, "category"}};
+  t.geometries = {{0, box_blob(), "mesh"}};
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto k = static_cast<std::int32_t>(i);
+    t.objects[k] = "o" + std::to_string(i);
+    BundleEavRow r;
+    r.key = k;
+    r.path = 0;
+    r.value.s = "Walls";
+    t.eav.push_back(r);
+    t.relations.push_back({static_cast<int>(BundleRel::display), k, 0, 0});
+  }
+  return t;
+}
+
+} // namespace
+
+TEST_CASE("ProjectBundle_SharedDisplayMesh_IsEmittedOnce",
+          "[io][speckle][bundle]") {
+  BundleProjectionStats st;
+  const json root = project_bundle_to_revit_tree(fan_out(1000), &st);
+  CHECK(st.shared_meshes == 1);
+  CHECK(st.meshes == 1);
+  CHECK(st.mesh_values == 8 * 3 + 12 * 4); // one copy
+  CHECK(st.expanded_vertices == 1000 * 8);
+  CHECK(root["definitionGeometry"].size() == 1);
+  for (const auto &e : root["elements"]) {
+    REQUIRE(e["displayValue"].size() == 1);
+    CHECK(e["displayValue"][0]["definitionId"] == "shared-0");
+  }
+  // Every use still bakes to the same geometry.
+  json with_level = root;
+  with_level["levelProxies"] = json::array(
+      {{{"applicationId", "l"},
+        {"value", {{"name", "L"}, {"elevation", 0}, {"units", "m"}}}}});
+  const auto r = import_revit(with_level);
+  REQUIRE(r.meshes.size() == 1);
+  CHECK(r.meshes[0].elements == 1000);
+  CHECK(r.stats.instance_unresolved == 0);
+}
+
+TEST_CASE("ProjectBundle_FanOutBomb_ThrowsOnTheBudget",
+          "[io][speckle][bundle]") {
+  BundleProjectionOptions small;
+  small.max_expanded_vertices = 8 * 100;
+  CHECK_THROWS_WITH(project_bundle_to_revit_tree(fan_out(101), nullptr, small),
+                    Catch::Matchers::ContainsSubstring("expanded vertices"));
+
+  // A small definition placed many times, nested three deep (x10 each).
+  BundleTables t;
+  t.geometries = {{0, box_blob(), "mesh"}};
+  std::int32_t id = 0;
+  std::int32_t inner = -1;
+  for (int level = 0; level < 3; ++level) {
+    const std::int32_t def = id++;
+    t.nodes.push_back({def, static_cast<int>(BundleNodeKind::definition), "d",
+                       std::nullopt, "", "", "", std::nullopt});
+    if (inner < 0)
+      t.relations.push_back({static_cast<int>(BundleRel::defines), def, 0, 0});
+    else
+      for (int i = 0; i < 10; ++i) {
+        const std::int32_t inst = id++;
+        t.nodes.push_back({inst, static_cast<int>(BundleNodeKind::instance), "",
+                           inner, "", "m", "", std::nullopt});
+        t.relations.push_back(
+            {static_cast<int>(BundleRel::defines_instance), def, inst, i});
+      }
+    inner = def;
+  }
+  t.objects[0] = "o";
+  for (int i = 0; i < 10; ++i) {
+    const std::int32_t inst = id++;
+    t.nodes.push_back({inst, static_cast<int>(BundleNodeKind::instance), "",
+                       inner, "", "m", "", std::nullopt});
+    t.relations.push_back(
+        {static_cast<int>(BundleRel::display_instance), 0, inst, i});
+  }
+  BundleProjectionStats st;
+  CHECK_NOTHROW(project_bundle_to_revit_tree(t, &st));
+  CHECK(st.expanded_vertices == 8 * 1000);
+  BundleProjectionOptions tight;
+  tight.max_expanded_vertices = 8 * 999;
+  CHECK_THROWS_WITH(project_bundle_to_revit_tree(t, nullptr, tight),
+                    Catch::Matchers::ContainsSubstring("expanded vertices"));
+}
+
+TEST_CASE("ProjectBundle_TypeRowsTimesObjects_ThrowOnTheRowBudget",
+          "[io][speckle][bundle]") {
+  BundleTables t;
+  for (int p = 0; p < 100; ++p) {
+    t.paths[p] = "properties.p" + std::to_string(p);
+    BundleEavRow r;
+    r.key = 7; // type 7
+    r.path = p;
+    r.value.s = "x";
+    t.type_eav.push_back(r);
+  }
+  for (int k = 0; k < 100; ++k) {
+    t.objects[k] = "o" + std::to_string(k);
+    t.object_type[k] = 7;
+  }
+  BundleProjectionOptions opt;
+  opt.max_property_rows = 9'999;
+  CHECK_THROWS_WITH(project_bundle_to_revit_tree(t, nullptr, opt),
+                    Catch::Matchers::ContainsSubstring("property rows"));
+  opt.max_property_rows = 10'000;
+  BundleProjectionStats st;
+  CHECK_NOTHROW(project_bundle_to_revit_tree(t, &st, opt));
+  CHECK(st.property_rows == 10'000);
+}
+
+TEST_CASE("ProjectBundle_DeepPathBomb_DropsThePath", "[io][speckle][bundle]") {
+  BundleTables t;
+  t.objects[0] = "o";
+  std::string deep = "properties";
+  for (int i = 0; i < 5000; ++i)
+    deep += ".a";
+  std::string long_name = "properties." + std::string(2000, 'x');
+  t.paths = {{0, deep}, {1, long_name}, {2, "category"}};
+  for (int p = 0; p < 3; ++p) {
+    BundleEavRow r;
+    r.key = 0;
+    r.path = p;
+    r.value.s = "v";
+    t.eav.push_back(r);
+  }
+  BundleProjectionStats st;
+  const json root = project_bundle_to_revit_tree(t, &st);
+  CHECK(st.paths_dropped == 2);
+  const json &o = root["elements"][0];
+  CHECK(o["category"] == "v");
+  CHECK_FALSE(o.contains("properties"));
+}
+
+TEST_CASE("ImportRevit_DeepClassicTree_IsRefusedClearly",
+          "[io][speckle][revit]") {
+  const reusex::test_support::RevitFixture f;
+  json root = f.model();
+  // 300 nested collections around the walls collection.
+  json inner = root["elements"];
+  for (int i = 0; i < 300; ++i)
+    inner = json::array(
+        {{{"speckle_type", "Speckle.Core.Models.Collections.Collection"},
+          {"elements", std::move(inner)}}});
+  root["elements"] = std::move(inner);
+  CHECK_THROWS_WITH(import_revit(root),
+                    Catch::Matchers::ContainsSubstring("nests deeper"));
+  // A deep parameter tree too.
+  json params = {{"internalDefinitionName", "X"}, {"value", 1}};
+  for (int i = 0; i < 300; ++i)
+    params = {{"g", std::move(params)}};
+  json r2 = f.model();
+  r2["levelProxies"][0]["value"]["properties"]["Parameters"] = params;
+  CHECK_THROWS_WITH(import_revit(r2),
+                    Catch::Matchers::ContainsSubstring("nests deeper"));
+}
+
+TEST_CASE("ProjectBundle_Cancel_StopsTheProjection", "[io][speckle][bundle]") {
+  std::atomic_bool cancel{true};
+  BundleProjectionOptions opt;
+  opt.cancel = &cancel;
+  CHECK_THROWS_WITH(project_bundle_to_revit_tree(fan_out(10), nullptr, opt),
+                    Catch::Matchers::ContainsSubstring("cancelled"));
+}
+
+TEST_CASE("ProjectBundle_Levels_DropRenameAndBorrowProperties",
+          "[io][speckle][bundle][revit]") {
+  const reusex::test_support::RevitFixture f;
+  BundleBuilder b;
+  b.build(f.model());
+  BundleTables &t = b.t; // b.row() below writes into b.t
+  auto level = [&](const std::string &name, double elevation) {
+    BundleNode n;
+    n.id = b.next_node++;
+    n.kind = static_cast<int>(BundleNodeKind::level);
+    n.name = name;
+    n.elevation = elevation;
+    n.units = "mm";
+    t.nodes.push_back(n);
+    return n.id;
+  };
+  level("Empty", 20000);                // no member: dropped
+  const auto dup = level("L0", 16000);  // a second "L0", higher
+  const auto ref = level("Ref", 14000); // a reference level
+  std::erase_if(t.relations, [&](const BundleRelation &r) {
+    return r.rel == static_cast<int>(BundleRel::on_level) &&
+           r.src == b.object_of_app.at("chair-1");
+  });
+  t.relations.push_back({static_cast<int>(BundleRel::on_level),
+                         b.object_of_app.at("chair-1"), dup, 0});
+  // The window moves to "Ref", which a Levels object flags as no storey.
+  std::erase_if(t.relations, [&](const BundleRelation &r) {
+    return r.rel == static_cast<int>(BundleRel::on_level) &&
+           r.src == b.object_of_app.at("win-1");
+  });
+  t.relations.push_back({static_cast<int>(BundleRel::on_level),
+                         b.object_of_app.at("win-1"), ref, 0});
+  const auto lvl_obj = static_cast<std::int32_t>(t.objects.size());
+  t.objects[lvl_obj] = "level-ref-app";
+  b.row(lvl_obj, "category", "Levels");
+  b.row(lvl_obj, "name", "Ref");
+  b.row(lvl_obj,
+        "properties.Parameters.Instance Parameters.Identity Data.Building "
+        "Story",
+        "No", "", "LEVEL_IS_BUILDING_STORY");
+  // And a duplicated applicationId.
+  t.objects[b.object_of_app.at("wall-b")] = "wall-a";
+
+  BundleProjectionStats st;
+  const json root = project_bundle_to_revit_tree(t, &st);
+  CHECK(st.levels_dropped == 1);
+  CHECK(st.levels_renamed == 1);
+  CHECK(st.levels_with_properties == 1);
+  CHECK(st.duplicate_app_ids == 1);
+  std::vector<std::string> names;
+  for (const auto &lp : root["levelProxies"])
+    names.push_back(lp["value"]["name"]);
+  CHECK(names == std::vector<std::string>{"L0", "L1", "Ref", "L0 (2)"});
+  CHECK(root["levelProxies"][2]["applicationId"] == "level-ref-app");
+  const auto r = import_revit(root);
+  CHECK(r.stats.reference_levels == 1);
+  CHECK(r.model.storeys.size() == 3); // L0, L1, L0 (2)
+}
+
+TEST_CASE("ProjectBundle_InstanceWithoutDefinition_IsSkipped",
+          "[io][speckle][bundle]") {
+  BundleTables t;
+  t.objects[0] = "o";
+  t.nodes.push_back({5, static_cast<int>(BundleNodeKind::instance), "",
+                     std::nullopt, "", "m", "", std::nullopt});
+  t.nodes.push_back({6, static_cast<int>(BundleNodeKind::instance), "", 99, "",
+                     "m", "", std::nullopt});
+  t.relations = {{static_cast<int>(BundleRel::display_instance), 0, 5, 0},
+                 {static_cast<int>(BundleRel::display_instance), 0, 6, 1}};
+  BundleProjectionStats st;
+  const json root = project_bundle_to_revit_tree(t, &st);
+  CHECK(st.instances_unresolved == 2);
+  CHECK(root["elements"][0]["displayValue"].empty());
+}
+
+// =================================================== local HTTP server ===
+
+namespace {
+
+/// One-thread HTTP/1.1 server on 127.0.0.1 with fixed routes (GET path ->
+/// status, extra headers, body); records each request's path and whether it
+/// carried an Authorization header. Connection: close on every answer.
+class RouteServer {
+    public:
+  struct Answer {
+    int status = 200;
+    std::string headers; ///< extra "Name: value\r\n" lines
+    std::string body;
+  };
+
+  RouteServer() {
+    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(fd_ >= 0);
+    int one = 1;
+    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(::bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof addr) == 0);
+    REQUIRE(::listen(fd_, 16) == 0);
+    socklen_t len = sizeof addr;
+    ::getsockname(fd_, reinterpret_cast<sockaddr *>(&addr), &len);
+    port_ = ntohs(addr.sin_port);
+  }
+  ~RouteServer() {
+    stop_ = true;
+    if (thread_.joinable())
+      thread_.join();
+    ::close(fd_);
+  }
+  void route(const std::string &path, Answer a) {
+    routes_[path] = std::move(a);
+  }
+  void start() {
+    thread_ = std::thread([this] { loop(); });
+  }
+  std::string url() const {
+    return "http://127.0.0.1:" + std::to_string(port_);
+  }
+  struct Seen {
+    std::string path;
+    bool authorization = false;
+  };
+  std::vector<Seen> seen() {
+    std::lock_guard lock(mutex_);
+    return seen_;
+  }
+
+    private:
+  void loop() {
+    while (!stop_) {
+      pollfd p{fd_, POLLIN, 0};
+      if (::poll(&p, 1, 50) <= 0)
+        continue;
+      const int c = ::accept(fd_, nullptr, nullptr);
+      if (c < 0)
+        continue;
+      serve(c);
+      ::close(c);
+    }
+  }
+  void serve(int c) {
+    std::string in;
+    char buf[4096];
+    while (in.find("\r\n\r\n") == std::string::npos) {
+      const auto n = ::recv(c, buf, sizeof buf, 0);
+      if (n <= 0)
+        return;
+      in.append(buf, static_cast<std::size_t>(n));
+    }
+    const auto sp1 = in.find(' ');
+    const auto sp2 = in.find(' ', sp1 + 1);
+    std::string path = in.substr(sp1 + 1, sp2 - sp1 - 1);
+    path = path.substr(0, path.find('?'));
+    std::string lower = in;
+    for (auto &ch : lower)
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    {
+      std::lock_guard lock(mutex_);
+      seen_.push_back(
+          {path, lower.find("\r\nauthorization:") != std::string::npos});
+    }
+    Answer a{404, "", "not found"};
+    if (auto it = routes_.find(path); it != routes_.end())
+      a = it->second;
+    std::string out = "HTTP/1.1 " + std::to_string(a.status) + " X\r\n" +
+                      a.headers +
+                      "Content-Length: " + std::to_string(a.body.size()) +
+                      "\r\nConnection: close\r\n\r\n" + a.body;
+    std::size_t off = 0;
+    while (off < out.size()) {
+      const auto n =
+          ::send(c, out.data() + off, out.size() - off, MSG_NOSIGNAL);
+      if (n <= 0)
+        return;
+      off += static_cast<std::size_t>(n);
+    }
+  }
+
+  int fd_ = -1;
+  int port_ = 0;
+  std::atomic_bool stop_{false};
+  std::thread thread_;
+  std::mutex mutex_;
+  std::map<std::string, Answer> routes_;
+  std::vector<Seen> seen_;
+};
+
+const BundleReference kRef{"proj01", "model01", "ver01"};
+const std::string kListing =
+    "/api/v2/projects/proj01/models/model01/versions/ver01/artifacts";
+
+} // namespace
+
+TEST_CASE("DownloadBundle_Redirect_IsNotFollowed", "[io][speckle][bundle]") {
+  RouteServer srv;
+  srv.route(kListing, {200, "Content-Type: application/json\r\n",
+                       json{{"files",
+                             {{{"name", "ver01.eav.eav.parquet"},
+                               {"url", srv.url() + "/store/a?sig=s3cr3t"}}}}}
+                           .dump()});
+  srv.route("/store/a", {302, "Location: " + srv.url() + "/evil\r\n", ""});
+  srv.route("/evil", {200, "", "PAR1"});
+  srv.start();
+  SpeckleReader reader(srv.url(), "tok");
+  reusex::test_support::TempDir dir("test_speckle_bundle_redirect");
+  try {
+    (void)reader.download_bundle(kRef, dir.path);
+    FAIL("expected a refused redirect");
+  } catch (const std::runtime_error &e) {
+    const std::string msg = e.what();
+    CHECK(msg.find("redirect refused") != std::string::npos);
+    CHECK(msg.find("s3cr3t") == std::string::npos); // no signature in logs
+  }
+  for (const auto &s : srv.seen())
+    CHECK(s.path != "/evil");
+}
+
+TEST_CASE("DownloadBundle_OffPolicyUrl_IsRefusedBeforeAnyDownload",
+          "[io][speckle][bundle]") {
+  RouteServer srv;
+  srv.route(kListing, {200, "",
+                       json{{"files",
+                             {{{"name", "ver01.eav.eav.parquet"},
+                               {"url", "http://10.1.2.3/x.parquet"}}}}}
+                           .dump()});
+  srv.start();
+  SpeckleReader reader(srv.url(), "tok");
+  reusex::test_support::TempDir dir("test_speckle_bundle_policy");
+  CHECK_THROWS_WITH(reader.download_bundle(kRef, dir.path),
+                    Catch::Matchers::ContainsSubstring("refused by policy"));
+  CHECK(srv.seen().size() == 1); // the listing only
+}
+
 // ========================================================= DuckDB path ===
 
 #ifdef REUSEX_HAVE_DUCKDB
@@ -731,6 +1158,104 @@ TEST_CASE("ReadBundleDirectory_Bounds_RefuseMissingAndOversizedTables",
   CHECK_THROWS_AS(read_bundle_directory(dir.path / "missing"),
                   std::runtime_error);
 }
+
+TEST_CASE("BundleSandbox_QueriesOutsideTheDirectory_AreRefused",
+          "[io][speckle][bundle][duckdb]") {
+  reusex::test_support::TempDir dir("test_speckle_bundle_sandbox");
+  const reusex::test_support::RevitFixture f;
+  write_bundle(fixture_bundle(f), dir.path, "v0");
+  const std::string inside =
+      (std::filesystem::canonical(dir.path) / "v0.eav.paths.parquet").string();
+  using detail::bundle_sandbox_query_for_tests;
+  CHECK(bundle_sandbox_query_for_tests(
+            dir.path, "SELECT count(*) FROM read_parquet('" + inside + "')")
+            .empty());
+  for (const std::string sql :
+       {"SELECT * FROM read_csv('/etc/passwd')",
+        "SELECT * FROM read_text('/etc/hostname')",
+        "SELECT * FROM read_parquet('https://example.com/x.parquet')",
+        "COPY (SELECT 1) TO '/tmp/reusex-sandbox-escape.parquet'",
+        "ATTACH '/tmp/reusex-sandbox-escape.duckdb'", "INSTALL httpfs",
+        "LOAD httpfs", "SET enable_external_access = true",
+        "SET allowed_directories = ['/']"}) {
+    INFO(sql);
+    CHECK_FALSE(bundle_sandbox_query_for_tests(dir.path, sql).empty());
+  }
+  CHECK_FALSE(std::filesystem::exists("/tmp/reusex-sandbox-escape.parquet"));
+}
+
+TEST_CASE("ReadBundleDirectory_CancelAndByteBudget_Abort",
+          "[io][speckle][bundle][duckdb]") {
+  reusex::test_support::TempDir dir("test_speckle_bundle_cancel");
+  const reusex::test_support::RevitFixture f;
+  write_bundle(fixture_bundle(f), dir.path, "v0");
+  std::atomic_bool cancel{true};
+  BundleReadOptions opt;
+  opt.cancel = &cancel;
+  CHECK_THROWS_WITH(read_bundle_directory(dir.path, opt),
+                    Catch::Matchers::ContainsSubstring("cancelled"));
+  BundleReadOptions bytes;
+  bytes.max_bytes = 64;
+  CHECK_THROWS_WITH(read_bundle_directory(dir.path, bytes),
+                    Catch::Matchers::ContainsSubstring("strings and blobs"));
+}
+
+TEST_CASE("ReadBundleDirectory_TableNames_MatchExactly",
+          "[io][speckle][bundle][duckdb]") {
+  reusex::test_support::TempDir dir("test_speckle_bundle_names");
+  const reusex::test_support::RevitFixture f;
+  const BundleTables written = fixture_bundle(f);
+  write_bundle(written, dir.path, "v0");
+  // Decoys that sort first and would break the read if picked.
+  for (const char *decoy : {"a.b.eav.objects.parquet", "a.b.eav.eav.parquet",
+                            "a.x.geometries.parquet"})
+    std::ofstream(dir.path / decoy) << "not parquet";
+  const BundleTables read = read_bundle_directory(dir.path);
+  CHECK(read.objects == written.objects);
+  CHECK(read.geometries.size() == written.geometries.size());
+}
+
+TEST_CASE("FetchBundleTree_LocalServer_DownloadsWithoutTokenAndImports",
+          "[io][speckle][bundle][duckdb]") {
+  const reusex::test_support::RevitFixture f;
+  reusex::test_support::TempDir src("test_speckle_bundle_srv");
+  write_bundle(fixture_bundle(f), src.path, "ver01");
+  RouteServer srv;
+  json files = json::array();
+  for (const auto &e : std::filesystem::directory_iterator(src.path)) {
+    const std::string name = e.path().filename().string();
+    std::ifstream in(e.path(), std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), {});
+    srv.route("/store/" + name, {200, "", bytes});
+    files.push_back(
+        {{"name", name}, {"url", srv.url() + "/store/" + name + "?X-Sig=abc"}});
+  }
+  files.push_back(
+      {{"name", "ver01.viewer.dat"}, {"url", srv.url() + "/store/viewer"}});
+  srv.route(kListing, {200, "", json{{"files", files}}.dump()});
+  srv.start();
+
+  SpeckleReader reader(srv.url(), "tok");
+  BundleFetchReport report;
+  const json root = fetch_bundle_tree(reader, "proj01",
+                                      "bundle.proj01.model01.ver01", &report);
+  CHECK(report.files == files.size() - 1);
+  check_same(import_revit(root), import_revit(f.model()));
+  std::size_t downloads = 0;
+  for (const auto &s : srv.seen()) {
+    CHECK(s.path != "/store/viewer");
+    if (s.path == kListing) {
+      CHECK(s.authorization); // the listing carries the token
+    } else {
+      CHECK_FALSE(s.authorization); // presigned GETs never do
+      ++downloads;
+    }
+  }
+  CHECK(downloads == report.files);
+  CHECK_THROWS_AS(
+      fetch_bundle_tree(reader, "other", "bundle.proj01.model01.ver01"),
+      std::invalid_argument);
+}
 #else
 TEST_CASE("ReadBundleDirectory_WithoutDuckDb_IsRefused",
           "[io][speckle][bundle]") {
@@ -806,7 +1331,17 @@ TEST_CASE("ImportSpeckleRevit_LiveBundleVersion_ImportsTheModel",
             << report.projection.instances << " instances, "
             << report.projection.definitions << " definitions, "
             << report.projection.geometries_skipped << " non-mesh, "
-            << report.projection.geometries_bad << " bad\n";
+            << report.projection.geometries_bad << " bad; "
+            << report.projection.shared_meshes << " shared meshes, "
+            << report.projection.mesh_values << " mesh values, "
+            << report.projection.expanded_vertices << " expanded vertices, "
+            << report.projection.property_rows << " property rows, "
+            << report.projection.nodes << " nodes, levels dropped "
+            << report.projection.levels_dropped << " / renamed "
+            << report.projection.levels_renamed << ", hosted "
+            << report.projection.hosted << ", nested "
+            << report.projection.nested << ", duplicate ids "
+            << report.projection.duplicate_app_ids << "\n";
   const auto mapped = import_revit(root);
   for (const auto &m : mapped.meshes) {
     std::array<double, 3> lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};

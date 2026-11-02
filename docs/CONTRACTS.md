@@ -1128,24 +1128,46 @@ is Speckle's Parquet artefact bundle. With DuckDB (`REUSEX_HAVE_DUCKDB`) the
 stage reads it (`io/speckle_bundle.hpp`): the listing `GET
 /api/v2/projects/{p}/models/{m}/versions/{v}/artifacts` (with the token),
 every non-viewer `*.parquet` file from its presigned URL **without** the
-token (https on the server's own host or an object-storage host:
-`*.digitaloceanspaces.com`, `*.amazonaws.com`, `*.r2.cloudflarestorage.com`,
-`storage.googleapis.com`, `*.blob.core.windows.net`), all files together
-under the reader's download limit, into a private temporary directory read
-by an in-memory DuckDB locked to that directory (no extension autoload or
-install, external access off). The tables are projected onto the Revit
-connector's tree (`project_bundle_to_revit_tree`: EAV paths as nested
-properties, `properties.Parameters.*` as Revit parameters, LEVEL nodes +
-`ON_LEVEL` as `levelProxies`, `HOSTED_ON` as `parentApplicationId`,
-`SUBELEMENT` as nesting, DEFINITION / INSTANCE nodes as instance proxies,
-SGEO meshes as `displayValue`) and mapped by the same `import_revit()`, so
-the stored rows and meshes follow the rules above. Differences: the
-bundle's levels carry no `LEVEL_IS_BUILDING_STORY`, so every level becomes
-a storey, and a storey's GUID derives from the level name (no level
-applicationId). The meshes' parameters carry `format: bundle`. Without
-DuckDB the stage fails with `io::speckle::BundleVersionUnsupported` right
-after the version query: nothing is downloaded and no table or mesh is
-touched (a run with a `pipeline_log` row records the failure there). Its
+token and **without following redirects** (https on the server's own host
+or an object-storage host: `*.digitaloceanspaces.com`, `*.amazonaws.com`,
+`*.r2.cloudflarestorage.com`, `storage.googleapis.com`,
+`*.blob.core.windows.net`), all files together under the reader's download
+limit, into a private temporary directory read by an in-memory DuckDB
+locked to that directory (no extension autoload or install, external
+access off). The tables are projected onto the Revit connector's tree
+(`project_bundle_to_revit_tree`: EAV paths as nested properties,
+`properties.Parameters.*` as Revit parameters, LEVEL nodes + `ON_LEVEL` as
+`levelProxies`, `HOSTED_ON` as `parentApplicationId`, `SUBELEMENT` as
+nesting, DEFINITION / INSTANCE nodes as instance proxies, SGEO meshes as
+`displayValue`, a mesh shared by several objects once behind an identity
+instance) and mapped by the same `import_revit()`, so the stored rows and
+meshes follow the rules above. The meshes' parameters carry `format:
+bundle`.
+
+Bounds (`io/speckle_bundle_options.hpp`, set by the front end through
+`StageExecutorOptions::speckle_bundle_read` / `speckle_bundle_projection`;
+defaults for a shared server): DuckDB 1 GB / 2 threads, 2 M rows per table,
+1 GiB of strings and blobs, 50 M mesh values, 50 M vertices once every
+instance placement is baked, 20 M property rows, 50 M JSON nodes; a
+property path over 32 segments or 1 KiB is dropped (counted, warn). Past a
+budget, or on a cancel (checked per DuckDB chunk and per object), the stage
+fails before anything is stored. `import_revit` refuses a tree nesting
+deeper than 256 levels (both formats).
+
+Levels. A level no object is `ON_LEVEL` of is dropped; levels sharing a
+name are renamed `<name> (2)`, ... in (elevation, node id) order; a
+`Levels` object of the same name, when the bundle carries one, lends its
+applicationId and properties (`LEVEL_IS_BUILDING_STORY`, elementId, IFC
+GUID). Without one -- the bundles seen so far -- every level becomes a
+storey and its GUID derives from the level name, while the classic path
+derives it from the level's applicationId: the same Revit model imported
+both ways gets different storey GUIDs (walls, openings and spaces agree;
+reusex-aqho). Duplicate object applicationIds get `#2`, `#3` in object
+order; a placement without a definition is skipped (counted).
+
+Without DuckDB the stage fails with `io::speckle::BundleVersionUnsupported`
+right after the version query: nothing is downloaded and no table or mesh
+is touched (a run with a `pipeline_log` row records the failure there). Its
 message starts with `kBundleUnsupportedMessage` ("Denne Speckle-version er
 gemt i Speckles nye bundle-format, som ReUseX endnu ikke kan læse.") and
 ends with the tag `[speckle-bundle-unsupported]`, which a front end may

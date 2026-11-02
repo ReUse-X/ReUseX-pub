@@ -286,41 +286,21 @@ void set_path(json &root, std::string_view path, json leaf) {
   }
 }
 
-void apply_row(json &obj, const std::string &path, const BundleValue &v) {
-  if (path.empty())
-    return;
-  if (path.rfind(kParametersPrefix, 0) == 0 &&
-      path.size() > kParametersPrefix.size()) {
-    // A Revit parameter in the connector's shape.
-    json p = {{"name", path.substr(path.rfind('.') + 1)},
-              {"value", value_json(v)}};
-    if (!v.unit.empty())
-      p["units"] = v.unit;
-    if (!v.internal_definition_name.empty())
-      p["internalDefinitionName"] = v.internal_definition_name;
-    set_path(obj, path, std::move(p));
-    return;
-  }
-  set_path(obj, path, value_json(v));
-}
-
 /// "a,b,...": 16 row-major values (model.py parse_transform), or nullopt.
+/// std::from_chars: locale-independent.
 std::optional<std::array<double, 16>> parse_transform(std::string_view csv) {
   std::array<double, 16> m{};
   std::size_t i = 0;
   while (true) {
     const auto comma = csv.find(',');
-    std::string part(csv.substr(0, comma));
-    if (i >= 16)
+    const std::string_view part = csv.substr(0, comma);
+    if (i >= 16 || part.empty())
       return std::nullopt;
-    try {
-      std::size_t used = 0;
-      m[i] = std::stod(part, &used);
-      if (used != part.size())
-        return std::nullopt;
-    } catch (const std::exception &) {
+    const auto res =
+        std::from_chars(part.data(), part.data() + part.size(), m[i]);
+    if (res.ec != std::errc() || res.ptr != part.data() + part.size() ||
+        !std::isfinite(m[i]))
       return std::nullopt;
-    }
     ++i;
     if (comma == std::string_view::npos)
       break;
@@ -328,14 +308,12 @@ std::optional<std::array<double, 16>> parse_transform(std::string_view csv) {
   }
   if (i != 16)
     return std::nullopt;
-  for (const double x : m)
-    if (!std::isfinite(x))
-      return std::nullopt;
   return m;
 }
 
 constexpr std::array<double, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0,
                                               0, 0, 1, 0, 0, 0, 0, 1};
+constexpr int kMaxInstanceDepth = 8; ///< as import_revit
 
 json mesh_json(const SgeoMesh &m, const std::string &app_id) {
   json j = {{"speckle_type", "Objects.Geometry.Mesh"},
@@ -362,9 +340,19 @@ void sort_edges(EdgeMap &m) {
     });
 }
 
+/// Lower-case ASCII.
+std::string lower_ascii(std::string s) {
+  for (auto &c : s)
+    if (c >= 'A' && c <= 'Z')
+      c = static_cast<char>(c - 'A' + 'a');
+  return s;
+}
+
 class Projector {
     public:
-  Projector(const BundleTables &t, BundleProjectionStats &st) : t_(t), st_(st) {
+  Projector(const BundleTables &t, BundleProjectionStats &st,
+            const BundleProjectionOptions &opt)
+      : t_(t), st_(st), opt_(opt) {
     for (const auto &g : t_.geometries)
       geometry_.emplace(g.index, &g);
     for (const auto &n : t_.nodes)
@@ -373,6 +361,7 @@ class Projector {
       switch (static_cast<BundleRel>(r.rel)) {
       case BundleRel::display:
         display_[r.src].push_back({r.dst, r.ord});
+        ++display_uses_[r.dst];
         break;
       case BundleRel::subelement:
         children_[r.src].push_back({r.dst, r.ord});
@@ -398,6 +387,7 @@ class Projector {
     }
     for (auto *m : {&display_, &children_, &defines_, &placements_, &nested_})
       sort_edges(*m);
+    assign_app_ids();
   }
 
   json run() {
@@ -405,29 +395,48 @@ class Projector {
                  {"name", "Speckle bundle"},
                  {"applicationId", "bundle-root"},
                  {"version", "3"}};
+    json def_geometry = json::array();
+    json defs = json::array();
 
-    // Objects (unnested first).
+    // ---- objects: properties (type rows first, the instance's over them)
     std::map<std::int32_t, json> objs;
-    std::map<std::string, std::size_t> unit_votes;
     for (const auto &[k, app] : t_.objects)
       objs.emplace(k, json::object());
     {
-      // Type properties first, the instance's over them.
       std::unordered_map<std::int32_t, std::vector<const BundleEavRow *>>
           by_type;
       for (const auto &r : t_.type_eav)
         by_type[r.key].push_back(&r);
-      for (auto &[k, o] : objs)
+      std::unordered_map<std::int32_t, std::vector<const BundleEavRow *>>
+          by_object;
+      for (const auto &r : t_.eav)
+        if (objs.count(r.key))
+          by_object[r.key].push_back(&r);
+      for (auto &[k, o] : objs) {
+        throw_if_cancelled();
         if (auto ty = t_.object_type.find(k); ty != t_.object_type.end())
           if (auto rows = by_type.find(ty->second); rows != by_type.end())
             for (const auto *r : rows->second)
               apply_row(o, path(r->path), r->value);
-      for (const auto &r : t_.eav)
-        if (auto o = objs.find(r.key); o != objs.end())
-          apply_row(o->second, path(r.path), r.value);
+        if (auto rows = by_object.find(k); rows != by_object.end())
+          for (const auto *r : rows->second)
+            apply_row(o, path(r->path), r->value);
+      }
     }
+    if (st_.paths_dropped > 0)
+      core::warn("Speckle bundle: {} property rows dropped: path deeper than "
+                 "{} segments or longer than {} bytes",
+                 st_.paths_dropped, opt_.max_path_segments,
+                 opt_.max_path_bytes);
+
+    // ---- levels (before the objects' `level`, which names them)
+    std::map<std::int32_t, std::string> level_name; // node -> final name
+    json levels = make_levels(objs, level_name);
+
+    std::map<std::string, std::size_t> unit_votes;
     for (auto &[k, o] : objs) {
-      const std::string &app = app_id(k);
+      throw_if_cancelled();
+      const std::string &app = app_ids_.at(k);
       o["applicationId"] = app;
       o["id"] = app;
       if (!o.contains("speckle_type") || !o["speckle_type"].is_string())
@@ -435,30 +444,42 @@ class Projector {
       if (auto u = o.find("units"); u != o.end() && u->is_string())
         ++unit_votes[u->get<std::string>()];
       if (auto l = level_of_.find(k); l != level_of_.end())
-        if (auto n = nodes_.find(l->second);
-            n != nodes_.end() &&
-            n->second->kind == static_cast<int>(BundleNodeKind::level))
-          o["level"] = n->second->name;
+        if (auto n = level_name.find(l->second); n != level_name.end())
+          o["level"] = n->second;
       if (auto h = host_of_.find(k); h != host_of_.end()) {
         json &props = o["properties"];
         if (!props.is_object())
           props = json::object();
         if (!props.contains("parentApplicationId") &&
             t_.objects.count(h->second)) {
-          props["parentApplicationId"] = app_id(h->second);
+          props["parentApplicationId"] = app_ids_.at(h->second);
           ++st_.hosted;
         }
       }
       json dv = json::array();
       if (auto d = display_.find(k); d != display_.end())
-        for (const auto &e : d->second)
-          if (auto m = mesh_of(e.dst))
+        for (const auto &e : d->second) {
+          const SgeoMesh *m = mesh_of(e.dst);
+          if (!m)
+            continue;
+          if (display_uses_[e.dst] > 1) {
+            // Shared: one copy behind a definition, placed by identity.
+            dv.push_back(shared_mesh_proxy(e.dst, *m, def_geometry, defs));
+            add_expanded(m->vertices.size() / 3);
+          } else {
+            add_mesh_values(*m);
+            add_expanded(m->vertices.size() / 3);
             dv.push_back(mesh_json(*m, {}));
+          }
+        }
       if (auto p = placements_.find(k); p != placements_.end())
         for (const auto &e : p->second)
-          if (auto proxy = instance_proxy(e.dst, {}); !proxy.is_null())
+          if (auto proxy = instance_proxy(e.dst, {}); !proxy.is_null()) {
+            add_expanded(placement_vertices(e.dst, 0));
             dv.push_back(std::move(proxy));
+          }
       o["displayValue"] = std::move(dv);
+      add_nodes(4);
       ++st_.speckle_types[o["speckle_type"].get<std::string>()];
     }
     std::string units = "m";
@@ -471,8 +492,11 @@ class Projector {
     else
       core::warn("Speckle bundle: no object has units; assuming metres");
     root["units"] = units;
+    for (auto &lp : levels)
+      if (lp["value"]["units"].get<std::string>().empty())
+        lp["value"]["units"] = units;
 
-    // Nesting: SUBELEMENT children go into their parent's elements.
+    // ---- nesting: SUBELEMENT children go into their parent's elements
     std::unordered_set<std::int32_t> is_child;
     for (const auto &[parent, kids] : children_)
       if (objs.count(parent))
@@ -481,68 +505,65 @@ class Projector {
             is_child.insert(e.dst);
     json elements = json::array();
     std::unordered_set<std::int32_t> placed;
-    std::function<json(std::int32_t, std::size_t)> take =
-        [&](std::int32_t k, std::size_t depth) {
-          placed.insert(k);
-          json o = std::move(objs.at(k));
-          if (auto c = children_.find(k);
-              c != children_.end() && depth < kMaxNesting) {
-            json kids = json::array();
-            for (const auto &e : c->second)
-              if (objs.count(e.dst) && !placed.count(e.dst)) {
-                kids.push_back(take(e.dst, depth + 1));
-                ++st_.nested;
-              }
-            if (!kids.empty())
-              o["elements"] = std::move(kids);
-          }
-          return o;
-        };
+    // Iterative depth-first placement (no recursion on server input).
+    auto take = [&](std::int32_t top) {
+      struct Frame {
+        std::int32_t k;
+        std::size_t depth;
+        json *into; ///< the parent's elements array
+      };
+      std::vector<Frame> stack{{top, 0, &elements}};
+      while (!stack.empty()) {
+        const Frame f = stack.back();
+        stack.pop_back();
+        if (placed.count(f.k))
+          continue;
+        placed.insert(f.k);
+        f.into->push_back(std::move(objs.at(f.k)));
+        json &me = f.into->back();
+        auto c = children_.find(f.k);
+        if (c == children_.end() || f.depth >= kMaxNesting)
+          continue;
+        std::vector<std::int32_t> kids;
+        for (const auto &e : c->second)
+          if (objs.count(e.dst) && !placed.count(e.dst))
+            kids.push_back(e.dst);
+        if (kids.empty())
+          continue;
+        me["elements"] = json::array();
+        // json arrays reallocate: nest through a stable pointer to the
+        // member, pushed in reverse so the first child is placed first.
+        json *into = &me["elements"];
+        for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
+          stack.push_back({*it, f.depth + 1, into});
+          ++st_.nested;
+        }
+      }
+    };
     for (const auto &[k, o] : objs)
       if (!is_child.count(k) && !placed.count(k))
-        elements.push_back(take(k, 0));
+        take(k);
     for (const auto &[k, o] : objs) // a SUBELEMENT cycle: no root of its own
       if (!placed.count(k))
-        elements.push_back(take(k, 0));
+        take(k);
     st_.objects = objs.size();
     root["elements"] = std::move(elements);
-
-    // Levels.
-    std::map<std::int32_t, json> level_objects;
-    for (const auto &[obj, lvl] : level_of_)
-      if (t_.objects.count(obj))
-        level_objects[lvl].push_back(app_id(obj));
-    json levels = json::array();
-    for (const auto &n : sorted_nodes(BundleNodeKind::level)) {
-      json value = {{"speckle_type", "Objects.Data.DataObject"},
-                    {"name", n->name},
-                    {"units", n->units.empty() ? units : n->units},
-                    {"properties", json::object()}};
-      if (n->elevation)
-        value["elevation"] = *n->elevation;
-      json objects =
-          level_objects.count(n->id) ? level_objects[n->id] : json::array();
-      levels.push_back({{"speckle_type", "Objects.Other.LevelProxy"},
-                        {"applicationId", ""},
-                        {"objects", std::move(objects)},
-                        {"value", std::move(value)}});
-    }
     st_.levels = levels.size();
     root["levelProxies"] = std::move(levels);
 
-    // Instance definitions and their geometry.
-    json defs = json::array();
-    json def_geometry = json::array();
+    // ---- instance definitions and their geometry
     std::set<std::int32_t> geometry_emitted, nested_emitted;
     for (const auto &n : sorted_nodes(BundleNodeKind::definition)) {
+      throw_if_cancelled();
       json members = json::array();
       if (auto d = defines_.find(n->id); d != defines_.end())
         for (const auto &e : d->second) {
           const std::string gid = fmt::format("geo-{}", e.dst);
           if (!geometry_emitted.count(e.dst)) {
-            auto m = mesh_of(e.dst);
+            const SgeoMesh *m = mesh_of(e.dst);
             if (!m)
               continue;
+            add_mesh_values(*m);
             def_geometry.push_back(mesh_json(*m, gid));
             geometry_emitted.insert(e.dst);
           }
@@ -560,6 +581,7 @@ class Projector {
           }
           members.push_back(iid);
         }
+      add_nodes(4 + members.size());
       defs.push_back({{"speckle_type",
                        "Speckle.Core.Models.Instances.InstanceDefinitionProxy"},
                       {"applicationId", fmt::format("def-{}", n->id)},
@@ -578,27 +600,187 @@ class Projector {
       core::warn("Speckle bundle: {} geometry references point at no "
                  "geometry row; left out",
                  st_.geometries_missing);
+    if (st_.instances_unresolved > 0)
+      core::warn("Speckle bundle: {} instance placements have no definition; "
+                 "left out",
+                 st_.instances_unresolved);
+    if (st_.duplicate_app_ids > 0)
+      core::warn("Speckle bundle: {} duplicate applicationIds suffixed "
+                 "(#2, #3, ...)",
+                 st_.duplicate_app_ids);
     core::info("Speckle bundle: projected {} objects ({} nested, {} hosted), "
-               "{} levels, {} definitions, {} instance proxies, {} meshes "
-               "({} non-mesh geometries skipped)",
-               st_.objects, st_.nested, st_.hosted, st_.levels, st_.definitions,
-               st_.instances, st_.meshes, st_.geometries_skipped);
+               "{} levels ({} dropped, {} renamed, {} with properties), {} "
+               "definitions, {} instance proxies, {} meshes ({} shared, {} "
+               "non-mesh geometries skipped), {} mesh values, {} expanded "
+               "vertices",
+               st_.objects, st_.nested, st_.hosted, st_.levels,
+               st_.levels_dropped, st_.levels_renamed,
+               st_.levels_with_properties, st_.definitions, st_.instances,
+               st_.meshes, st_.shared_meshes, st_.geometries_skipped,
+               st_.mesh_values, st_.expanded_vertices);
     return root;
   }
 
     private:
+  // ---------------------------------------------------------- budgets ---
+  void throw_if_cancelled() const {
+    if (opt_.cancel && opt_.cancel->load(std::memory_order_acquire))
+      throw std::runtime_error("Speckle bundle projection: cancelled");
+  }
+  [[noreturn]] static void over(const char *what, std::size_t limit) {
+    throw std::runtime_error(fmt::format(
+        "Speckle bundle: the model exceeds the projection budget for {} ({}; "
+        "BundleProjectionOptions)",
+        what, limit));
+  }
+  void add_nodes(std::size_t n) {
+    st_.nodes += n;
+    if (st_.nodes > opt_.max_nodes)
+      over("JSON nodes", opt_.max_nodes);
+  }
+  void add_mesh_values(const SgeoMesh &m) {
+    st_.mesh_values += m.vertices.size() + m.faces.size();
+    if (st_.mesh_values > opt_.max_mesh_values)
+      over("mesh values", opt_.max_mesh_values);
+  }
+  void add_expanded(std::size_t vertices) {
+    st_.expanded_vertices += vertices;
+    if (st_.expanded_vertices > opt_.max_expanded_vertices)
+      over("expanded vertices", opt_.max_expanded_vertices);
+  }
+
+  // ------------------------------------------------------- properties ---
   const std::string &path(std::int32_t idx) const {
     static const std::string empty;
     auto it = t_.paths.find(idx);
     return it == t_.paths.end() ? empty : it->second;
   }
-  std::string app_id(std::int32_t k) const {
-    auto it = t_.objects.find(k);
-    if (it == t_.objects.end() || it->second.empty())
-      return fmt::format("bundle-object-{}", k);
-    return it->second;
+
+  void apply_row(json &obj, const std::string &p, const BundleValue &v) {
+    if (p.empty())
+      return;
+    if (++st_.property_rows > opt_.max_property_rows)
+      over("property rows", opt_.max_property_rows);
+    if (p.size() > opt_.max_path_bytes ||
+        static_cast<std::size_t>(std::count(p.begin(), p.end(), '.')) + 1 >
+            opt_.max_path_segments) {
+      ++st_.paths_dropped;
+      return;
+    }
+    if (p.rfind(kParametersPrefix, 0) == 0 &&
+        p.size() > kParametersPrefix.size()) {
+      // A Revit parameter in the connector's shape.
+      json par = {{"name", p.substr(p.rfind('.') + 1)},
+                  {"value", value_json(v)}};
+      if (!v.unit.empty())
+        par["units"] = v.unit;
+      if (!v.internal_definition_name.empty())
+        par["internalDefinitionName"] = v.internal_definition_name;
+      add_nodes(5);
+      set_path(obj, p, std::move(par));
+      return;
+    }
+    add_nodes(1);
+    set_path(obj, p, value_json(v));
   }
 
+  /// applicationIds, unique: a repeat gets "#2", "#3" in object order.
+  void assign_app_ids() {
+    std::unordered_map<std::string, std::size_t> seen;
+    for (const auto &[k, app] : t_.objects) {
+      std::string id = app.empty() ? fmt::format("bundle-object-{}", k) : app;
+      const std::size_t n = ++seen[id];
+      if (n > 1) {
+        id = fmt::format("{}#{}", id, n);
+        ++st_.duplicate_app_ids;
+      }
+      app_ids_.emplace(k, std::move(id));
+    }
+  }
+
+  // ----------------------------------------------------------- levels ---
+  /// levelProxies: LEVEL nodes some object is ON_LEVEL of, in (elevation,
+  /// id) order; repeated names get " (2)", ...; a `Levels` object of the
+  /// same name lends its applicationId and properties.
+  json make_levels(const std::map<std::int32_t, json> &objs,
+                   std::map<std::int32_t, std::string> &final_name) {
+    std::map<std::int32_t, std::vector<std::int32_t>> members;
+    for (const auto &[obj, lvl] : level_of_)
+      if (t_.objects.count(obj))
+        members[lvl].push_back(obj);
+    // Revit Level elements the bundle may carry as objects, by name.
+    std::map<std::string, std::int32_t> level_objects;
+    for (const auto &[k, o] : objs) {
+      const std::string cat = o.value("category", std::string{});
+      const std::string type = o.value("speckle_type", std::string{});
+      if ((cat == "Levels" ||
+           lower_ascii(type).find("level") != std::string::npos) &&
+          o.contains("name") && o["name"].is_string())
+        level_objects.emplace(o["name"].get<std::string>(), k); // first wins
+    }
+    std::vector<const BundleNode *> nodes;
+    for (const auto *n : sorted_nodes(BundleNodeKind::level)) {
+      if (!members.count(n->id)) {
+        ++st_.levels_dropped;
+        continue;
+      }
+      nodes.push_back(n);
+    }
+    std::stable_sort(nodes.begin(), nodes.end(),
+                     [](const BundleNode *a, const BundleNode *b) {
+                       const double ea = a->elevation.value_or(0.0);
+                       const double eb = b->elevation.value_or(0.0);
+                       return ea < eb || (ea == eb && a->id < b->id);
+                     });
+    if (st_.levels_dropped > 0)
+      core::info("Speckle bundle: {} levels no object is on; left out",
+                 st_.levels_dropped);
+    std::map<std::string, std::size_t> name_count;
+    json levels = json::array();
+    for (const auto *n : nodes) {
+      std::string name = n->name;
+      const std::size_t seen = ++name_count[name];
+      if (seen > 1) {
+        name = fmt::format("{} ({})", n->name, seen);
+        ++st_.levels_renamed;
+      }
+      final_name[n->id] = name;
+      json value = {{"speckle_type", "Objects.Data.DataObject"},
+                    {"name", name},
+                    {"units", n->units},
+                    {"properties", json::object()}};
+      std::string app;
+      if (auto lo = level_objects.find(n->name);
+          lo != level_objects.end() && seen == 1) {
+        const json &o = objs.at(lo->second);
+        if (o.contains("properties"))
+          value["properties"] = o["properties"];
+        app = app_ids_.at(lo->second);
+        if (!n->elevation && o.contains("elevation"))
+          value["elevation"] = o["elevation"];
+        if (n->units.empty() && o.contains("units"))
+          value["units"] = o["units"];
+        ++st_.levels_with_properties;
+      }
+      if (n->elevation)
+        value["elevation"] = *n->elevation;
+      json objects = json::array();
+      for (const auto k : members.at(n->id))
+        objects.push_back(app_ids_.at(k));
+      add_nodes(6 + objects.size());
+      levels.push_back({{"speckle_type", "Objects.Other.LevelProxy"},
+                        {"applicationId", app},
+                        {"objects", std::move(objects)},
+                        {"value", std::move(value)}});
+    }
+    if (st_.levels_renamed > 0)
+      core::warn("Speckle bundle: {} levels share a name with another; "
+                 "renamed \"<name> (2)\", ... in elevation order",
+                 st_.levels_renamed);
+    return levels;
+  }
+
+  // --------------------------------------------------------- geometry ---
   std::vector<const BundleNode *> sorted_nodes(BundleNodeKind kind) const {
     std::vector<const BundleNode *> out;
     for (const auto &n : t_.nodes)
@@ -609,7 +791,7 @@ class Projector {
     return out;
   }
 
-  /// The decoded mesh of geometry @p g (cached), or nullopt for a non-mesh
+  /// The decoded mesh of geometry @p g (cached), or nullptr for a non-mesh
   /// primitive, a missing row or a bad blob (counted once each).
   const SgeoMesh *mesh_of(std::int32_t g) {
     if (auto c = meshes_.find(g); c != meshes_.end())
@@ -636,30 +818,100 @@ class Projector {
     }
   }
 
+  /// A DISPLAY mesh shared by several objects: emitted once, in
+  /// definitionGeometry behind the definition `shared-<g>`; each use is an
+  /// identity InstanceProxy.
+  json shared_mesh_proxy(std::int32_t g, const SgeoMesh &m, json &def_geometry,
+                         json &defs) {
+    const std::string def = fmt::format("shared-{}", g);
+    if (shared_emitted_.insert(g).second) {
+      const std::string gid = fmt::format("shared-geo-{}", g);
+      add_mesh_values(m);
+      def_geometry.push_back(mesh_json(m, gid));
+      defs.push_back({{"speckle_type",
+                       "Speckle.Core.Models.Instances.InstanceDefinitionProxy"},
+                      {"applicationId", def},
+                      {"name", def},
+                      {"objects", json::array({gid})}});
+      ++st_.shared_meshes;
+    }
+    add_nodes(5);
+    json j = {{"speckle_type", "Speckle.Core.Models.Instances.InstanceProxy"},
+              {"definitionId", def},
+              {"transform", kIdentity},
+              {"maxDepth", 0}};
+    if (!m.units.empty())
+      j["units"] = m.units;
+    return j;
+  }
+
+  /// The InstanceProxy of instance node @p instance, or null when it is no
+  /// instance or names no definition (counted).
   json instance_proxy(std::int32_t instance, const std::string &app) {
     auto n = nodes_.find(instance);
     if (n == nodes_.end() ||
         n->second->kind != static_cast<int>(BundleNodeKind::instance))
       return nullptr;
+    const auto def = n->second->def_ref;
+    auto d = def ? nodes_.find(*def) : nodes_.end();
+    if (d == nodes_.end() ||
+        d->second->kind != static_cast<int>(BundleNodeKind::definition)) {
+      ++st_.instances_unresolved;
+      return nullptr;
+    }
     const auto m = parse_transform(n->second->transform);
     json j = {{"speckle_type", "Speckle.Core.Models.Instances.InstanceProxy"},
-              {"definitionId",
-               fmt::format("def-{}", n->second->def_ref.value_or(-1))},
+              {"definitionId", fmt::format("def-{}", *def)},
               {"transform", m ? *m : kIdentity},
               {"maxDepth", 0}};
     if (!n->second->units.empty())
       j["units"] = n->second->units;
     if (!app.empty())
       j["applicationId"] = app;
+    add_nodes(6);
     ++st_.instances;
     return j;
   }
 
+  /// Vertices one placement of instance @p instance bakes into (its
+  /// definition's meshes plus nested placements, to import_revit's depth).
+  std::size_t placement_vertices(std::int32_t instance, int depth) {
+    auto n = nodes_.find(instance);
+    if (n == nodes_.end() || !n->second->def_ref)
+      return 0;
+    return definition_vertices(*n->second->def_ref, depth);
+  }
+  std::size_t definition_vertices(std::int32_t def, int depth) {
+    if (depth > kMaxInstanceDepth)
+      return 0;
+    if (auto c = def_vertices_.find(def); c != def_vertices_.end())
+      return c->second;
+    def_vertices_[def] = 0; // a cycle counts as empty
+    std::size_t total = 0;
+    if (auto d = defines_.find(def); d != defines_.end())
+      for (const auto &e : d->second)
+        if (const SgeoMesh *m = mesh_of(e.dst))
+          total += m->vertices.size() / 3;
+    if (auto d = nested_.find(def); d != nested_.end())
+      for (const auto &e : d->second) {
+        total += placement_vertices(e.dst, depth + 1);
+        if (total > opt_.max_expanded_vertices)
+          break; // saturate; the caller's budget check throws
+      }
+    def_vertices_[def] = total;
+    return total;
+  }
+
   const BundleTables &t_;
   BundleProjectionStats &st_;
+  const BundleProjectionOptions &opt_;
   std::unordered_map<std::int32_t, const BundleGeometry *> geometry_;
   std::unordered_map<std::int32_t, const BundleNode *> nodes_;
   std::unordered_map<std::int32_t, std::optional<SgeoMesh>> meshes_;
+  std::unordered_map<std::int32_t, std::size_t> display_uses_;
+  std::unordered_map<std::int32_t, std::size_t> def_vertices_;
+  std::unordered_map<std::int32_t, std::string> app_ids_;
+  std::set<std::int32_t> shared_emitted_;
   EdgeMap display_, children_, defines_, placements_, nested_;
   std::unordered_map<std::int32_t, std::int32_t> level_of_, host_of_;
 };
@@ -667,11 +919,12 @@ class Projector {
 } // anonymous namespace
 
 json project_bundle_to_revit_tree(const BundleTables &tables,
-                                  BundleProjectionStats *stats) {
+                                  BundleProjectionStats *stats,
+                                  const BundleProjectionOptions &options) {
   BundleProjectionStats local;
   BundleProjectionStats &st = stats ? *stats : local;
   st = {};
-  return Projector(tables, st).run();
+  return Projector(tables, st, options).run();
 }
 
 // =============================================================== fetch ===
@@ -715,8 +968,9 @@ class TempDir {
 } // anonymous namespace
 
 json fetch_bundle_tree(const SpeckleReader &reader, const std::string &project,
-                       const std::string &reference,
-                       BundleFetchReport *report) {
+                       const std::string &reference, BundleFetchReport *report,
+                       const BundleReadOptions &read_options,
+                       const BundleProjectionOptions &projection_options) {
   const auto ref = parse_bundle_reference(reference);
   if (!ref)
     throw std::invalid_argument("Speckle: malformed bundle reference (expected "
@@ -731,12 +985,13 @@ json fetch_bundle_tree(const SpeckleReader &reader, const std::string &project,
   const TempDir dir;
   std::vector<std::filesystem::path> files;
   const std::size_t bytes = reader.download_bundle(*ref, dir.path(), &files);
-  BundleTables tables = read_bundle_directory(dir.path());
+  BundleTables tables = read_bundle_directory(dir.path(), read_options);
   BundleFetchReport local;
   BundleFetchReport &r = report ? *report : local;
   r.files = files.size();
   r.bytes = bytes;
-  json root = project_bundle_to_revit_tree(tables, &r.projection);
+  json root =
+      project_bundle_to_revit_tree(tables, &r.projection, projection_options);
   core::info("Speckle bundle: version {} received in {:.1f} s", ref->version,
              sw.elapsed());
   return root;

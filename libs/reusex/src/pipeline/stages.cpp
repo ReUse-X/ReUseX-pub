@@ -1997,6 +1997,8 @@ StageResult run_import_speckle(ProjectDB &db, const StageContext &ctx,
   imp.timeout_s = options.speckle_timeout_s;
   imp.connect_filter = options.speckle_connect_filter;
   imp.curl_setup = options.speckle_curl_setup;
+  imp.bundle_read = options.speckle_bundle_read;
+  imp.bundle_projection = options.speckle_bundle_projection;
 
   const auto skipped = [](const io::speckle::RevitImportStats &s) {
     info("import_speckle: {} levels ({} reference levels, no storey); "
