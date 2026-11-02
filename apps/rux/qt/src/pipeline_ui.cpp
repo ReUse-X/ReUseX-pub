@@ -48,6 +48,8 @@ QString stage_name_da(pl::JobStage stage) {
     return "Importér Revit (Speckle)";
   case pl::JobStage::import_ifc:
     return "Importér IFC";
+  case pl::JobStage::import_rtabmap:
+    return "Importér RTAB-Map-session";
   }
   return {};
 }
@@ -93,6 +95,9 @@ QString stage_blurb_da(pl::JobStage stage) {
   case pl::JobStage::import_ifc:
     return "Læs en IFC-fil: etager, vægge, åbninger, rum og et mesh pr. "
            "IFC-klasse.";
+  case pl::JobStage::import_rtabmap:
+    return "Tilføj en RTAB-Map-session som en frakoblet session: billeder, "
+           "poser og odometri fra de importerede poser.";
   }
   return {};
 }
@@ -415,6 +420,7 @@ reusex::core::PipelineStage contract_stage(pl::JobStage stage) {
     return P::solids;
   case pl::JobStage::import_speckle:
   case pl::JobStage::import_ifc:
+  case pl::JobStage::import_rtabmap:
     return P::import; // an external source: no in-project prerequisite
   }
   return P::clouds;

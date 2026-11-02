@@ -717,6 +717,8 @@ const std::vector<ParameterDescriptor> &stage_parameters(JobStage stage) {
     return speckle_stage_parameters();
   case JobStage::import_ifc:
     return ifc_stage_parameters();
+  case JobStage::import_rtabmap:
+    return rtabmap_stage_parameters();
   }
   throw std::logic_error("unhandled JobStage in stage_parameters()");
 }
