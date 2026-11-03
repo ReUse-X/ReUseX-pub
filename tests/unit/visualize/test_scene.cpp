@@ -25,6 +25,7 @@
 
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkCellArray.h>
 #include <vtkCellData.h>
 #include <vtkMapper.h>
 #include <vtkNew.h>
@@ -489,6 +490,58 @@ TEST_CASE("PopulateScene_PlanOverlay_DrawsWallsSpacesAndOpenings",
       wall_colour = true;
   }
   CHECK(wall_colour);
+}
+
+TEST_CASE("PopulateScene_PlanOverlay_ConcaveSpace_IsFilledByEarCutTriangles",
+          "[visualize][scene][plan]") {
+  // An L-shaped space (a room with a closet carved out of one corner). A
+  // polygon cell is drawn as a fan from its first vertex, so a concave ring
+  // filled as one cell paints a wedge outside the room (house1's reference
+  // plan, PR #116 review). The fill must be triangles that stay inside it.
+  TempPath tmp("test_scene_plan_concave");
+  ProjectDB db(tmp.path);
+  seed_cloud(db, 10);
+  core::SolidModel plan = overlay_plan();
+  plan.walls.clear();
+  plan.openings.clear();
+  // 4 x 3 m with the 1 x 1 m north-east corner cut out: 11 m2; first vertex
+  // at the re-entrant corner so a fan would sweep across the cut-out.
+  plan.spaces[0].polygon.outer = {{3.0, 3.0}, {0.0, 3.0}, {0.0, 0.0},
+                                  {4.0, 0.0}, {4.0, 2.0}, {3.0, 2.0}};
+  vtkNew<vtkRenderer> renderer;
+  viz::SceneOptions o;
+  o.layers = {viz::Layer::cloud};
+  o.plan = plan;
+  const viz::SceneInfo info = viz::populate_scene(renderer, db, o);
+  REQUIRE(info.plan.spaces == 1);
+
+  double area = 0.0;
+  std::size_t cells = 0;
+  for (vtkActor *a : info.plan.actors) {
+    auto *poly = vtkPolyData::SafeDownCast(a->GetMapper()->GetInput());
+    REQUIRE(poly != nullptr);
+    vtkCellArray *polys = poly->GetPolys();
+    if (polys == nullptr)
+      continue;
+    polys->InitTraversal();
+    vtkIdType n = 0;
+    const vtkIdType *ids = nullptr;
+    while (polys->GetNextCell(n, ids) != 0) {
+      ++cells;
+      REQUIRE(n == 3);
+      double p[3][3];
+      for (int k = 0; k < 3; ++k)
+        poly->GetPoint(ids[k], p[k]);
+      area += 0.5 * std::abs((p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) -
+                             (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]));
+      const double cx = (p[0][0] + p[1][0] + p[2][0]) / 3.0;
+      const double cy = (p[0][1] + p[1][1] + p[2][1]) / 3.0;
+      INFO("triangle centroid " << cx << ", " << cy);
+      CHECK_FALSE((cx > 3.0 && cy > 2.0)); // never in the cut-out corner
+    }
+  }
+  CHECK(cells >= 4);
+  CHECK(area == Catch::Approx(11.0));
 }
 
 TEST_CASE("PopulateScene_PlanOverlay_AppliesTheInverseLevelTransform",
