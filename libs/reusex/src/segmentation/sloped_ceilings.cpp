@@ -9,6 +9,10 @@
 #include "reusex/geometry/level_frame.hpp"
 #include "reusex/segmentation/spaces.hpp"
 
+#include <CGAL/Boolean_set_operations_2.h>
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Polygon_2.h>
+#include <CGAL/Polygon_with_holes_2.h>
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <fmt/format.h>
@@ -136,6 +140,9 @@ constexpr double kEaveWallReach = 0.5;
 constexpr double kEaveMaxKnee = 1.2;
 /// ... merging stretches of one line this far apart [m].
 constexpr double kEaveMergeGap = 2.0;
+/// A dormer bay no space holds is grown this far past its inner line into
+/// the space it opens into (reusex-f2lv) [m].
+constexpr double kBayReach = 0.3;
 constexpr double kCutMin = 0.1;    ///< a plane cuts a cell this far down [m]
 constexpr int kMinCutCells = 10;   ///< ... in at least this many cells
 constexpr double kAgree = 0.15;    ///< an observation this close agrees [m]
@@ -269,6 +276,83 @@ ring_area_centroid(const std::vector<core::PlanPoint> &r) {
   }
   return {std::abs(0.5 * a2),
           Eigen::Vector2d(cx / (3.0 * a2), cy / (3.0 * a2))};
+}
+
+} // namespace
+
+namespace {
+
+using EK = CGAL::Exact_predicates_exact_constructions_kernel;
+using EPolygon = CGAL::Polygon_2<EK>;
+using EPolygonWH = CGAL::Polygon_with_holes_2<EK>;
+
+EPolygon to_epolygon(const std::vector<core::PlanPoint> &r) {
+  EPolygon p;
+  for (const auto &v : r)
+    p.push_back(EK::Point_2(v[0], v[1]));
+  if (p.size() >= 3 && p.is_clockwise_oriented())
+    p.reverse_orientation();
+  return p;
+}
+
+std::vector<core::PlanPoint> to_ring(const EPolygon &p) {
+  std::vector<core::PlanPoint> r;
+  for (auto it = p.vertices_begin(); it != p.vertices_end(); ++it)
+    r.push_back({CGAL::to_double(it->x()), CGAL::to_double(it->y())});
+  return r;
+}
+
+double ring_area(const std::vector<core::PlanPoint> &r) {
+  double a2 = 0.0;
+  for (std::size_t i = 0; i < r.size(); ++i) {
+    const auto &p = r[i], &q = r[(i + 1) % r.size()];
+    a2 += p[0] * q[1] - q[0] * p[1];
+  }
+  return 0.5 * std::abs(a2);
+}
+
+/// @p poly as an exact polygon with holes, or nullopt when a ring is not
+/// simple.
+std::optional<EPolygonWH> to_epwh(const core::SpacePolygon &poly) {
+  const EPolygon outer = to_epolygon(poly.outer);
+  if (outer.size() < 3 || !outer.is_simple())
+    return std::nullopt;
+  EPolygonWH out(outer);
+  for (const auto &h : poly.holes) {
+    EPolygon hp = to_epolygon(h);
+    if (hp.size() < 3 || !hp.is_simple())
+      return std::nullopt;
+    hp.reverse_orientation();
+    out.add_hole(hp);
+  }
+  return out;
+}
+
+/// @p poly joined with @p bay, or false (nothing done) when the join is not
+/// one polygon or a ring is not simple.
+bool join_into(core::SpacePolygon &poly, const EPolygonWH &b) {
+  const EPolygon outer = to_epolygon(poly.outer);
+  if (outer.size() < 3 || !outer.is_simple())
+    return false;
+  EPolygonWH space(outer);
+  for (const auto &h : poly.holes) {
+    EPolygon hp = to_epolygon(h);
+    if (hp.size() < 3 || !hp.is_simple())
+      return false;
+    hp.reverse_orientation();
+    space.add_hole(hp);
+  }
+  EPolygonWH joined;
+  if (!CGAL::join(space, b, joined) || joined.is_unbounded())
+    return false;
+  poly.outer = to_ring(joined.outer_boundary());
+  poly.holes.clear();
+  for (auto h = joined.holes_begin(); h != joined.holes_end(); ++h) {
+    auto ring = to_ring(*h);
+    std::reverse(ring.begin(), ring.end());
+    poly.holes.push_back(ring);
+  }
+  return true;
 }
 
 } // namespace
@@ -1337,13 +1421,118 @@ SlopedCeilingStats fit_sloped_ceilings(
       if (edges.eaves.size() != before)
         s.metadata = core::with_roof_edges(s.metadata, edges);
     }
+
+    // (4) Dormer bays outside every space (reusex-f2lv): a bay (its
+    // dormer's outline, from the facade wall's inner face in) whose centre
+    // no space of the storey holds joins the space whose slope it rises
+    // through, so it has a floor and a volume. Its volume: the bay's added
+    // area up to the dormer's ceiling.
+    for (const auto si : mine) {
+      auto &s = spaces[si];
+      for (const auto &d : core::roof_edges(spaces[si]).dormers) {
+        if (d.outline.size() != 4)
+          continue;
+        Eigen::Vector2d centre = Eigen::Vector2d::Zero();
+        for (const auto &v : d.outline)
+          centre += Eigen::Vector2d(v[0], v[1]) / 4.0;
+        if (std::any_of(mine.begin(), mine.end(), [&](std::size_t k) {
+              return in_space(spaces[k], centre.x(), centre.y());
+            }))
+          continue;
+        // From the wall's inner face: the axis corners move half its
+        // thickness inward (toward the inner corners).
+        auto bay = d.outline;
+        double half = 0.0;
+        for (const auto &w : *walls)
+          if (w.guid == d.wall && w.thickness > 0.0)
+            half = 0.5 * w.thickness;
+        for (int k = 0; k < 2; ++k) {
+          const auto &in = d.outline[static_cast<std::size_t>(3 - k)];
+          auto &ax = bay[static_cast<std::size_t>(k)];
+          const Eigen::Vector2d dir(in[0] - ax[0], in[1] - ax[1]);
+          const double n = dir.norm();
+          if (n > half + 0.05) {
+            ax[0] += dir.x() / n * half;
+            ax[1] += dir.y() / n * half;
+          }
+        }
+        // The bay opens into the space just past its inner line (the one
+        // the dormer was found from when none is there); grown kBayReach
+        // into it, so the two overlap, but never into another space.
+        const Eigen::Vector2d a0(bay[0][0], bay[0][1]),
+            a1(bay[1][0], bay[1][1]);
+        const Eigen::Vector2d i1(bay[2][0], bay[2][1]),
+            i0(bay[3][0], bay[3][1]);
+        Eigen::Vector2d dir = 0.5 * ((i0 - a0) + (i1 - a1));
+        if (!(dir.norm() > 1e-6))
+          continue;
+        dir.normalize();
+        const Eigen::Vector2d past = 0.5 * (i0 + i1) + dir * (0.5 * kBayReach);
+        std::size_t target = si;
+        for (const auto k : mine)
+          if (in_space(spaces[k], past.x(), past.y()))
+            target = k;
+        auto grown = bay;
+        for (const int k : {2, 3}) {
+          grown[static_cast<std::size_t>(k)][0] += dir.x() * kBayReach;
+          grown[static_cast<std::size_t>(k)][1] += dir.y() * kBayReach;
+        }
+        std::optional<EPolygonWH> g;
+        if (const EPolygon gp = to_epolygon(grown); gp.is_simple())
+          g = EPolygonWH(gp);
+        const EK::Point_2 c_e(centre.x(), centre.y());
+        for (const auto k : mine) {
+          if (!g || k == target ||
+              ring_gap(spaces[k].polygon.outer, grown) > kBayReach)
+            continue;
+          const auto other = to_epwh(spaces[k].polygon);
+          if (!other)
+            continue;
+          std::vector<EPolygonWH> parts;
+          CGAL::difference(*g, *other, std::back_inserter(parts));
+          g.reset();
+          for (auto &part : parts)
+            if (part.outer_boundary().bounded_side(c_e) ==
+                CGAL::ON_BOUNDED_SIDE)
+              g = std::move(part);
+        }
+        auto &t = spaces[target];
+        const double area_before = ring_area(t.polygon.outer);
+        auto poly = t.polygon;
+        if (!g || !join_into(poly, *g)) {
+          debug("spaces: space {}: its dormer bay on wall {} could not be "
+                "joined to space {} (not one polygon)",
+                s.guid, d.wall, t.guid);
+          continue;
+        }
+        const double added = ring_area(poly.outer) - area_before;
+        if (!(added > 0.0))
+          continue;
+        t.polygon = std::move(poly);
+        if (t.area > 0.0)
+          t.area += added;
+        t.perimeter = 0.0;
+        for (std::size_t i = 0; i < t.polygon.outer.size(); ++i) {
+          const auto &p0 = t.polygon.outer[i];
+          const auto &p1 = t.polygon.outer[(i + 1) % t.polygon.outer.size()];
+          t.perimeter += std::hypot(p1[0] - p0[0], p1[1] - p0[1]);
+        }
+        if (t.volume > 0.0)
+          t.volume += added * std::max(0.0, d.z - t.z_floor);
+        ++stats.dormer_bays;
+        debug("spaces: space {}: took in the dormer bay on wall {} ({:.2f} "
+              "m^2), which no space held",
+              t.guid, d.wall, added);
+      }
+    }
   }
   if (stats.spaces_sloped > 0)
     info("spaces: sloped ceilings: {} space(s) took {} plane(s) of {} tilted "
          "ceiling candidate(s), {} carried on from a neighbour; {} knee "
-         "wall(s), {} dormer(s), {} eave(s) with no wall",
+         "wall(s), {} dormer(s) ({} bay(s) taken into their space), {} "
+         "eave(s) with no wall",
          stats.spaces_sloped, stats.planes, stats.candidates, stats.extended,
-         stats.knee_walls, stats.dormers, stats.eaves);
+         stats.knee_walls, stats.dormers, stats.dormer_bays, stats.eaves);
   return stats;
 }
 

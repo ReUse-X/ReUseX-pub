@@ -304,6 +304,7 @@ struct SlopedCeilingStats {
   int knee_walls = 0;         ///< facade walls found under a slope
   int dormers = 0;            ///< dormers found
   int eaves = 0;              ///< eaves with no wall (reusex-wyi0)
+  int dormer_bays = 0;        ///< bays joined to their space (reusex-f2lv)
   int roof_planes_fitted = 0; ///< distinct planes before regularise_roof()
   int roof_planes = 0;        ///< ... and after
 };
