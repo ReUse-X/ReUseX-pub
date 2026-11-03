@@ -26,6 +26,7 @@
 #include <pcl/point_types.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -201,20 +202,253 @@ TEST_CASE("Solids_UnknownThickness_GrowsAwayFromTheSpace",
   CHECK(side(r.walls[0], 2.0, 0.05, 1.0) == CGAL::ON_UNBOUNDED_SIDE);
 }
 
-TEST_CASE("Solids_CornerJoin_ExtendsTheWallEnds", "[reconstruction][solids]") {
+// ── Wall joins (reusex-6x9g) ───────────────────────────────────────────────
+// Two joined walls must meet without a gap and without overlapping: the sum
+// of their volumes is the volume of their union, and the union fills the
+// corner. Corner = mitre, tee = the stem abuts the through wall's near face,
+// crossing / collinear = unchanged.
+
+namespace {
+
+using P2 = std::array<double, 2>;
+
+/// Where line p + u k meets line q + v k.
+P2 meet(P2 p, P2 u, P2 q, P2 v) {
+  const double c = u[0] * v[1] - u[1] * v[0];
+  const double k = ((q[0] - p[0]) * v[1] - (q[1] - p[1]) * v[0]) / c;
+  return {p[0] + u[0] * k, p[1] + u[1] * k};
+}
+
+double shoelace(const std::vector<P2> &r) {
+  double a = 0.0;
+  for (std::size_t i = 0, j = r.size() - 1; i < r.size(); j = i++)
+    a += r[j][0] * r[i][1] - r[i][0] * r[j][1];
+  return 0.5 * std::abs(a);
+}
+
+/// Inside how many of @p walls (x, y) at mid height is.
+int cover(const std::vector<ElementSolid> &walls, double x, double y,
+          double z = 1.0) {
+  int n = 0;
+  for (const auto &w : walls)
+    n += side(w, x, y, z) == CGAL::ON_BOUNDED_SIDE ? 1 : 0;
+  return n;
+}
+
+double total_volume(const std::vector<ElementSolid> &walls) {
+  double v = 0.0;
+  for (const auto &w : walls) {
+    REQUIRE(w.closed);
+    v += w.volume;
+  }
+  return v;
+}
+
+/// An L of wall a along +x from the origin to (4, 0) and wall b from (4, 0)
+/// at @p deg from a's direction (measured at the corner, 90 = square),
+/// thicknesses @p ta and @p tb, centred on their axes. Returns the union
+/// footprint, computed independently from the face lines.
+struct LFixture {
   core::SolidModel m;
-  m.storeys = {storey(0, 0.0, 2.5)};
-  m.walls = {wall("a", 0, 0, 4, 0, 0.2), wall("b", 4, 0, 4, 3, 0.2)};
-  m.wall_joins = {{"a", "b", "corner", "end", "start"}};
-  const auto r = build_solids(m);
+  std::vector<P2> union_ring;
+  P2 outer, inner; ///< the corner's outer and inner points
+};
+
+LFixture l_corner(double deg, double ta, double tb, double len_b = 3.0) {
+  LFixture f;
+  f.m.storeys = {storey(0, 0.0, 2.5)};
+  const double r = deg * M_PI / 180.0;
+  // b leaves the corner turning left: direction at (pi - r) from +x.
+  const P2 db{std::cos(M_PI - r), std::sin(M_PI - r)};
+  const P2 c{4.0, 0.0};
+  const P2 bend{c[0] + db[0] * len_b, c[1] + db[1] * len_b};
+  f.m.walls = {wall("a", 0, 0, c[0], c[1], ta),
+               wall("b", c[0], c[1], bend[0], bend[1], tb)};
+  f.m.wall_joins = {{"a", "b", "corner", "end", "start"}};
+  // a's faces: y = -ta/2 (outer, away from b) and +ta/2 (inner).
+  const P2 da{1, 0}, na{0, 1}, nb{-db[1], db[0]};
+  // b's left normal points back over a's start side; b's face away from a
+  // is on -nb.
+  const double ha = ta / 2, hb = tb / 2;
+  f.outer = meet({0, -ha}, da, {c[0] - nb[0] * hb, c[1] - nb[1] * hb}, db);
+  f.inner = meet({0, ha}, da, {c[0] + nb[0] * hb, c[1] + nb[1] * hb}, db);
+  (void)na;
+  f.union_ring = {{0, -ha},
+                  f.outer,
+                  {bend[0] - nb[0] * hb, bend[1] - nb[1] * hb},
+                  {bend[0] + nb[0] * hb, bend[1] + nb[1] * hb},
+                  f.inner,
+                  {0, ha}};
+  return f;
+}
+
+} // namespace
+
+TEST_CASE("Solids_CornerJoin_SquareCornerIsMitred",
+          "[reconstruction][solids]") {
+  auto f = l_corner(90.0, 0.2, 0.2);
+  const auto r = build_solids(f.m);
   REQUIRE(r.walls.size() == 2);
-  // Both reach the outer corner (4.1, -0.1).
-  CHECK(side(r.walls[0], 4.05, -0.05, 1.0) == CGAL::ON_BOUNDED_SIDE);
-  CHECK(side(r.walls[1], 4.05, -0.05, 1.0) == CGAL::ON_BOUNDED_SIDE);
+  // No gap, no overlap: the volumes add up to the L's.
+  CHECK_THAT(total_volume(r.walls),
+             WithinAbs(shoelace(f.union_ring) * 2.5, 1e-6));
+  // The outer corner square is filled, by exactly one wall either side of
+  // the mitre.
+  CHECK(cover(r.walls, 4.08, -0.05) == 1);
+  CHECK(cover(r.walls, 4.05, -0.08) == 1);
+  CHECK(cover(r.walls, 3.95, 0.05) == 1);
+  CHECK(cover(r.walls, 4.12, -0.05) == 0);
+  // The IFC profile of a: a quad, the mitred end at s 4.1 on the outer face
+  // (lo, y = -0.1) and 3.9 on the inner one.
+  const auto &pa = r.walls[0].profile.outer;
+  REQUIRE(pa.size() == 4);
+  CHECK_THAT(pa[0][0], WithinAbs(0.0, 1e-9));
+  CHECK_THAT(pa[1][0], WithinAbs(4.1, 1e-9));
+  CHECK_THAT(pa[2][0], WithinAbs(3.9, 1e-9));
+  CHECK_THAT(pa[3][0], WithinAbs(0.0, 1e-9));
+
   SolidsOptions o;
   o.extend_at_joins = false;
-  const auto r2 = build_solids(m, o);
-  CHECK(side(r2.walls[0], 4.05, -0.05, 1.0) == CGAL::ON_UNBOUNDED_SIDE);
+  const auto r2 = build_solids(f.m, o);
+  CHECK(cover(r2.walls, 4.08, -0.08) == 0);
+}
+
+TEST_CASE("Solids_CornerJoin_AnyAngleAndThicknessIsMitred",
+          "[reconstruction][solids]") {
+  for (const double deg : {60.0, 75.0, 120.0, 135.0}) {
+    for (const auto &[ta, tb] :
+         {std::pair{0.2, 0.2}, std::pair{0.2, 0.35}, std::pair{0.4, 0.15}}) {
+      CAPTURE(deg, ta, tb);
+      auto f = l_corner(deg, ta, tb);
+      const auto r = build_solids(f.m);
+      REQUIRE(r.walls.size() == 2);
+      CHECK_THAT(total_volume(r.walls),
+                 WithinAbs(shoelace(f.union_ring) * 2.5, 1e-6));
+      // Just inside the outer corner: filled once; just beyond it: empty.
+      const P2 mid{(f.outer[0] + f.inner[0]) / 2,
+                   (f.outer[1] + f.inner[1]) / 2};
+      const P2 in{f.outer[0] + (mid[0] - f.outer[0]) * 0.1,
+                  f.outer[1] + (mid[1] - f.outer[1]) * 0.1};
+      const P2 out{f.outer[0] - (mid[0] - f.outer[0]) * 0.1,
+                   f.outer[1] - (mid[1] - f.outer[1]) * 0.1};
+      CHECK(cover(r.walls, in[0], in[1]) == 1);
+      CHECK(cover(r.walls, out[0], out[1]) == 0);
+    }
+  }
+}
+
+TEST_CASE("Solids_CornerJoin_UnlikeThicknessesButtJoint",
+          "[reconstruction][solids]") {
+  // a 0.2 m, b 0.4 m: b runs through to a's outer face (y = -0.1), a abuts
+  // b's inner face (x = 3.8) -- no thin sliver of a along b.
+  auto f = l_corner(90.0, 0.2, 0.4);
+  const auto r = build_solids(f.m);
+  REQUIRE(r.walls.size() == 2);
+  CHECK_THAT(total_volume(r.walls),
+             WithinAbs(shoelace(f.union_ring) * 2.5, 1e-6));
+  CHECK_THAT(r.walls[0].volume, WithinAbs(3.8 * 0.2 * 2.5, 1e-6));
+  CHECK(side(r.walls[1], 4.0, -0.05, 1.0) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(r.walls[1], 3.85, 0.05, 1.0) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(cover(r.walls, 4.15, -0.12) == 0);
+}
+
+TEST_CASE("Solids_CornerJoin_OneSidedWallsMeetWithoutOverlap",
+          "[reconstruction][solids]") {
+  // A room's two seen faces; each body grows 0.1 m away from the room, so
+  // the corner's outer square (4..4.1, -0.1..0) is filled once.
+  core::SolidModel m;
+  m.storeys = {storey(0, 0.0, 2.5)};
+  m.walls = {wall("a", 0, 0, 4, 0, -1.0), wall("b", 4, 0, 4, 3, -1.0)};
+  m.wall_joins = {{"a", "b", "corner", "end", "start"}};
+  m.spaces = {space("s1", {{0, 0}, {4, 0}, {4, 3}, {0, 3}}, 0.0, 2.5)};
+  SolidsOptions o;
+  o.unknown_wall_thickness_m = 0.1;
+  const auto r = build_solids(m, o);
+  REQUIRE(r.walls.size() == 2);
+  CHECK_THAT(total_volume(r.walls),
+             WithinAbs((4.1 * 0.1 + 0.1 * 3.0) * 2.5, 1e-6));
+  CHECK(cover(r.walls, 4.06, -0.03) == 1);
+  CHECK(cover(r.walls, 4.03, -0.06) == 1);
+  CHECK(cover(r.walls, 3.95, 0.05) == 0); // in the room
+}
+
+TEST_CASE("Solids_TeeJoin_StemAbutsTheThroughWall",
+          "[reconstruction][solids]") {
+  SECTION("square, centred walls") {
+    core::SolidModel m;
+    m.storeys = {storey(0, 0.0, 2.5)};
+    m.walls = {wall("t", 0, 0, 4, 0, 0.2), wall("s", 2, 0, 2, 3, 0.2)};
+    m.wall_joins = {{"s", "t", "tee", "start", "path"}};
+    const auto r = build_solids(m);
+    REQUIRE(r.walls.size() == 2);
+    CHECK_THAT(r.walls[0].volume, WithinAbs(4.0 * 0.2 * 2.5, 1e-6));
+    CHECK_THAT(r.walls[1].volume, WithinAbs(0.2 * 2.9 * 2.5, 1e-6));
+    CHECK(cover(r.walls, 2.0, 0.05) == 1);
+    CHECK(cover(r.walls, 2.0, 0.15) == 1);
+    CHECK(cover(r.walls, 2.0, -0.15) == 0);
+  }
+  SECTION("one-sided through wall growing toward the stem") {
+    // The room is at y < 0, so the through wall's body is 0..0.1 and the
+    // stem stops at y = 0.1 instead of poking into the room.
+    core::SolidModel m;
+    m.storeys = {storey(0, 0.0, 2.5)};
+    m.walls = {wall("t", 0, 0, 4, 0, -1.0), wall("s", 2, 0, 2, 3, 0.2)};
+    m.wall_joins = {{"s", "t", "tee", "start", "path"}};
+    m.spaces = {space("r", {{0, -3}, {4, -3}, {4, 0}, {0, 0}}, 0.0, 2.5)};
+    SolidsOptions o;
+    o.unknown_wall_thickness_m = 0.1;
+    const auto r = build_solids(m, o);
+    REQUIRE(r.walls.size() == 2);
+    CHECK_THAT(r.walls[1].volume, WithinAbs(0.2 * 2.9 * 2.5, 1e-6));
+    CHECK(cover(r.walls, 2.0, -0.05) == 0);
+    CHECK(cover(r.walls, 2.0, 0.05) == 1);
+  }
+  SECTION("slanted stem") {
+    // The stem meets the through wall at 60 degrees: its end follows the
+    // through wall's face, so the stem is a trapezoid.
+    core::SolidModel m;
+    m.storeys = {storey(0, 0.0, 2.5)};
+    const double c = std::cos(M_PI / 3), s = std::sin(M_PI / 3);
+    m.walls = {wall("t", 0, 0, 6, 0, 0.2),
+               wall("s", 2, 0, 2 + 3 * c, 3 * s, 0.2)};
+    m.wall_joins = {{"s", "t", "tee", "start", "path"}};
+    const auto r = build_solids(m);
+    REQUIRE(r.walls.size() == 2);
+    // The stem's body from the face y = 0.1 to its far end: along its axis
+    // 3 - 0.1 / sin(60) long on average (both faces' ends are sheared the
+    // same amount either way).
+    CHECK_THAT(r.walls[1].volume, WithinAbs(0.2 * (3.0 - 0.1 / s) * 2.5, 1e-6));
+    CHECK(cover(r.walls, 2.0 + 0.15 * c / s, 0.05) == 1);
+    CHECK(cover(r.walls, 2.0, -0.15) == 0);
+  }
+}
+
+TEST_CASE("Solids_CrossingAndCollinear_AreLeftAlone",
+          "[reconstruction][solids]") {
+  core::SolidModel m;
+  m.storeys = {storey(0, 0.0, 2.5)};
+  m.walls = {wall("x", 0, 0, 4, 0, 0.2), wall("y", 2, -2, 2, 2, 0.2),
+             wall("c", 4, 0, 6, 0, 0.2)};
+  m.wall_joins = {{"x", "y", "tee", "path", "path"},
+                  {"x", "c", "collinear", "end", "start"}};
+  const auto r = build_solids(m);
+  REQUIRE(r.walls.size() == 3);
+  CHECK_THAT(r.walls[0].volume, WithinAbs(4.0 * 0.2 * 2.5, 1e-6));
+  CHECK_THAT(r.walls[1].volume, WithinAbs(4.0 * 0.2 * 2.5, 1e-6));
+  CHECK_THAT(r.walls[2].volume, WithinAbs(2.0 * 0.2 * 2.5, 1e-6));
+}
+
+TEST_CASE("Solids_CornerJoin_SlopedTopWallIsMitredToo",
+          "[reconstruction][solids]") {
+  auto f = l_corner(90.0, 0.2, 0.2);
+  // a's top falls from 2.5 at its start to 1.5 at its end.
+  f.m.walls[0].top = {{0.0, 2.5}, {4.0, 1.5}};
+  const auto r = build_solids(f.m);
+  REQUIRE(r.walls.size() == 2);
+  CHECK(r.walls[0].closed);
+  CHECK(cover(r.walls, 4.08, -0.05, 0.5) == 1);
+  CHECK(cover(r.walls, 3.95, 0.05, 0.5) == 1);
+  CHECK(cover(r.walls, 4.12, -0.05, 0.5) == 0);
 }
 
 TEST_CASE("Solids_Space_IsItsPolygonTimesItsHeight",
