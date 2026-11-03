@@ -538,19 +538,34 @@ in the API) and where each meets the other (`start`, `end` or along its
 Plan regularisation (`reconstruction/plan_regularise.hpp`,
 `regularise_walls`, reusex-z1v.12; keys `plan_*`, on by default, off with
 `--no-plan-regularise`): before the rows are written, over all storeys at
-once, walls of one storey that continue each other (overlap along the axis at
+once, it first simplifies (reusex-p3gm, simpler over closer to the scan):
+double walls -- two one-sided sheets over the same stretch (overlap at least
+`plan_double_min_overlap` of the shorter) seen from either side whose faces
+bound a body at most `plan_double_m` thick or look at each other at most
+`plan_double_cross_m` apart, a sheet within `plan_double_cross_m` of a
+measured wall's body, or two measured walls whose bodies overlap -- become
+one wall (the measured, else the longer, over both extents; the joins
+follow); a wall that crosses another loses its stretch on one side when that
+stretch is at most `plan_stub_m` long and at most `plan_stub_seen` of its
+0.25 m columns are seen as wall (the walls' seen profile; the less seen side
+goes), and then tees onto the wall it crossed; a one-sided wall at most
+`plan_stub_m` long with at most `plan_stub_seen` of its columns wall is
+dropped. Then walls of one storey that continue each other (overlap along the axis at
 most `plan_max_overlap_m`, gap at most `plan_collinear_gap_m`) with a face
 seen from the same side within `plan_collinear_m` share one line, and walls of
 adjacent storeys that overlap by `plan_stack_min_overlap_m` with a same-side
 face within `plan_stack_m` share one line (`plan_stack`). A line is the
 length-weighted mean of its faces on its better-seen side; each wall moves
 that face there, its thickness unchanged. Two walls of one storey standing
-side by side (overlapping) never share a line, however close. Optional:
+side by side (overlapping) never share a line, however close. Walls of one
+storey that continue each other with axes within `plan_continuous_m` (about a
+wall's thickness) are one continuous wall, whichever side they were seen
+from: their lines join and go onto the length-weighted mean axis. Optional:
 `plan_grid_deg` turns walls onto the project's Manhattan grid (off by default:
 it turns whole storeys onto each other), `plan_round_m` rounds each line's
 offset. Corner and tee ends follow the moved lines. A moved wall's `metadata`
-keeps what was measured: `{"regularised": {"rules": ["collinear" | "stack" |
-"grid" | "round" | "join"], "offset_delta_m", "angle_delta_deg", "measured":
+keeps what was measured: `{"regularised": {"rules": ["collinear" |
+"continuous" | "stack" | "grid" | "round" | "join" | "double" | "trim"], "offset_delta_m", "angle_delta_deg", "measured":
 {"x0", "y0", "x1", "y1"}}}`.
 
 Identity: a re-detected wall keeps the GUID of the stored wall of the same

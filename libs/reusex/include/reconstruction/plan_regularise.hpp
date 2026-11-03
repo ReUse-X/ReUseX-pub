@@ -10,9 +10,13 @@
 /// before the walls are stored (and on the openings before they are), so
 /// spaces, solids and every export inherit it:
 ///
-///  - regularise_walls(): wall lines onto the Manhattan grid (angles), walls
-///    that continue each other on one storey onto one shared line
-///    ("collinear"), walls that stand over each other on adjacent storeys
+///  - regularise_walls(): double walls (one wall seen from both sides as
+///    two) merged into one ("double"), short stubs past a wall they cross
+///    cut off ("trim") and short unseen fragments dropped, wall lines onto the
+///    Manhattan grid (angles), walls that continue each other on one storey
+///    onto one shared line
+///    ("collinear" by a shared face, "continuous" by axes within a wall's
+///    thickness), walls that stand over each other on adjacent storeys
 ///    onto one shared line ("stack"), optional dimension rounding, and the
 ///    corner / tee ends re-solved on the moved lines;
 ///  - regularise_openings(): windows of one facade column (the same facade
@@ -24,12 +28,22 @@
 /// regularised, the opening's metadata "regularised"), so a measured-vs-
 /// regularised quantity stays available.
 ///
+/// Simpler over closer to the scan (reusex-p3gm, maintainer 2026-11-03: "I
+/// would prefer simpler but maybe slightly off plans over weird jumps and
+/// double walls"): a wall that continues another with a jump of up to a
+/// wall's thickness is one continuous wall, a wall seen as two sheets from
+/// either side is one wall, and a wall's short stretch past a wall it
+/// crosses -- typically a room wall carried across a corridor, splitting it
+/// -- is cut off.
+///
 /// What must never happen: two genuinely different walls merged. Two walls of
 /// one storey that overlap along their axis by more than max_overlap_m are
 /// different walls (the two sides of a corridor, two partitions side by
-/// side) and never share a line, however close; walls share a line only
-/// through a face seen from the same side, so a one-sided wall and one seen
-/// only from the other side are never pulled together.
+/// side) and never share a line, however close -- unless they are one
+/// wall's two faces (plan_double_m): sheets seen from either side whose
+/// faces bound a body no thicker than a wall, or a sheet on a measured
+/// wall's own face. Two sheets seen from the same side, and two measured
+/// walls whose bodies do not overlap, are never merged.
 ///
 /// Deterministic (STANDARDS §6): no randomness, inputs visited in index
 /// order, candidate pairs in a fixed order.
@@ -77,6 +91,40 @@ struct PlanRegulariseOptions {
   /// Round each line's offset (its reference face) to a multiple of this in
   /// the grid frame [m] (0.01 / 0.05); 0 = off.
   double plan_round_m = 0.0;
+  /// Walls of one storey that continue each other (overlap at most
+  /// plan_max_overlap_m, gap at most plan_collinear_gap_m) with axes within
+  /// this of each other are one continuous wall: they share one axis, the
+  /// length-weighted mean of theirs, each keeping its thickness [m]; 0 =
+  /// off. About a wall's thickness: a jump that small in a wall is scan
+  /// drift or a doubled sheet, not a design (reusex-p3gm).
+  double plan_continuous_m = 0.35;
+  /// Double walls (reusex-p3gm): two walls of one storey overlapping along
+  /// the axis by at least plan_double_min_overlap of the shorter are one
+  /// wall when they are two sheets seen from either side whose faces bound
+  /// a body at most this thick (or face each other at most
+  /// plan_double_cross_m apart: drift), when one is a sheet whose face lies
+  /// within plan_double_cross_m of a measured wall's body, or when both are
+  /// measured and their bodies overlap. The kept wall (measured, else the
+  /// longer) runs over both extents [m]; 0 = off.
+  double plan_double_m = 0.45;
+  double plan_double_cross_m = 0.15;
+  double plan_double_min_overlap = 0.5;
+  /// Stubs (reusex-p3gm): a wall that crosses another one (which runs on at
+  /// least 0.3 m past the crossing either way) loses its stretch on one
+  /// side of the crossing when that stretch is at most this long; it then
+  /// ends on the wall it crossed (a tee). A room wall carried across a
+  /// corridor (a doorway bridge, a tee past the evidence) otherwise splits
+  /// the corridor in two [m]; 0 = off. With the wall's seen profile
+  /// (WallSegment::seen_columns) the side that goes is the one with fewer
+  /// wall columns (seen over at least 0.3 of the storey height, not a beam
+  /// or a lintel), and only when at most plan_stub_seen of its columns are
+  /// (a real crossing seen on both sides stays); without one, the shorter
+  /// side. A one-sided wall no longer than this with at most plan_stub_seen
+  /// of its columns wall is dropped altogether: a doorway bridge or a beam
+  /// left on its own, splitting the space it stands in (measured walls, and
+  /// walls without a seen profile, stay).
+  double plan_stub_m = 2.5;
+  double plan_stub_seen = 0.35;
 };
 
 /// What regularise_walls() did, for the stage's log.
@@ -86,6 +134,10 @@ struct PlanRegulariseResult {
   int walls_moved = 0;         ///< walls whose axis moved (shift or turn)
   int walls_turned = 0;        ///< walls turned onto the grid
   int ends_rejoined = 0;       ///< corner / tee ends re-solved on moved lines
+  int continuous_lines = 0;    ///< lines joined by plan_continuous_m
+  int walls_merged = 0;        ///< double walls merged away (walls removed)
+  int walls_trimmed = 0;       ///< stubs cut off past a crossing
+  int walls_dropped = 0;       ///< unseen fragments dropped (walls removed)
   double grid_angle_deg = 0.0; ///< the grid's first axis in storey 0's frame
   double max_shift_m = 0.0;    ///< largest axis shift
   double rms_shift_m = 0.0;    ///< over the moved walls
@@ -94,9 +146,11 @@ struct PlanRegulariseResult {
 
 /// Regularise the wall graphs of all storeys together. @p graphs and
 /// @p storeys are index-aligned (one graph per storey, in its level frame,
-/// as detect_walls() made it). The walls keep their order, family and
-/// joins; their axes (WallSegment::d, axis_offset, face_lo / face_hi, s0 /
-/// s1) move and WallSegment::regularised records the measured axis.
+/// as detect_walls() made it). The walls keep their order and family, minus
+/// the double walls merged into another (the joins are renumbered, and a
+/// merged wall's joins move to the wall it merged into); their axes
+/// (WallSegment::d, axis_offset, face_lo / face_hi, s0 / s1) move and
+/// WallSegment::regularised records the measured axis.
 ///
 /// Storeys whose level frames differ (a tilted storey with its own frame)
 /// are compared through the world frame, in storey 0's level frame.

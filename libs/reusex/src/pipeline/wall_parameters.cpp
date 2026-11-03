@@ -240,9 +240,10 @@ const std::vector<WallParameter> &wall_parameter_table() {
        WALL(free_top_quantile), 0.0, 1.0},
       // --- plan regularisation (geometry::PlanRegulariseOptions)
       {"plan_regularise", "--no-plan-regularise", "Regularise the plan",
-       "Straighten the plan: walls onto the Manhattan grid, walls that "
-       "continue each other or stand over each other on adjacent storeys "
-       "onto one shared line; the measured axis is kept in the metadata.",
+       "Simplify the plan: double walls merged, stubs past a crossing cut, "
+       "walls onto the Manhattan grid, walls that continue each other or "
+       "stand over each other on adjacent storeys onto one shared line; the "
+       "measured axis is kept in the metadata.",
        PLAN(plan_regularise), std::nullopt, std::nullopt},
       {"plan_angle_deg", "--plan-angle", "Shared line angle [deg]",
        "Walls share a line only when parallel within this.",
@@ -275,6 +276,36 @@ const std::vector<WallParameter> &wall_parameter_table() {
        "Round each wall line's offset to a multiple of this, e.g. 0.01 or "
        "0.05 (0 = off).",
        PLAN(plan_round_m), 0.0, 1.0},
+      {"plan_continuous_m", "--plan-continuous", "Continuous wall [m]",
+       "Walls of one storey that continue each other with axes within this "
+       "of each other are one continuous wall on one axis, whichever side "
+       "they were seen from: about a wall's thickness (0 = off).",
+       PLAN(plan_continuous_m), 0.0, 1.0},
+      {"plan_double_m", "--plan-double", "Double wall [m]",
+       "Two sheets over the same stretch, seen from either side, whose faces "
+       "bound a body at most this thick are one wall (also a sheet on a "
+       "measured wall's face, or two measured walls whose bodies overlap; "
+       "0 = off).",
+       PLAN(plan_double_m), 0.0, 2.0},
+      {"plan_double_cross_m", "--plan-double-cross", "Double wall cross [m]",
+       "... or whose faces look at each other at most this far apart "
+       "(drift); also how far a sheet may lie off a measured wall's body.",
+       PLAN(plan_double_cross_m), 0.0, 1.0},
+      {"plan_double_min_overlap", "--plan-double-overlap",
+       "Double wall overlap share",
+       "... when they overlap along the axis by at least this share of the "
+       "shorter.",
+       PLAN(plan_double_min_overlap), 0.0, 1.0},
+      {"plan_stub_m", "--plan-stub", "Cut stubs [m]",
+       "A wall's stretch past a wall it crosses, at most this long and the "
+       "shorter side, is cut off: a room wall carried across a corridor "
+       "otherwise splits it (0 = off).",
+       PLAN(plan_stub_m), 0.0, 20.0},
+      {"plan_stub_seen", "--plan-stub-seen", "Stub seen share",
+       "... and, where the wall's seen profile is known, the side that goes "
+       "is the one with fewer wall columns, and only when at most this "
+       "share of its columns are wall.",
+       PLAN(plan_stub_seen), 0.0, 1.0},
       // --- identity (core::WallIdentityOptions)
       {"guid_match_m", "--guid-match", "Same wall within [m]",
        "A re-detected wall keeps the GUID of the stored wall whose axis lies "
