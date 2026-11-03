@@ -1492,6 +1492,31 @@ WallGraph join_walls(std::vector<WallSegment> walls,
     const double total = static_cast<double>(is1 - is0 + 1) * (iz1 - iz0 + 1);
     return total > 0.0 ? static_cast<double>(seen.size()) / total : 0.0;
   };
+  // The same, per cell_m column along the axis (WallSegment::seen_columns).
+  auto seen_profile_of = [&](WallSegment &w) {
+    const size_t fam = family_pos(w.family);
+    const auto [lo, hi] = body(w);
+    const double pad = opt.face_window_m;
+    const int is0 = cell_index(w.s0, opt.cell_m),
+              is1 = cell_index(w.s1, opt.cell_m);
+    const int iz0 = cell_index(wp.z_floor, opt.cell_m);
+    const int iz1 = cell_index(wp.z_ceiling - kEpsilonLengthM, opt.cell_m);
+    std::set<FaceCell> seen;
+    const auto [qlo, qhi] = offset_range(ev.wall[fam], lo - pad, hi + pad);
+    for (auto q = qlo; q != qhi; ++q)
+      if (q->s >= w.s0 && q->s <= w.s1 && q->z >= wp.z_floor &&
+          q->z <= wp.z_ceiling)
+        seen.insert(
+            {cell_index(q->s, opt.cell_m), cell_index(q->z, opt.cell_m)});
+    w.seen_i0 = is0;
+    w.seen_cell_m = opt.cell_m;
+    w.seen_columns.assign(static_cast<size_t>(std::max(is1 - is0 + 1, 0)),
+                          0.0f);
+    const auto rows = static_cast<float>(std::max(iz1 - iz0 + 1, 1));
+    for (const auto &c : seen)
+      if (c.first >= is0 && c.first <= is1)
+        w.seen_columns[static_cast<size_t>(c.first - is0)] += 1.0f / rows;
+  };
   // The height over the floor that the wall's evidence (within its body,
   // over its extent) reaches: the free_top_quantile of the heights.
   auto evidence_top = [&](const WallSegment &w) {
@@ -1831,6 +1856,7 @@ WallGraph join_walls(std::vector<WallSegment> walls,
   // 5. Seen share: (s, z) cells of the wall's face area with evidence.
   for (auto &w : walls) {
     w.seen_share = seen_share_of(w);
+    seen_profile_of(w);
     w.low_seen = w.seen_share < opt.min_seen_share;
     if (w.low_seen)
       ++g.low_seen;

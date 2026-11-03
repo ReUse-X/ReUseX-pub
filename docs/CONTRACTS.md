@@ -549,19 +549,34 @@ in the API) and where each meets the other (`start`, `end` or along its
 Plan regularisation (`reconstruction/plan_regularise.hpp`,
 `regularise_walls`, reusex-z1v.12; keys `plan_*`, on by default, off with
 `--no-plan-regularise`): before the rows are written, over all storeys at
-once, walls of one storey that continue each other (overlap along the axis at
+once, it first simplifies (reusex-p3gm, simpler over closer to the scan):
+double walls -- two one-sided sheets over the same stretch (overlap at least
+`plan_double_min_overlap` of the shorter) seen from either side whose faces
+bound a body at most `plan_double_m` thick or look at each other at most
+`plan_double_cross_m` apart, a sheet within `plan_double_cross_m` of a
+measured wall's body, or two measured walls whose bodies overlap -- become
+one wall (the measured, else the longer, over both extents; the joins
+follow); a wall that crosses another loses its stretch on one side when that
+stretch is at most `plan_stub_m` long and at most `plan_stub_seen` of its
+0.25 m columns are seen as wall (the walls' seen profile; the less seen side
+goes), and then tees onto the wall it crossed; a one-sided wall at most
+`plan_stub_m` long with at most `plan_stub_seen` of its columns wall is
+dropped. Then walls of one storey that continue each other (overlap along the axis at
 most `plan_max_overlap_m`, gap at most `plan_collinear_gap_m`) with a face
 seen from the same side within `plan_collinear_m` share one line, and walls of
 adjacent storeys that overlap by `plan_stack_min_overlap_m` with a same-side
 face within `plan_stack_m` share one line (`plan_stack`). A line is the
 length-weighted mean of its faces on its better-seen side; each wall moves
 that face there, its thickness unchanged. Two walls of one storey standing
-side by side (overlapping) never share a line, however close. Optional:
+side by side (overlapping) never share a line, however close. Walls of one
+storey that continue each other with axes within `plan_continuous_m` (about a
+wall's thickness) are one continuous wall, whichever side they were seen
+from: their lines join and go onto the length-weighted mean axis. Optional:
 `plan_grid_deg` turns walls onto the project's Manhattan grid (off by default:
 it turns whole storeys onto each other), `plan_round_m` rounds each line's
 offset. Corner and tee ends follow the moved lines. A moved wall's `metadata`
-keeps what was measured: `{"regularised": {"rules": ["collinear" | "stack" |
-"grid" | "round" | "join"], "offset_delta_m", "angle_delta_deg", "measured":
+keeps what was measured: `{"regularised": {"rules": ["collinear" |
+"continuous" | "stack" | "grid" | "round" | "join" | "double" | "trim"], "offset_delta_m", "angle_delta_deg", "measured":
 {"x0", "y0", "x1", "y1"}}}`.
 
 Identity: a re-detected wall keeps the GUID of the stored wall of the same
@@ -738,10 +753,34 @@ flat; a detected space that carries a stored row's lock is fitted too, a
 locked row kept as stored keeps its own; eaves, reusex-ow8p: a plane a
 neighbour took (within 0.6 m) runs on into a space whose seen ceiling does
 not contradict it, `ceiling_fit.extended_from`, so the strip between a knee
-partition and the facade slopes down to the facade; the storey's walls
+partition and the facade slopes down to the facade; then the roof is
+simplified, reusex-p3gm, `geometry::regularise_roof`, `roof_*` keys, off
+with `--no-roof-regularise`: the storey's planes take one pitch (the
+area-weighted median, rounded to `roof_pitch_round_deg`, for planes within
+`roof_pitch_tol_deg`), directions within `roof_azimuth_deg` of the main
+plane's (or it turned by 90 deg) turn onto it, a side's planes whose eaves
+lines follow each other within `roof_merge_m` become one, and the tops of
+one roof (spaces sharing a plane or side by side) come down to its median
+from up to `roof_cap_merge_m` above, or up from `roof_cap_raise_m` below;
+what was fitted stays in `ceiling_fit.fitted` (`planes`, `z_ceiling`); a
+space the simplified roof would bring within 0.1 m of its floor keeps its
+fit; the storey's walls
 under a slope, outside it, are measured against it from the cloud, and
 the space's `metadata.roof` lists its knee walls (top at the slope) and
-dormers (`core::RoofEdges`: wall, stretch, flat ceiling height, plan)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
+dormers (`core::RoofEdges`: wall, stretch, flat ceiling height, plan), and,
+reusex-wyi0, its eaves with no wall (`roof.eaves`, `[x0, y0, x1, y1]`
+each): the outline's edges along a slope's lowest contour line (within
+0.3 m), merged along one line across gaps up to 2 m, at a facade, at most
+1.2 m above the floor, with no wall along them within 0.5 m and no dormer
+bay behind; `solids` draws a knee wall on each (a one-sided wall on the
+stretch, grown away from the space, from the storey floor up to the space's
+own slope along it, GUID from the space's and the eave's index, metadata
+`{"inferred": "eave"}`; not a `walls` row);
+a dormer bay that no space holds (reusex-f2lv) joins the space it opens
+into (the one just past its inner line, else the space it was found from):
+the bay from the dormer wall's inner face, grown 0.3 m into that space and
+clipped by every other space, is unioned into its polygon, and its `area`,
+`perimeter` and `volume` (the bay up to the dormer ceiling) grow with it), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
 `rooms` label it was made from), `confidence` (the share of its area that
 comes from wall-bounded faces, the rest is raster) and `metadata` (that share
 and the furniture holes). A boundary names its space by row (it goes with

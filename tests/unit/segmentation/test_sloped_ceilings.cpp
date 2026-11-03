@@ -13,6 +13,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -147,9 +149,13 @@ TEST_CASE("SlopedCeilings_AtticAndFlatCentreAndMonoPitch",
   const std::vector<int> labels = {1, 2, 3, 4, 5, 6};
   const std::vector<int> label_storeys(labels.size(), 0);
 
+  // The fit itself, so the roof is not regularised (reusex-p3gm): that
+  // would put the attic and the flat centre, 0.15 m apart, on one plane.
+  geometry::SpacesOptions fit_only;
+  fit_only.roof_regularise = false;
   const auto stats =
       geometry::fit_sloped_ceilings(spaces, {storey()}, sc.cloud, sc.normals,
-                                    sc.labels, labels, label_storeys);
+                                    sc.labels, labels, label_storeys, fit_only);
   CHECK(stats.candidates == 5);
   CHECK(stats.spaces_sloped == 3);
 
@@ -288,6 +294,17 @@ void attic_ceiling(Scene &sc, double x0, double x1, double y0, double y1,
       sc.add(x, y, z, flat ? Eigen::Vector3d(0, 0, -1) : slope_n(y),
              flat ? 3u : (y < 3.0 ? 1u : 2u));
     }
+}
+
+/// Whether (x, y) lies inside @p s's outer ring (even-odd).
+bool geometry_test_inside(const core::SpaceRecord &s, double x, double y) {
+  bool in = false;
+  const auto &r = s.polygon.outer;
+  for (std::size_t i = 0, j = r.size() - 1; i < r.size(); j = i++)
+    if ((r[i][1] > y) != (r[j][1] > y) &&
+        x < (r[j][0] - r[i][0]) * (y - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])
+      in = !in;
+  return in;
 }
 
 core::SpaceRecord poly_room(const std::string &guid, double x0, double x1,
@@ -433,10 +450,14 @@ TEST_CASE("SlopedCeilings_RoofEdges_RoundTripInMetadata",
   d.z = 2.1;
   d.outline = {{1, 0}, {2.5, 0}, {2.5, 1}, {1, 1}};
   e.dormers = {d};
+  e.eaves = {{{3.15, -6.0}, {3.15, 0.5}}};
   core::SpaceRecord s;
   s.metadata = core::with_roof_edges(R"({"z_floor_cells": 12})", e);
   const auto back = core::roof_edges(s);
   REQUIRE(back.dormers.size() == 1);
+  REQUIRE(back.eaves.size() == 1);
+  CHECK(back.eaves[0].a[1] == -6.0);
+  CHECK(back.eaves[0].b[0] == 3.15);
   CHECK(back.knee_walls == e.knee_walls);
   CHECK(back.dormers[0].wall == "w1");
   CHECK(back.dormers[0].s1 == 2.5);
@@ -448,4 +469,245 @@ TEST_CASE("SlopedCeilings_RoofEdges_RoundTripInMetadata",
   CHECK(core::with_roof_edges("not json", {}) == "not json");
   s.metadata = "not json";
   CHECK(core::roof_edges(s).empty());
+}
+
+// ── Roof regularisation (reusex-p3gm) ───────────────────────────────────────
+
+namespace {
+
+constexpr double kDegR = 3.14159265358979323846 / 180.0;
+
+/// A plane rising toward azimuth @p az_deg at @p pitch_deg that reaches
+/// @p top at the eaves line u . x = @p d.
+core::CeilingPlane slope_plane(double az_deg, double pitch_deg, double d,
+                               double top) {
+  const double ux = std::cos(az_deg * kDegR), uy = std::sin(az_deg * kDegR);
+  const double t = std::tan(pitch_deg * kDegR);
+  core::CeilingPlane p;
+  p.at = {ux * d, uy * d, top};
+  p.slope = {t * ux, t * uy};
+  return p;
+}
+
+double pitch_of(const core::CeilingPlane &p) {
+  return std::atan(std::hypot(p.slope[0], p.slope[1])) / kDegR;
+}
+
+double azimuth_of(const core::CeilingPlane &p) {
+  return std::atan2(p.slope[1], p.slope[0]) / kDegR;
+}
+
+/// Where @p p reaches @p top along its uphill direction.
+double eaves_line(const core::CeilingPlane &p, double top) {
+  const double g = std::hypot(p.slope[0], p.slope[1]);
+  const double ux = p.slope[0] / g, uy = p.slope[1] / g;
+  return ux * p.at[0] + uy * p.at[1] + (top - p.at[2]) / g;
+}
+
+} // namespace
+
+TEST_CASE("SlopedCeilings_RoofRegularise_FewPlanesFlatTop45",
+          "[sloped_ceilings][roof_regularise]") {
+  // Sygehusgrunden's attic: a flat top, 45 deg sides, fitted per room as
+  // planes 40-46 deg, a few degrees off, eaves lines and tops a few
+  // decimetres apart: kinks where rooms meet. Rooms along y, 4 m deep in x;
+  // the west side rises toward +x (az 0), the east one toward -x (az 180).
+  std::vector<core::SpaceRecord> sp = {
+      room("a", 0, 6, 0, 4, 3.00), room("b", 0, 6, 4, 8, 3.10),
+      room("c", 0, 6, 8, 12, 2.95), room("d", 0, 6, 12, 14, 3.02)};
+  sp[0].ceiling_planes = {slope_plane(0.0, 43.5, 1.5, 3.0),
+                          slope_plane(180.0, 44.0, -4.5, 3.0)};
+  sp[1].ceiling_planes = {slope_plane(3.0, 46.0, 1.8, 3.1),
+                          slope_plane(-178.0, 45.5, -4.3, 3.1)};
+  sp[2].ceiling_planes = {slope_plane(0.0, 40.5, 1.6, 2.95),
+                          slope_plane(92.0, 44.0, 10.5, 2.95)};
+  // A lower roof 2 m further out on the west: its own plane.
+  sp[3].ceiling_planes = {slope_plane(0.0, 45.0, -0.6, 3.02)};
+  const auto fitted = sp;
+  const auto st =
+      geometry::regularise_roof(sp, {0, 1, 2, 3}, geometry::SpacesOptions{});
+  CHECK(st.planes_in == 7);
+  CHECK(st.planes_out == 4); // west, west (lower roof), east, the hip
+  CHECK_THAT(st.pitch_deg, WithinAbs(45.0, 1e-9));
+  CHECK(st.spaces == 4);
+  // One flat top for every room: the area-weighted median.
+  for (const auto &s : sp)
+    CHECK_THAT(s.z_ceiling, WithinAbs(3.0, 1e-9));
+  // One west plane for a, b, c; one east plane for a, b; all 45 deg and
+  // square to the plan.
+  const auto &west = sp[0].ceiling_planes[0];
+  CHECK(sp[1].ceiling_planes[0].at == west.at);
+  CHECK(sp[1].ceiling_planes[0].slope == west.slope);
+  CHECK(sp[2].ceiling_planes[0].slope == west.slope);
+  CHECK(sp[2].ceiling_planes[0].at == west.at);
+  CHECK(sp[0].ceiling_planes[1].at == sp[1].ceiling_planes[1].at);
+  CHECK(sp[0].ceiling_planes[1].slope == sp[1].ceiling_planes[1].slope);
+  for (const auto &s : sp)
+    for (const auto &p : s.ceiling_planes) {
+      CHECK_THAT(pitch_of(p), WithinAbs(45.0, 1e-9));
+      const double az = azimuth_of(p);
+      CHECK_THAT(std::remainder(az, 90.0), WithinAbs(0.0, 1e-9));
+    }
+  // The west eaves line: between the fitted ones (1.5 .. 1.8), and the
+  // lower roof stays 2 m out.
+  CHECK(eaves_line(west, 3.0) > 1.4);
+  CHECK(eaves_line(west, 3.0) < 1.9);
+  CHECK_THAT(eaves_line(sp[3].ceiling_planes[0], 3.0), WithinAbs(-0.6, 0.15));
+  // What was fitted is kept.
+  const auto meta = nlohmann::json::parse(sp[1].metadata);
+  CHECK(meta["ceiling_fit"]["fitted"]["z_ceiling"].get<double>() == 3.1);
+  CHECK(core::decode_ceiling_planes(
+            meta["ceiling_fit"]["fitted"]["planes"].get<std::string>())
+            .size() == 2);
+  (void)fitted;
+
+  // Off: nothing changes.
+  auto off = fitted;
+  geometry::SpacesOptions o;
+  o.roof_regularise = false;
+  const auto st_off = geometry::regularise_roof(off, {0, 1, 2, 3}, o);
+  CHECK(st_off.spaces == 0);
+  CHECK(off[1].z_ceiling == 3.1);
+  CHECK(off[1].ceiling_planes[0].slope == fitted[1].ceiling_planes[0].slope);
+}
+
+TEST_CASE("SlopedCeilings_RoofRegularise_NeverDownToTheFloor",
+          "[sloped_ceilings][roof_regularise]") {
+  // A narrow strip whose fitted slope just clears its floor at the eaves:
+  // moved onto the shared plane it would not, so it keeps its own.
+  std::vector<core::SpaceRecord> sp = {room("big", 0, 6, 0, 10, 3.0),
+                                       room("strip", -0.2, 0.6, 10, 12, 3.0)};
+  sp[0].ceiling_planes = {slope_plane(0.0, 45.0, 1.5, 3.0)};
+  sp[1].ceiling_planes = {slope_plane(0.0, 45.0, 2.0, 3.0)};
+  // big: z at x = -0.2 is 3 - 1.7 = 1.3; strip: 3 - 2.2 = 0.8 > 0.1. The
+  // shared line (area-weighted, 1.5 + 0.5 * 1.6 / 61.6) stays near 1.5:
+  // fine. Raise the strip's floor so the shared plane would meet it.
+  sp[1].z_floor = 1.25;
+  sp[1].ceiling_planes = {slope_plane(0.0, 45.0, 1.1, 3.0)};
+  const auto st = geometry::regularise_roof(sp, {0, 1}, {});
+  CHECK(st.reverted == 1);
+  CHECK_THAT(eaves_line(sp[1].ceiling_planes[0], 3.0), WithinAbs(1.1, 1e-9));
+}
+
+TEST_CASE("SlopedCeilings_RoofRegularise_PeaksComeDownLoweredCeilingsStay",
+          "[sloped_ceilings][roof_regularise]") {
+  // One roof: two offices at 3.0 m, a stair shaft whose top peaks at 3.5 m
+  // (Sygehusgrunden S3-20: the kink), and a corridor with a lowered ceiling
+  // at 2.6 m, seen, under the same slope.
+  std::vector<core::SpaceRecord> sp = {
+      room("office", 0, 6, 0, 4, 3.0), room("office2", 0, 6, 4, 8, 3.0),
+      room("stair", 0, 6, 8, 10, 3.5), room("corridor", 0, 6, 10, 12, 2.6)};
+  for (auto &s : sp)
+    s.ceiling_planes = {slope_plane(0.0, 45.0, 1.5, 3.0)};
+  const auto st = geometry::regularise_roof(sp, {0, 1, 2, 3}, {});
+  CHECK_THAT(st.top_z, WithinAbs(3.0, 1e-9));
+  CHECK_THAT(sp[2].z_ceiling, WithinAbs(3.0, 1e-9)); // the peak is gone
+  CHECK_THAT(sp[3].z_ceiling, WithinAbs(2.6, 1e-9)); // seen, so it stays
+}
+
+TEST_CASE("SlopedCeilings_Eaves_NoWallAtTheFacadeIsAnEave",
+          "[segmentation][spaces][sloped][eaves]") {
+  // reusex-wyi0: the attic of SlopeRunsOnToTheKneeWall, but the north
+  // facade's knee wall was never detected (seen too little): where the
+  // room's north slope comes down to its outline at y = 6 there is an eave
+  // with no wall. The south facade has its wall; the room's south edge
+  // (y = 1) has the strip outside it, no facade.
+  Scene sc;
+  attic_ceiling(sc, 0.0, 8.0, 1.0, 6.0, [](double, double) { return false; });
+  sc.floor(0.1, 7.9, 1.1, 5.9);
+  sc.floor(0.1, 7.9, 0.1, 0.9);
+  wall_along_x(sc, 0.0, 8.0, 0.0, [](double) { return 0.55; }, 1.0);
+  wall_along_x(sc, 0.0, 8.0, 1.0, [](double) { return 1.55; }, 1.0);
+  std::vector<core::SpaceRecord> spaces = {
+      poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5),
+      poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5)};
+  const std::vector<core::WallRecord> walls = {facade("w-s", 0, 0, 8, 0)};
+  const std::vector<int> labels = {1, 2, 3};
+  const std::vector<int> label_storeys(labels.size(), 0);
+  const auto stats = geometry::fit_sloped_ceilings(
+      spaces, {storey()}, sc.cloud, sc.normals, sc.labels, labels,
+      label_storeys, {}, &walls);
+  const auto room_edges = core::roof_edges(spaces[0]);
+  REQUIRE(room_edges.eaves.size() == 1);
+  CHECK(stats.eaves == 1);
+  const auto &e = room_edges.eaves[0];
+  CHECK_THAT(e.a[1], WithinAbs(6.0, 1e-6));
+  CHECK_THAT(e.b[1], WithinAbs(6.0, 1e-6));
+  CHECK_THAT(std::abs(e.b[0] - e.a[0]), WithinAbs(8.0, 1e-6));
+  // The strip's eave has its wall.
+  CHECK(core::roof_edges(spaces[1]).eaves.empty());
+
+  // An outline that recedes from the eave for more than kEaveMergeGap
+  // (2 m; a wide bay of furniture): two eaves, each on the outline, none
+  // across the gap. A shorter recess is bridged: one wall, simpler.
+  auto notched = spaces;
+  notched[0] = poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5);
+  notched[0].polygon.outer = {{0, 1},     {8, 1},   {8, 6}, {5.5, 6},
+                              {5.5, 5.6}, {2, 5.6}, {2, 6}, {0, 6}};
+  notched[1] = poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5);
+  geometry::fit_sloped_ceilings(notched, {storey()}, sc.cloud, sc.normals,
+                                sc.labels, labels, label_storeys, {}, &walls);
+  const auto n_edges = core::roof_edges(notched[0]);
+  REQUIRE(n_edges.eaves.size() == 2);
+  for (const auto &x : n_edges.eaves) {
+    CHECK_THAT(x.a[1], WithinAbs(6.0, 1e-6));
+    const double lo = std::min(x.a[0], x.b[0]), hi = std::max(x.a[0], x.b[0]);
+    CHECK((hi <= 2.0 + 1e-6 || lo >= 5.5 - 1e-6));
+  }
+  auto recess = spaces;
+  recess[0] = poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5);
+  recess[0].polygon.outer = {{0, 1},   {8, 1},   {8, 6}, {4, 6},
+                             {4, 5.6}, {3, 5.6}, {3, 6}, {0, 6}};
+  recess[1] = poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5);
+  geometry::fit_sloped_ceilings(recess, {storey()}, sc.cloud, sc.normals,
+                                sc.labels, labels, label_storeys, {}, &walls);
+  REQUIRE(core::roof_edges(recess[0]).eaves.size() == 1);
+}
+
+TEST_CASE("SlopedCeilings_Eaves_DormerBayOutsideEverySpaceJoinsIt",
+          "[segmentation][spaces][sloped][eaves]") {
+  // reusex-f2lv: the dormer attic of DormerRisesThroughTheSlope, but the
+  // room's outline stops short of the bay (x 3..5, y 0..1), as on
+  // Sygehusgrunden's storey 3, where the dormer ceilings sit under the
+  // band-rooms' ceiling height. The bay joins the room: floor and volume.
+  constexpr double zd = 1.6, depth = zd - 0.55;
+  const auto in_dormer = [&](double x, double y) {
+    return x > 3.0 && x < 5.0 && y < depth;
+  };
+  Scene sc;
+  attic_ceiling(sc, 0.0, 8.0, 0.0, 6.0, in_dormer);
+  sc.ceiling(
+      3.0, 5.0, 0.0, depth, [&](double, double) { return zd; },
+      [](double, double) { return 4u; },
+      [](double, double) { return Eigen::Vector3d(0, 0, -1); });
+  for (const double xc : {3.0, 5.0})
+    for (double y = 0.025; y < depth; y += 0.05)
+      for (double z = 0.55 + y; z < zd; z += 0.05)
+        sc.add(xc, y, z, {xc < 4.0 ? 1.0 : -1.0, 0, 0}, 0);
+  sc.floor(0.1, 7.9, 0.1, 5.9);
+  wall_along_x(
+      sc, 0.0, 8.0, 0.0,
+      [](double x) { return x > 3.0 && x < 5.0 ? zd : 0.55; }, 1.0);
+  wall_along_x(sc, 0.0, 8.0, 6.0, [](double) { return 0.55; }, -1.0);
+
+  auto room = poly_room("room", 0.0, 8.0, 0.0, 6.0, 2.5);
+  room.polygon.outer = {{0, 0}, {3, 0}, {3, 1}, {5, 1},
+                        {5, 0}, {8, 0}, {8, 6}, {0, 6}};
+  room.area = 48.0 - 2.0;
+  std::vector<core::SpaceRecord> spaces = {room};
+  const std::vector<core::WallRecord> walls = {facade("w-s", 0, 0, 8, 0),
+                                               facade("w-n", 8, 6, 0, 6)};
+  const std::vector<int> labels = {1, 2, 3, 4};
+  const std::vector<int> label_storeys(labels.size(), 0);
+  const auto stats = geometry::fit_sloped_ceilings(
+      spaces, {storey()}, sc.cloud, sc.normals, sc.labels, labels,
+      label_storeys, {}, &walls);
+  REQUIRE(stats.dormers == 1);
+  CHECK(stats.dormer_bays == 1);
+  const auto &r = spaces[0];
+  // The bay's middle is the room's now, from the wall's inner face in.
+  CHECK(geometry_test_inside(r, 4.0, 0.5));
+  CHECK_FALSE(geometry_test_inside(r, 4.0, 0.05));
+  CHECK_THAT(r.area, WithinAbs(46.0 + 2.0 * 0.85, 0.15));
+  CHECK(r.volume > 0.0);
 }
