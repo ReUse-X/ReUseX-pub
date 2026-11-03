@@ -439,10 +439,14 @@ TEST_CASE("SlopedCeilings_RoofEdges_RoundTripInMetadata",
   d.z = 2.1;
   d.outline = {{1, 0}, {2.5, 0}, {2.5, 1}, {1, 1}};
   e.dormers = {d};
+  e.eaves = {{{3.15, -6.0}, {3.15, 0.5}}};
   core::SpaceRecord s;
   s.metadata = core::with_roof_edges(R"({"z_floor_cells": 12})", e);
   const auto back = core::roof_edges(s);
   REQUIRE(back.dormers.size() == 1);
+  REQUIRE(back.eaves.size() == 1);
+  CHECK(back.eaves[0].a[1] == -6.0);
+  CHECK(back.eaves[0].b[0] == 3.15);
   CHECK(back.knee_walls == e.knee_walls);
   CHECK(back.dormers[0].wall == "w1");
   CHECK(back.dormers[0].s1 == 2.5);
@@ -588,4 +592,63 @@ TEST_CASE("SlopedCeilings_RoofRegularise_PeaksComeDownLoweredCeilingsStay",
   CHECK_THAT(st.top_z, WithinAbs(3.0, 1e-9));
   CHECK_THAT(sp[2].z_ceiling, WithinAbs(3.0, 1e-9)); // the peak is gone
   CHECK_THAT(sp[3].z_ceiling, WithinAbs(2.6, 1e-9)); // seen, so it stays
+}
+
+TEST_CASE("SlopedCeilings_Eaves_NoWallAtTheFacadeIsAnEave",
+          "[segmentation][spaces][sloped][eaves]") {
+  // reusex-wyi0: the attic of SlopeRunsOnToTheKneeWall, but the north
+  // facade's knee wall was never detected (seen too little): where the
+  // room's north slope comes down to its outline at y = 6 there is an eave
+  // with no wall. The south facade has its wall; the room's south edge
+  // (y = 1) has the strip outside it, no facade.
+  Scene sc;
+  attic_ceiling(sc, 0.0, 8.0, 1.0, 6.0, [](double, double) { return false; });
+  sc.floor(0.1, 7.9, 1.1, 5.9);
+  sc.floor(0.1, 7.9, 0.1, 0.9);
+  wall_along_x(sc, 0.0, 8.0, 0.0, [](double) { return 0.55; }, 1.0);
+  wall_along_x(sc, 0.0, 8.0, 1.0, [](double) { return 1.55; }, 1.0);
+  std::vector<core::SpaceRecord> spaces = {
+      poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5),
+      poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5)};
+  const std::vector<core::WallRecord> walls = {facade("w-s", 0, 0, 8, 0)};
+  const std::vector<int> labels = {1, 2, 3};
+  const std::vector<int> label_storeys(labels.size(), 0);
+  const auto stats = geometry::fit_sloped_ceilings(
+      spaces, {storey()}, sc.cloud, sc.normals, sc.labels, labels,
+      label_storeys, {}, &walls);
+  const auto room_edges = core::roof_edges(spaces[0]);
+  REQUIRE(room_edges.eaves.size() == 1);
+  CHECK(stats.eaves == 1);
+  const auto &e = room_edges.eaves[0];
+  CHECK_THAT(e.a[1], WithinAbs(6.0, 1e-6));
+  CHECK_THAT(e.b[1], WithinAbs(6.0, 1e-6));
+  CHECK_THAT(std::abs(e.b[0] - e.a[0]), WithinAbs(8.0, 1e-6));
+  // The strip's eave has its wall.
+  CHECK(core::roof_edges(spaces[1]).eaves.empty());
+
+  // An outline that recedes from the eave for more than kEaveMergeGap
+  // (2 m; a wide bay of furniture): two eaves, each on the outline, none
+  // across the gap. A shorter recess is bridged: one wall, simpler.
+  auto notched = spaces;
+  notched[0] = poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5);
+  notched[0].polygon.outer = {{0, 1},     {8, 1},   {8, 6}, {5.5, 6},
+                              {5.5, 5.6}, {2, 5.6}, {2, 6}, {0, 6}};
+  notched[1] = poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5);
+  geometry::fit_sloped_ceilings(notched, {storey()}, sc.cloud, sc.normals,
+                                sc.labels, labels, label_storeys, {}, &walls);
+  const auto n_edges = core::roof_edges(notched[0]);
+  REQUIRE(n_edges.eaves.size() == 2);
+  for (const auto &x : n_edges.eaves) {
+    CHECK_THAT(x.a[1], WithinAbs(6.0, 1e-6));
+    const double lo = std::min(x.a[0], x.b[0]), hi = std::max(x.a[0], x.b[0]);
+    CHECK((hi <= 2.0 + 1e-6 || lo >= 5.5 - 1e-6));
+  }
+  auto recess = spaces;
+  recess[0] = poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5);
+  recess[0].polygon.outer = {{0, 1},   {8, 1},   {8, 6}, {4, 6},
+                             {4, 5.6}, {3, 5.6}, {3, 6}, {0, 6}};
+  recess[1] = poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5);
+  geometry::fit_sloped_ceilings(recess, {storey()}, sc.cloud, sc.normals,
+                                sc.labels, labels, label_storeys, {}, &walls);
+  REQUIRE(core::roof_edges(recess[0]).eaves.size() == 1);
 }
