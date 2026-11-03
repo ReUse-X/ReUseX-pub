@@ -216,7 +216,11 @@ only: `core/pose_blocks.hpp`, `core/pose_repair.hpp`,
   and the working edits; restoring one writes them back byte-identically,
   except that frames (and their edges) imported after the version was taken
   are left alone. A live state that is no version yet is recorded first
-  (`baseline` / `external`), so a restore never loses it.
+  (`baseline` / `external`), so a restore never loses it. A version's
+  `frames` / `edges` blobs store only what differs from its parent (a full
+  keyframe every 16 links, reusex-md4a), so its state is
+  `core::pose_version_state()`, never one row's blobs alone; versions are
+  never deleted, since a later delta needs its base.
 
 ### `graph_init` (`rux graph init`)
 
