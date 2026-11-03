@@ -742,7 +742,18 @@ flat; a detected space that carries a stored row's lock is fitted too, a
 locked row kept as stored keeps its own; eaves, reusex-ow8p: a plane a
 neighbour took (within 0.6 m) runs on into a space whose seen ceiling does
 not contradict it, `ceiling_fit.extended_from`, so the strip between a knee
-partition and the facade slopes down to the facade; the storey's walls
+partition and the facade slopes down to the facade; then the roof is
+simplified, reusex-p3gm, `geometry::regularise_roof`, `roof_*` keys, off
+with `--no-roof-regularise`: the storey's planes take one pitch (the
+area-weighted median, rounded to `roof_pitch_round_deg`, for planes within
+`roof_pitch_tol_deg`), directions within `roof_azimuth_deg` of the main
+plane's (or it turned by 90 deg) turn onto it, a side's planes whose eaves
+lines follow each other within `roof_merge_m` become one, and the tops of
+one roof (spaces sharing a plane or side by side) come down to its median
+from up to `roof_cap_merge_m` above, or up from `roof_cap_raise_m` below;
+what was fitted stays in `ceiling_fit.fitted` (`planes`, `z_ceiling`); a
+space the simplified roof would bring within 0.1 m of its floor keeps its
+fit; the storey's walls
 under a slope, outside it, are measured against it from the cloud, and
 the space's `metadata.roof` lists its knee walls (top at the slope) and
 dormers (`core::RoofEdges`: wall, stretch, flat ceiling height, plan)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the

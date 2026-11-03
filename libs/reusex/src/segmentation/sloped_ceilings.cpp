@@ -20,10 +20,12 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -213,6 +215,289 @@ struct Buckets {
 };
 
 } // namespace
+
+// ── Roof regularisation (reusex-p3gm) ───────────────────────────────────────
+
+namespace {
+
+/// The value at half the total weight of @p v (value, weight); the lower
+/// one on a tie, so the result is one of the values.
+double weighted_median(std::vector<std::pair<double, double>> v) {
+  std::sort(v.begin(), v.end());
+  double total = 0.0;
+  for (const auto &x : v)
+    total += x.second;
+  double acc = 0.0;
+  for (const auto &x : v) {
+    acc += x.second;
+    if (acc >= 0.5 * total - 1e-12)
+      return x.first;
+  }
+  return v.back().first;
+}
+
+/// The area and area centroid of ring @p r (vertex mean when degenerate).
+std::pair<double, Eigen::Vector2d>
+ring_area_centroid(const std::vector<core::PlanPoint> &r) {
+  double a2 = 0.0, cx = 0.0, cy = 0.0;
+  for (std::size_t i = 0; i < r.size(); ++i) {
+    const auto &p = r[i], &q = r[(i + 1) % r.size()];
+    const double c = p[0] * q[1] - q[0] * p[1];
+    a2 += c;
+    cx += (p[0] + q[0]) * c;
+    cy += (p[1] + q[1]) * c;
+  }
+  if (std::abs(a2) < 1e-12) {
+    Eigen::Vector2d m = Eigen::Vector2d::Zero();
+    for (const auto &p : r)
+      m += Eigen::Vector2d(p[0], p[1]);
+    return {0.0,
+            r.empty() ? m : Eigen::Vector2d(m / static_cast<double>(r.size()))};
+  }
+  return {std::abs(0.5 * a2),
+          Eigen::Vector2d(cx / (3.0 * a2), cy / (3.0 * a2))};
+}
+
+} // namespace
+
+RoofRegulariseStats regularise_roof(std::vector<core::SpaceRecord> &spaces,
+                                    const std::vector<std::size_t> &which,
+                                    const SpacesOptions &o) {
+  if (!(o.roof_azimuth_deg >= 0.0 && o.roof_azimuth_deg < 45.0) ||
+      !(o.roof_pitch_round_deg >= 0.0) || !(o.roof_pitch_tol_deg >= 0.0) ||
+      !(o.roof_merge_m >= 0.0) || !(o.roof_cap_merge_m >= 0.0) ||
+      !(o.roof_cap_raise_m >= 0.0))
+    throw std::invalid_argument(
+        "regularise_roof: an option is out of range (roof_azimuth_deg in "
+        "[0, 45), the others >= 0)");
+  RoofRegulariseStats st;
+  if (!o.roof_regularise)
+    return st;
+  constexpr double kDeg = std::numbers::pi / 180.0;
+
+  // The distinct planes, each with the area and centroid of its spaces.
+  struct Plane {
+    core::CeilingPlane p;
+    double w = 0.0;
+    Eigen::Vector2d c = Eigen::Vector2d::Zero();
+    double az = 0.0, pitch = 0.0; ///< regularised [deg]
+    double d = 0.0;               ///< eaves line on the shared top
+    std::size_t group = 0;
+  };
+  std::vector<Plane> planes;
+  std::vector<std::pair<double, double>> caps; // z_ceiling, area
+  std::vector<std::size_t> sloped;             // into spaces
+  std::vector<double> areas;                   // of sloped
+  for (const auto si : which) {
+    const auto &s = spaces[si];
+    if (s.ceiling_planes.empty() || s.polygon.outer.size() < 3)
+      continue;
+    auto [area, c] = ring_area_centroid(s.polygon.outer);
+    if (s.area > 0.0)
+      area = s.area;
+    area = std::max(area, 1e-6);
+    caps.emplace_back(s.z_ceiling, area);
+    sloped.push_back(si);
+    areas.push_back(area);
+    for (const auto &p : s.ceiling_planes) {
+      auto it = std::find_if(planes.begin(), planes.end(), [&](const Plane &x) {
+        return same_plane(x.p, p);
+      });
+      if (it == planes.end()) {
+        planes.push_back({p});
+        it = planes.end() - 1;
+      }
+      it->w += area;
+      it->c += area * c;
+    }
+  }
+  if (planes.empty())
+    return st;
+  st.planes_in = static_cast<int>(planes.size());
+  for (auto &x : planes)
+    x.c /= x.w;
+
+  // The storey's pitch and top.
+  std::vector<std::pair<double, double>> pitches;
+  for (auto &x : planes) {
+    x.pitch = std::atan(std::hypot(x.p.slope[0], x.p.slope[1])) / kDeg;
+    x.az = std::atan2(x.p.slope[1], x.p.slope[0]) / kDeg;
+    pitches.emplace_back(x.pitch, x.w);
+  }
+  double pitch = weighted_median(pitches);
+  if (o.roof_pitch_round_deg > 0.0)
+    pitch = std::round(pitch / o.roof_pitch_round_deg) * o.roof_pitch_round_deg;
+  pitch = std::clamp(pitch, 1.0, core::kMaxCeilingSlopeDeg);
+  st.pitch_deg = pitch;
+  // The reference height the eaves lines are measured at (planes of one
+  // pitch keep their spacing at any height): the storey's median top.
+  const double top = weighted_median(caps);
+  st.top_z = top;
+
+  // Directions onto the heaviest plane's grid; pitches onto the storey's.
+  std::size_t heaviest = 0;
+  for (std::size_t k = 1; k < planes.size(); ++k)
+    if (planes[k].w > planes[heaviest].w + 1e-9)
+      heaviest = k;
+  const double phi0 = planes[heaviest].az;
+  for (auto &x : planes) {
+    const double r = x.az - phi0;
+    const double k = std::round(r / 90.0);
+    if (std::abs(r - 90.0 * k) <= o.roof_azimuth_deg)
+      x.az = phi0 + 90.0 * k;
+    // One direction, one value: (-180, 180].
+    x.az = std::remainder(x.az, 360.0);
+    if (x.az <= -180.0)
+      x.az += 360.0;
+    if (std::abs(x.pitch - pitch) <= o.roof_pitch_tol_deg)
+      x.pitch = pitch;
+    // Same height over its spaces' centroid, now on the new direction and
+    // pitch: where it reaches the top.
+    const Eigen::Vector2d u(std::cos(x.az * kDeg), std::sin(x.az * kDeg));
+    const double t = std::tan(x.pitch * kDeg);
+    const double zc = x.p.z_at(x.c.x(), x.c.y());
+    x.d = u.dot(x.c) + (top - zc) / t;
+  }
+
+  // Sides (one direction, one pitch); within a side, planes whose eaves
+  // lines follow each other within roof_merge_m are one.
+  std::vector<std::size_t> order(planes.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  std::stable_sort(
+      order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        const auto &x = planes[a], &y = planes[b];
+        return std::tie(x.az, x.pitch, x.d) < std::tie(y.az, y.pitch, y.d);
+      });
+  std::vector<core::CeilingPlane> merged;
+  std::size_t i = 0;
+  while (i < order.size()) {
+    std::size_t j = i + 1;
+    const auto &first = planes[order[i]];
+    while (j < order.size()) {
+      const auto &prev = planes[order[j - 1]], &cur = planes[order[j]];
+      if (std::abs(cur.az - first.az) > 1e-9 ||
+          std::abs(cur.pitch - first.pitch) > 1e-9)
+        break;
+      if (cur.d - prev.d > o.roof_merge_m)
+        break;
+      ++j;
+    }
+    double sw = 0.0, sd = 0.0;
+    for (std::size_t k = i; k < j; ++k) {
+      sw += planes[order[k]].w;
+      sd += planes[order[k]].w * planes[order[k]].d;
+    }
+    const double d = sd / sw;
+    const Eigen::Vector2d u(std::cos(first.az * kDeg),
+                            std::sin(first.az * kDeg));
+    const double t = std::tan(first.pitch * kDeg);
+    core::CeilingPlane p;
+    p.at = {u.x() * d, u.y() * d, top};
+    p.slope = {t * u.x(), t * u.y()};
+    for (std::size_t k = i; k < j; ++k)
+      planes[order[k]].group = merged.size();
+    merged.push_back(p);
+    i = j;
+  }
+  st.planes_out = static_cast<int>(merged.size());
+  {
+    std::set<std::pair<long long, long long>> sides;
+    for (const auto &x : planes)
+      sides.emplace(std::llround(x.az * 1e6), std::llround(x.pitch * 1e6));
+    st.sides = static_cast<int>(sides.size());
+  }
+
+  // One roof: sloped spaces that share a merged plane or stand side by side
+  // (within kNeighbourGap); each roof gets one flat top, the area-weighted
+  // median of its spaces' tops, for those within roof_cap_merge_m of it.
+  const auto group_of = [&](const core::CeilingPlane &p) {
+    const auto it =
+        std::find_if(planes.begin(), planes.end(),
+                     [&](const Plane &x) { return same_plane(x.p, p); });
+    return it->group;
+  };
+  std::vector<std::size_t> roof(sloped.size());
+  std::iota(roof.begin(), roof.end(), std::size_t{0});
+  const auto find = [&](std::size_t a) {
+    while (roof[a] != a)
+      a = roof[a] = roof[roof[a]];
+    return a;
+  };
+  for (std::size_t a = 0; a < sloped.size(); ++a)
+    for (std::size_t b = a + 1; b < sloped.size(); ++b) {
+      const auto &sa = spaces[sloped[a]], &sb = spaces[sloped[b]];
+      bool shared = false;
+      for (const auto &p : sa.ceiling_planes)
+        for (const auto &q : sb.ceiling_planes)
+          shared |= group_of(p) == group_of(q);
+      if (shared ||
+          ring_gap(sa.polygon.outer, sb.polygon.outer) <= kNeighbourGap)
+        roof[find(a)] = find(b);
+    }
+  std::map<std::size_t, std::vector<std::pair<double, double>>> roof_caps;
+  for (std::size_t a = 0; a < sloped.size(); ++a)
+    roof_caps[find(a)].emplace_back(spaces[sloped[a]].z_ceiling, areas[a]);
+  std::map<std::size_t, double> roof_top;
+  for (const auto &[r, v] : roof_caps)
+    roof_top[r] = weighted_median(v);
+
+  // Each space onto the merged planes and its roof's top, unless that would
+  // bring its ceiling down to its floor.
+  for (std::size_t a = 0; a < sloped.size(); ++a) {
+    const auto si = sloped[a];
+    auto &s = spaces[si];
+    const double my_top = roof_top[find(a)];
+    auto trial = s;
+    trial.ceiling_planes.clear();
+    for (const auto &p : s.ceiling_planes) {
+      const auto &q = merged[group_of(p)];
+      if (std::none_of(trial.ceiling_planes.begin(), trial.ceiling_planes.end(),
+                       [&](const auto &x) { return same_plane(x, q); }))
+        trial.ceiling_planes.push_back(q);
+    }
+    // A top above the roof's comes down to it (a peak, a kink); one below
+    // it is raised only a little: a lowered ceiling (a corridor's) is seen.
+    if ((s.z_ceiling >= my_top && s.z_ceiling - my_top <= o.roof_cap_merge_m) ||
+        (s.z_ceiling < my_top && my_top - s.z_ceiling <= o.roof_cap_raise_m))
+      trial.z_ceiling = my_top;
+    if (std::any_of(s.polygon.outer.begin(), s.polygon.outer.end(),
+                    [&](const auto &v) {
+                      return core::ceiling_at(trial, v[0], v[1]) <
+                             s.z_floor + kMinHeadroom;
+                    })) {
+      debug("spaces: space {}: the regularised roof would meet its floor at a "
+            "polygon vertex; it keeps its fitted ceiling",
+            s.guid);
+      ++st.reverted;
+      continue;
+    }
+    const bool same =
+        trial.z_ceiling == s.z_ceiling &&
+        trial.ceiling_planes.size() == s.ceiling_planes.size() &&
+        std::equal(trial.ceiling_planes.begin(), trial.ceiling_planes.end(),
+                   s.ceiling_planes.begin(), [](const auto &a, const auto &b) {
+                     return same_plane(a, b);
+                   });
+    if (same)
+      continue;
+    nlohmann::json fit = nlohmann::json::object();
+    try {
+      if (!s.metadata.empty()) {
+        const auto j = nlohmann::json::parse(s.metadata);
+        if (j.is_object() && j.contains("ceiling_fit") &&
+            j.at("ceiling_fit").is_object())
+          fit = j.at("ceiling_fit");
+      }
+    } catch (const std::exception &) {
+    }
+    fit["fitted"] = {{"planes", core::encode_ceiling_planes(s.ceiling_planes)},
+                     {"z_ceiling", s.z_ceiling}};
+    trial.metadata = with_fit(s.metadata, fit);
+    s = std::move(trial);
+    ++st.spaces;
+  }
+  return st;
+}
 
 SlopedCeilingStats fit_sloped_ceilings(
     std::vector<core::SpaceRecord> &spaces,
@@ -654,6 +939,25 @@ SlopedCeilingStats fit_sloped_ceilings(
       }
       stats.planes += static_cast<int>(from.size());
       revolume(si, {});
+    }
+
+    // (1b) The roof as few planes (reusex-p3gm): one top per roof, one
+    // plane per side, one pitch. After the slopes are carried on (that
+    // checks the fitted planes against what is seen), before the facades
+    // are measured against them.
+    if (o.roof_regularise) {
+      const auto rr = regularise_roof(spaces, mine, o);
+      for (const auto si : mine)
+        if (!spaces[si].ceiling_planes.empty())
+          revolume(si, {});
+      stats.roof_planes_fitted += rr.planes_in;
+      stats.roof_planes += rr.planes_out;
+      if (rr.planes_in > 0)
+        info("spaces: storey {}: roof regularised: {} fitted plane(s) -> {} "
+             "({} side(s)) at {:.1f} deg, top {:.2f} m; {} space(s) changed, "
+             "{} kept as fitted (the floor would be hit)",
+             st.idx, rr.planes_in, rr.planes_out, rr.sides, rr.pitch_deg,
+             rr.top_z, rr.spaces, rr.reverted);
     }
 
     // (2) The facades under each slope, measured: knee walls and dormers.
