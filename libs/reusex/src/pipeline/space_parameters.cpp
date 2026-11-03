@@ -164,6 +164,35 @@ const std::vector<SpaceParameter> &space_parameter_table() {
       {"ceiling_min_gain", "--ceiling-min-gain", "Sloped plane gain",
        "... and must cut the ceiling model's error by this share.",
        SPACE(ceiling_min_gain), 0.0, 1.0},
+      // --- roof regularisation (regularise_roof, reusex-p3gm)
+      {"roof_regularise", "--no-roof-regularise", "Simplify the roof",
+       "Fit a storey's sloped ceilings as few planes: one flat top per roof, "
+       "one plane per side, one pitch; off, every space keeps the planes it "
+       "took.",
+       SPACE(roof_regularise), std::nullopt, std::nullopt},
+      {"roof_azimuth_deg", "--roof-azimuth", "Roof direction snap [deg]",
+       "Planes rising within this of the main roof plane's direction (or it "
+       "turned by 90 deg) turn onto it.",
+       SPACE(roof_azimuth_deg), 0.0, 44.0},
+      {"roof_pitch_round_deg", "--roof-pitch-round", "Roof pitch step [deg]",
+       "The storey's pitch (the area-weighted median) is rounded to a "
+       "multiple of this (0 = not rounded) ...",
+       SPACE(roof_pitch_round_deg), 0.0, 45.0},
+      {"roof_pitch_tol_deg", "--roof-pitch-tol", "Roof pitch snap [deg]",
+       "... and planes within this of it take it.", SPACE(roof_pitch_tol_deg),
+       0.0, 90.0},
+      {"roof_merge_m", "--roof-merge", "Roof plane merge [m]",
+       "Planes of one roof side whose eaves lines follow each other within "
+       "this are one plane.",
+       SPACE(roof_merge_m), 0.0, 10.0},
+      {"roof_cap_merge_m", "--roof-top-merge", "Roof top lowered [m]",
+       "Sloped spaces of one roof whose flat top lies at most this above the "
+       "roof's (the area-weighted median) come down to it ...",
+       SPACE(roof_cap_merge_m), 0.0, 10.0},
+      {"roof_cap_raise_m", "--roof-top-raise", "Roof top raised [m]",
+       "... and those at most this below it go up to it (a lowered ceiling "
+       "further down stays).",
+       SPACE(roof_cap_raise_m), 0.0, 10.0},
       // --- identity (core::SpaceIdentityOptions)
       {"guid_match_m", "--guid-match", "Same space within [m]",
        "A re-detected space keeps the GUID of the stored one of its storey "

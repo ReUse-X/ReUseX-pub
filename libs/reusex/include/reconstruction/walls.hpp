@@ -453,7 +453,15 @@ struct WallSegment {
   int points_lo = 0, points_hi = 0; ///< face points over [s0, s1]
   double seen_share = -1.0;         ///< set by join_walls (W3.4)
   bool low_seen = false;            ///< seen_share below min_seen_share (W3.4)
-  WallRegularisation regularised;   ///< set by regularise_walls()
+  /// The seen share of each cell_m column of the face area (as seen_share,
+  /// per column): seen_columns[k] covers s in [(seen_i0 + k) * seen_cell_m,
+  /// (seen_i0 + k + 1) * seen_cell_m). Set by join_walls (W3.4); empty when
+  /// not measured. Tells regularise_walls() a seen stretch from one bridged
+  /// over or teed on past the evidence (reusex-p3gm).
+  std::vector<float> seen_columns;
+  int seen_i0 = 0;
+  double seen_cell_m = 0.0;
+  WallRegularisation regularised; ///< set by regularise_walls()
 };
 
 /// The walls of a storey from its faces and their pairing (W3.3): a pair is

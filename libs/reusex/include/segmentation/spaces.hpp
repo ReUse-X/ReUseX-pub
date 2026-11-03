@@ -77,6 +77,8 @@
 #include "reusex/core/solid_model.hpp"
 #include "reusex/segmentation/band_rooms.hpp"
 
+#include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace reusex::geometry {
@@ -195,6 +197,30 @@ struct SpacesOptions {
   /// ... and cut the L1 error of the ceiling model over the space's ceiling
   /// observations by at least this share to be taken.
   double ceiling_min_gain = 0.3;
+
+  // --- Roof regularisation (regularise_roof(), reusex-p3gm) ---------------
+  /// Fit a storey's sloped ceilings as few planes: one flat top, one plane
+  /// per roof side, one pitch (simpler over closer to the scan). Off: every
+  /// space keeps the planes it took.
+  bool roof_regularise = true;
+  /// Planes whose uphill directions lie within this of the heaviest plane's
+  /// (or of it turned by a multiple of 90 deg) turn onto it [deg].
+  double roof_azimuth_deg = 20.0;
+  /// The storey's pitch: the area-weighted median of its planes' pitches,
+  /// rounded to a multiple of this (5 deg: 43.5 -> 45; 0 = not rounded);
+  /// planes within roof_pitch_tol_deg of it take it [deg].
+  double roof_pitch_round_deg = 5.0;
+  double roof_pitch_tol_deg = 10.0;
+  /// Planes of one roof side whose eaves lines (where they reach the flat
+  /// top) lie within this of each other, one after the other, are one
+  /// plane, at their area-weighted mean line [m].
+  double roof_merge_m = 0.75;
+  /// Sloped spaces of one roof (sharing a plane or side by side) whose flat
+  /// top (z_ceiling) lies at most roof_cap_merge_m above the roof's (the
+  /// area-weighted median) or at most roof_cap_raise_m below it share it: a
+  /// peak comes down, a lowered ceiling (a corridor's, seen) stays [m].
+  double roof_cap_merge_m = 0.8;
+  double roof_cap_raise_m = 0.15;
 };
 
 /// What polygonise_spaces() did on one storey.
@@ -271,13 +297,50 @@ SpaceHeightStats measure_space_heights(
 
 /// What fit_sloped_ceilings() did.
 struct SlopedCeilingStats {
-  int candidates = 0;    ///< ceiling planes tilted within the bounds
-  int spaces_sloped = 0; ///< spaces that took at least one plane
-  int planes = 0;        ///< planes taken, over all spaces
-  int extended = 0;      ///< planes carried into a neighbouring space
-  int knee_walls = 0;    ///< facade walls found under a slope
-  int dormers = 0;       ///< dormers found
+  int candidates = 0;         ///< ceiling planes tilted within the bounds
+  int spaces_sloped = 0;      ///< spaces that took at least one plane
+  int planes = 0;             ///< planes taken, over all spaces
+  int extended = 0;           ///< planes carried into a neighbouring space
+  int knee_walls = 0;         ///< facade walls found under a slope
+  int dormers = 0;            ///< dormers found
+  int roof_planes_fitted = 0; ///< distinct planes before regularise_roof()
+  int roof_planes = 0;        ///< ... and after
 };
+
+/// What regularise_roof() did on one storey.
+struct RoofRegulariseStats {
+  int planes_in = 0;  ///< distinct planes before
+  int planes_out = 0; ///< distinct planes after
+  int sides = 0;      ///< roof sides (uphill directions)
+  int spaces = 0;     ///< spaces whose ceiling changed
+  int reverted = 0;   ///< spaces left as fitted (the floor would be hit)
+  double pitch_deg = std::numeric_limits<double>::quiet_NaN();
+  double top_z = std::numeric_limits<double>::quiet_NaN(); ///< shared cap
+};
+
+/// Roof regularisation (reusex-p3gm, maintainer 2026-11-03: "the kink in
+/// the middle of the roof looks wrong. We are probably trying to fit the
+/// geometry too closely"): the sloped ceilings of the spaces @p which of
+/// @p spaces (one storey, level frame) as few planes. The storey's pitch is
+/// the area-weighted median pitch of its planes, rounded to
+/// roof_pitch_round_deg; planes within roof_pitch_tol_deg take it. Uphill
+/// directions within roof_azimuth_deg of the heaviest plane's, or of it
+/// turned by a multiple of 90 deg, turn onto it; planes of one direction and
+/// pitch form a roof side. Each plane keeps its height over the centroid of
+/// the spaces that took it; a side's planes whose eaves lines (where they
+/// reach the shared top) follow each other within roof_merge_m become one
+/// plane at their area-weighted mean line. One roof is the sloped spaces
+/// that share a plane or stand side by side (within 0.6 m); its spaces'
+/// flat tops at most roof_cap_merge_m above (roof_cap_raise_m below) their
+/// area-weighted median take it
+/// (st.top_z: the storey's median, over every roof). A space
+/// whose regularised ceiling would come within 0.1 m of its floor at a
+/// polygon vertex keeps what it was fitted. A changed space keeps what was
+/// fitted in its metadata ("ceiling_fit"."fitted": {"planes", "z_ceiling"});
+/// its volume is left to the caller.
+RoofRegulariseStats regularise_roof(std::vector<core::SpaceRecord> &spaces,
+                                    const std::vector<std::size_t> &which,
+                                    const SpacesOptions &options = {});
 
 /// Sloped ceilings (reusex-546): give each space the tilted ceiling planes
 /// that explain its ceiling. Candidates are the planes of @p plane_labels

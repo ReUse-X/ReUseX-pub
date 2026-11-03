@@ -155,15 +155,152 @@ TEST_CASE("plan regularisation: two partitions side by side never merge",
   }
 }
 
-TEST_CASE("plan regularisation: walls seen from opposite sides stay apart",
+TEST_CASE("plan regularisation: walls seen from opposite sides continue as "
+          "one wall",
           "[plan_regularise]") {
-  // Continuing, 0.1 m apart, but one seen from -d and one from +d: no face
-  // in common, so nothing says they are one line.
+  // Continuing, 0.1 m apart, one seen from -d and one from +d: no face in
+  // common, but their bodies line up within a wall's thickness -- one wall
+  // seen from either room (reusex-p3gm: simpler over closer to the scan).
   WallGraph g;
   g.walls = {wall(kX, 0, 0.0, 0.0, 3.0, -1), wall(kX, 0, 0.1, 3.5, 6.0, +1)};
   std::vector<WallGraph> graphs{g};
-  CHECK(regularise_walls(graphs, {storey(0)}).lines == 0);
-  CHECK(graphs[0].walls[1].axis_offset == 0.1);
+  const auto res = regularise_walls(graphs, {storey(0)});
+  CHECK(res.lines == 1);
+  CHECK(res.continuous_lines == 1);
+  CHECK_THAT(graphs[0].walls[0].axis_offset,
+             WithinAbs(graphs[0].walls[1].axis_offset, 1e-9));
+
+  // With the continuity snap off, nothing says they are one line.
+  std::vector<WallGraph> off{g};
+  PlanRegulariseOptions o;
+  o.plan_continuous_m = 0.0;
+  CHECK(regularise_walls(off, {storey(0)}, o).lines == 0);
+  CHECK(off[0].walls[1].axis_offset == 0.1);
+}
+
+TEST_CASE("plan regularisation: a wall continuing with an offset becomes one "
+          "continuous wall",
+          "[plan_regularise]") {
+  // Sygehusgrunden storey 1 by S1-09 / S1-10 (reusex-p3gm): one wall comes
+  // as two measured runs end to end, their axes 0.28 m apart. Family 0
+  // (normal x, s = y).
+  WallGraph g;
+  g.walls = {wall(kX, 0, 0.00, 0.0, 4.2, 0, 0.2),   // 0: 4.2 m
+             wall(kX, 0, 0.28, 4.3, 12.0, 0, 0.3),  // 1: 7.7 m, offset
+             wall(kX, 0, 0.90, 12.5, 15.0, 0, 0.2), // 2: 0.9 m off: a step
+             wall(kY, 1, 4.2, -3.0, -0.2, 0, 0.2)}; // 3: a partition at y 4.2
+  g.joins = {{3, 0, WallJoinKind::tee, WallEnd::end, WallEnd::path}};
+  std::vector<WallGraph> graphs{g};
+  const auto res = regularise_walls(graphs, {storey(0)});
+  const auto &w = graphs[0].walls;
+  CHECK(res.continuous_lines == 1);
+  // One axis, nearer the longer run: the length-weighted mean.
+  CHECK_THAT(w[0].axis_offset, WithinAbs(w[1].axis_offset, 1e-9));
+  CHECK_THAT(w[1].axis_offset,
+             WithinAbs((0.0 * 4.2 + 0.28 * 7.7) / (4.2 + 7.7), 1e-9));
+  // Each keeps its thickness.
+  CHECK_THAT(w[0].face_hi - w[0].face_lo, WithinAbs(0.2, 1e-9));
+  CHECK_THAT(w[1].face_hi - w[1].face_lo, WithinAbs(0.3, 1e-9));
+  const auto &rules = w[0].regularised.rules;
+  CHECK(std::find(rules.begin(), rules.end(), "continuous") != rules.end());
+  // A real step (farther than plan_continuous_m) stays where it is.
+  CHECK(w[2].axis_offset == 0.90);
+  // The partition's tee end follows the moved line.
+  CHECK_THAT(w[3].s1, WithinAbs(-w[0].axis_offset, 1e-9));
+}
+
+TEST_CASE("plan regularisation: a double wall becomes one wall",
+          "[plan_regularise]") {
+  // Family 1 (normal y, s = -x). Two one-sided walls over the same stretch,
+  // seen from either side (Sygehusgrunden storey 1, y 7.48 / 7.49): one
+  // wall. Two more bounding a 0.25 m body: one measured wall. A one-sided
+  // face on a measured wall's face: that wall.
+  WallGraph g;
+  g.walls = {
+      wall(kY, 1, 7.49, -5.5, -2.2, -1),    // 0: seen from -y
+      wall(kY, 1, 7.48, -5.35, -2.2, +1),   // 1: seen from +y, 1 cm off
+      wall(kY, 1, 0.00, -6.0, 0.0, -1),     // 2: seen from -y at 0
+      wall(kY, 1, 0.25, -5.0, 0.0, +1),     // 3: seen from +y at 0.25
+      wall(kY, 1, 3.00, -6.0, 0.0, 0, 0.2), // 4: measured, faces 2.9/3.1
+      wall(kY, 1, 3.08, -4.0, -1.0, +1),    // 5: its +y face again
+      wall(kX, 0, 0.0, -1.0, 8.0, 0, 0.2),  // 6: crosses nothing
+  };
+  // Wall 6 (x = 0, s = y) tees into wall 3 and wall 1's end.
+  g.joins = {{6, 3, WallJoinKind::tee, WallEnd::start, WallEnd::path},
+             {1, 6, WallJoinKind::tee, WallEnd::start, WallEnd::path}};
+  std::vector<WallGraph> graphs{g};
+  const auto res = regularise_walls(graphs, {storey(0)});
+  const auto &w = graphs[0].walls;
+  CHECK(res.walls_merged == 3);
+  REQUIRE(w.size() == 4);
+  // 0+1: one wall over the union of the stretches.
+  CHECK_THAT(w[0].s0, WithinAbs(-5.5, 1e-9));
+  CHECK_THAT(w[0].s1, WithinAbs(-2.2, 1e-9));
+  CHECK_THAT(w[0].axis_offset, WithinAbs(7.485, 1e-9));
+  // 2+3: a measured wall between the two faces.
+  CHECK_THAT(w[1].face_lo, WithinAbs(0.0, 1e-9));
+  CHECK_THAT(w[1].face_hi, WithinAbs(0.25, 1e-9));
+  CHECK_THAT(w[1].thickness, WithinAbs(0.25, 1e-9));
+  CHECK_THAT(w[1].axis_offset, WithinAbs(0.125, 1e-9));
+  CHECK_FALSE(w[1].assumed);
+  // 4 keeps 5.
+  CHECK_THAT(w[2].axis_offset, WithinAbs(3.0, 1e-9));
+  const auto &rules = w[1].regularised.rules;
+  CHECK(std::find(rules.begin(), rules.end(), "double") != rules.end());
+  // The joins follow the kept walls.
+  REQUIRE(graphs[0].joins.size() == 2);
+  CHECK(graphs[0].joins[0].a == 3);
+  CHECK(graphs[0].joins[0].b == 1);
+  CHECK(graphs[0].joins[1].a == 0);
+  CHECK(graphs[0].joins[1].b == 3);
+
+  // Off: nothing merges.
+  std::vector<WallGraph> off{g};
+  PlanRegulariseOptions o;
+  o.plan_double_m = 0.0;
+  CHECK(regularise_walls(off, {storey(0)}, o).walls_merged == 0);
+  CHECK(off[0].walls.size() == g.walls.size());
+}
+
+TEST_CASE("plan regularisation: a wall stub across a corridor is cut",
+          "[plan_regularise]") {
+  // A corridor 2.2 m wide between x = 0 and x = 2.2 (family 0, s = y). A
+  // room wall along y = 1 (family 1, s = -x) runs from x = -4 through the
+  // corridor wall at x = 0 to the far one: the stretch across the corridor
+  // is a phantom that splits it in two (Sygehusgrunden storey 1). A wall
+  // along y = 5 crossing x = 0 with 3 m either side is a real crossing (the
+  // east corridor wall ends at y = 4).
+  WallGraph g;
+  g.walls = {wall(kX, 0, 0.0, -5.0, 9.0, 0, 0.15), // 0: west corridor wall
+             wall(kX, 0, 2.2, -5.0, 4.0, 0, 0.15), // 1: east corridor wall
+             wall(kY, 1, 1.0, -2.2, 4.0, -1),      // 2: x -4..2.2
+             wall(kY, 1, 5.0, -3.0, 3.0, 0, 0.2)}; // 3: x -3..3
+  g.joins = {{2, 1, WallJoinKind::tee, WallEnd::start, WallEnd::path}};
+  std::vector<WallGraph> graphs{g};
+  const auto res = regularise_walls(graphs, {storey(0)});
+  const auto &w = graphs[0].walls;
+  CHECK(res.walls_trimmed == 1);
+  // Wall 2 now ends on the west corridor wall (s = -x = 0).
+  CHECK_THAT(w[2].s0, WithinAbs(0.0, 1e-9));
+  CHECK_THAT(w[2].s1, WithinAbs(4.0, 1e-9));
+  const auto &rules = w[2].regularised.rules;
+  CHECK(std::find(rules.begin(), rules.end(), "trim") != rules.end());
+  // Its join moved from the far wall to the one it ends on.
+  REQUIRE(graphs[0].joins.size() == 1);
+  CHECK(graphs[0].joins[0].a == 2);
+  CHECK(graphs[0].joins[0].b == 0);
+  CHECK(graphs[0].joins[0].at_a == WallEnd::start);
+  CHECK(graphs[0].joins[0].at_b == WallEnd::path);
+  // The real crossing stays.
+  CHECK(w[3].s0 == -3.0);
+  CHECK(w[3].s1 == 3.0);
+
+  // Off: nothing is cut.
+  std::vector<WallGraph> off{g};
+  PlanRegulariseOptions o;
+  o.plan_stub_m = 0.0;
+  CHECK(regularise_walls(off, {storey(0)}, o).walls_trimmed == 0);
+  CHECK(off[0].walls[2].s0 == -2.2);
 }
 
 TEST_CASE("plan regularisation: a facade stacks over three storeys",
@@ -369,4 +506,67 @@ TEST_CASE("plan regularisation: openings are found on the measured wall",
   WallRecord plain = w;
   plain.metadata = R"({"low_seen_share":true})";
   CHECK(reusex::geometry::measured_walls({plain})[0].y0 == 0.06);
+}
+
+TEST_CASE("plan regularisation: the stub cut is the side not seen",
+          "[plan_regularise]") {
+  // Sygehusgrunden storey 1, y 7.5: a room wall seen over 0.9 m west of the
+  // corridor wall (x = 0), carried 2.2 m across the corridor to x = 2.2 by a
+  // doorway bridge. The seen profile says which side is evidence: the long,
+  // unseen side goes, though it is the longer one.
+  WallGraph g;
+  g.walls = {wall(kX, 0, 0.0, -5.0, 9.0, 0, 0.15), // 0: west corridor wall
+             wall(kX, 0, 2.2, -5.0, 4.0, 0, 0.15), // 1: east corridor wall
+             wall(kY, 1, 1.0, -2.2, 0.9, -1)};     // 2: x -0.9..2.2
+  // s = -x: columns of 0.25 m from s = -2.25; seen over s in [0, 0.9].
+  auto &w = g.walls[2];
+  w.seen_cell_m = 0.25;
+  w.seen_i0 = -9;
+  w.seen_columns.assign(13, 0.0f);
+  for (int i = 0; i <= 3; ++i)
+    w.seen_columns[static_cast<size_t>(i + 9)] = 0.6f;
+  std::vector<WallGraph> graphs{g};
+  const auto res = regularise_walls(graphs, {storey(0)});
+  CHECK(res.walls_trimmed == 1);
+  CHECK_THAT(graphs[0].walls[2].s0, WithinAbs(0.0, 1e-9));
+  CHECK_THAT(graphs[0].walls[2].s1, WithinAbs(0.9, 1e-9));
+
+  // Seen on both sides: a real crossing, nothing is cut.
+  std::vector<WallGraph> both{g};
+  std::fill(both[0].walls[2].seen_columns.begin(),
+            both[0].walls[2].seen_columns.end(), 0.5f);
+  CHECK(regularise_walls(both, {storey(0)}).walls_trimmed == 0);
+}
+
+TEST_CASE("plan regularisation: an unseen fragment across a corridor goes",
+          "[plan_regularise]") {
+  // Sygehusgrunden storey 1, y -6: a one-sided wall only across the
+  // corridor (x 0..2.2), wall columns at its ends only (the corridor walls'
+  // own points): it splits the corridor. The same wall seen over its
+  // stretch (a corridor door wall) stays, and so does a measured one.
+  WallGraph g;
+  g.walls = {wall(kX, 0, 0.0, -9.0, 9.0, 0, 0.15),  // 0
+             wall(kX, 0, 2.2, -9.0, 9.0, 0, 0.15),  // 1
+             wall(kY, 1, -6.0, -2.2, 0.0, +1),      // 2: x 0..2.2, unseen
+             wall(kY, 1, 6.0, -2.2, 0.0, +1),       // 3: x 0..2.2, seen
+             wall(kY, 1, 0.0, -2.2, 0.0, 0, 0.12)}; // 4: measured
+  for (size_t i : {2u, 3u, 4u}) {
+    auto &w = g.walls[i];
+    w.seen_cell_m = 0.25;
+    w.seen_i0 = -9;
+    w.seen_columns.assign(9, i == 2 ? 0.05f : 0.7f);
+    w.seen_columns.front() = w.seen_columns.back() = 0.8f;
+  }
+  g.walls[4].seen_columns.assign(9, 0.05f);
+  g.joins = {{2, 0, WallJoinKind::tee, WallEnd::end, WallEnd::path},
+             {2, 1, WallJoinKind::tee, WallEnd::start, WallEnd::path},
+             {3, 1, WallJoinKind::tee, WallEnd::start, WallEnd::path}};
+  std::vector<WallGraph> graphs{g};
+  const auto res = regularise_walls(graphs, {storey(0)});
+  CHECK(res.walls_dropped == 1);
+  REQUIRE(graphs[0].walls.size() == 4);
+  CHECK(graphs[0].walls[2].axis_offset == 6.0);
+  REQUIRE(graphs[0].joins.size() == 1);
+  CHECK(graphs[0].joins[0].a == 2);
+  CHECK(graphs[0].joins[0].b == 1);
 }
