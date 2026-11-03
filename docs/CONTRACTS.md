@@ -108,7 +108,32 @@ above the offset watermark.  The one table without a FK constraint
 
 **Re-import guard.** Importing the same `source_path` a second time creates a
 second scan by design (e.g. re-processing after editing the RTABMap DB).
-A `WARN` is logged; the import is not blocked.
+A `WARN` is logged; the import is not blocked. Each scan's `provenance`
+records the session's node count and first / last stamp (`fingerprint`) and
+the file's content fingerprint (`file_fingerprint`,
+`core/file_fingerprint.hpp`).
+
+**Append mode** (`rux import rtabmap --append`, job stage `import_rtabmap`
+with `append_session: true` -- the default for the job; reusex-y2lg.30).
+Several RTAB-Map sessions go into one project one by one, without
+rtabmap-reprocess; each starts **detached** where its own map put it:
+
+- a session the project already holds (same `fingerprint` or
+  `file_fingerprint`) is refused (`io::DuplicateSessionError`, nothing
+  written; ruxd answers 409);
+- RTAB-Map's raw odometry of the new session is replaced by `odometry_init`
+  edges from the imported poses (`core::rebuild_odometry`, reusex-y2lg.16,
+  reusex-33j);
+- the odometry link to the previous session is cut in the working pose
+  edits (a `reject_edge` `detach-<a>-<b>`, project setting
+  `pose_edits.working`), so optimize does not bridge it from the initial
+  poses, so the session's block reads `detached`;
+- a pose version `import` is recorded (`pose_versions`).
+
+The job stage `import_rtabmap` reads `path` (absolute, or relative to the
+project's directory and confined to it like `import_ifc`'s) and
+`append_session`; it writes one `pipeline_log` row of its own besides the
+importer's `import` row.
 
 **Pose graph.** `rux import rtabmap` stores **every** link in the RTABMap
 database's link table (not just its optimized graph's) into
@@ -158,6 +183,45 @@ training views) keep using `aligned` panoramas only. No storey is stored per
 panorama: the storey is derived from the pose with `core::which_storey` (see
 `storeys`).
 
+### Editor writes: blocks, block transform, odometry rebuild, pose versions (rux graph blocks / block-transform / init --rebuild-odometry / versions)
+
+<!-- No backticks in this heading: not a pipeline stage. -->
+
+The scan-repair editor's writes (reusex-y2lg; ruxd `/posegraph/...`). Core
+only: `core/pose_blocks.hpp`, `core/pose_repair.hpp`,
+`core/pose_versions.hpp`, `core/working_pose_edits.hpp`.
+
+| | |
+|---|---|
+| Consumes | `sensor_frames` (poses, `initial_transform`, `scan_id`, `timestamp`), `pose_graph_edges`, `pose_blocks` |
+| Produces | `pose_blocks` (the block list); `sensor_frames.transform` / `initial_transform` (block transform); `pose_graph_edges` odometry rows (`odometry_init`, rebuild and every re-seed); project settings `pose_edits.working` (holds, detach cuts) and `pose_versions.current`; one `pose_versions` row per step |
+| Checks   | blocks partition each session's posed frames (no overlap, no gap, no block across sessions); a transform needs a non-empty selection and a rigid delta; undo / redo refuse when there is nothing to go to |
+
+- **Blocks** are stored per project; without stored blocks every session is
+  one block. A block is `detached` exactly when the working edits hold the
+  `reject_edge` `detach-<a>-<b>` for the odometry link at its start (a
+  detach, or a session imported with `--append`); detach also rejects the
+  stored row, and `rebuild_odometry` keeps such a joint cut. A detach /
+  attach is a pose version, so an undo re-attaches the block.
+- **Block transform** (`mode: reseed`, default): every posed frame's
+  `initial_transform := transform`, then the moved poses go into both, and
+  the odometry of every consecutive in-session pair is re-derived from the
+  new seed (imported rows replaced, confirmed / user-rejected rows and
+  detached joints kept; reusex-xmt). The move fades out over `blend_frames`
+  at a joint to an attached neighbour (smoothstep, rotation slerped) and is
+  rigid at a session boundary or a detached joint. `mode: local` changes
+  only the selection's `transform`. A preview writes nothing.
+- **Pose versions** snapshot every frame's `transform` / `initial_transform`,
+  the whole `pose_graph_edges` table (ids, measurements, statuses, metrics)
+  and the working edits; restoring one writes them back byte-identically,
+  except that frames (and their edges) imported after the version was taken
+  are left alone. A live state that is no version yet is recorded first
+  (`baseline` / `external`), so a restore never loses it. A version's
+  `frames` / `edges` blobs store only what differs from its parent (a full
+  keyframe every 16 links, reusex-md4a), so its state is
+  `core::pose_version_state()`, never one row's blobs alone; versions are
+  never deleted, since a later delta needs its base.
+
 ### `graph_init` (`rux graph init`)
 
 Snapshot each frame's current pose into `sensor_frames.initial_transform` and
@@ -167,7 +231,10 @@ odometry edge with a measurement. On a graph that already has odometry, a
 plain run only fills gaps: frames without a snapshot and consecutive in-scan
 pairs without odometry (e.g. a newly imported scan). `--force` re-snapshots
 every frame and replaces the `auto` `odometry_init` edges; confirmed and
-rejected edges are kept.
+rejected edges are kept. `--rebuild-odometry` (`core::rebuild_odometry`,
+see "Editor writes" above) replaces the odometry of every in-session pair
+from the initial poses, imported RTAB-Map rows included, and records a pose
+version.
 
 | | |
 |---|---|
@@ -198,6 +265,13 @@ factor per active `pose_graph_edges` row, writes poses to
 `sensor_frames.transform` and residual/deviation/seed-disagreement back to
 every edge. Repeatable; never adds, removes or re-statuses edges (`rux
 register`: joint pairwise registration, writes poses only).
+
+`optimize` (the job stage and `rux optimize` without `--edits`) solves with
+the project's working pose edits, project setting `pose_edits.working`
+(`io::stored_pose_edits`; the editor's detach cuts and holds, reusex-fkqd);
+`--edits FILE` replaces them for that run. A detached part that no loop,
+relative edit or hold ties back fails the solve naming the `detach-<a>-<b>`
+cut; it is never bridged from the initial poses.
 
 | | |
 |---|---|
@@ -661,7 +735,13 @@ the flat part, or the highest point of the planes over the space, and
 `volume` is integrated under the sloped ceiling; the fit is in `metadata` as
 `ceiling_fit`; `fit_ceiling_planes` off, or no candidate, leaves the ceiling
 flat; a detected space that carries a stored row's lock is fitted too, a
-locked row kept as stored keeps its own), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
+locked row kept as stored keeps its own; eaves, reusex-ow8p: a plane a
+neighbour took (within 0.6 m) runs on into a space whose seen ceiling does
+not contradict it, `ceiling_fit.extended_from`, so the strip between a knee
+partition and the facade slopes down to the facade; the storey's walls
+under a slope, outside it, are measured against it from the cloud, and
+the space's `metadata.roof` lists its knee walls (top at the slope) and
+dormers (`core::RoofEdges`: wall, stretch, flat ceiling height, plan)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
 `rooms` label it was made from), `confidence` (the share of its area that
 comes from wall-bounded faces, the rest is raster) and `metadata` (that share
 and the furniture holes). A boundary names its space by row (it goes with
@@ -726,7 +806,12 @@ ceiling of the spaces beside it at each point of its axis, every bend kept
 thickness; the roof over a sloped space (and the walls whose top follows it)
 is the layer between its ceiling and the ceiling raised by
 `slab_thickness_m`, on whichever storey the space is (the flat roof stays
-on the top storey). A
+on the top storey). Eaves (reusex-ow8p, a space's `metadata.roof`): a
+detected unlocked knee wall not beside its space takes the space's ceiling
+on its axis as its top; over a dormer's stretch the wall rises to the
+dormer's ceiling; the dormer gets a flat roof at that height over its plan
+and its wall, cut out of the sloped roof it rises through, and a space's
+volume takes in the part of a dormer's plan inside its polygon. A
 wall of unknown thickness (`-1`, its axis is the seen face) grows
 `unknown_wall_thickness_m` away from the space it faces; wall ends at a
 corner or tee run on to the far face of the wall they meet.
@@ -1047,6 +1132,57 @@ job. The meshes' parameters carry the resolved source (server, project,
 model, version, root object). The run's `StageResult::outputs` (both import
 stages) are `{table, storeys|walls|openings|spaces, rows written}` and
 `{mesh, <name>}` for every mesh saved, so a client refreshes what changed.
+
+**Bundle-only versions** (reusex-fo1t). A version whose `referencedObject`
+is `bundle.<project>.<model>.<version>` has no legacy object graph: its data
+is Speckle's Parquet artefact bundle. With DuckDB (`REUSEX_HAVE_DUCKDB`) the
+stage reads it (`io/speckle_bundle.hpp`): the listing `GET
+/api/v2/projects/{p}/models/{m}/versions/{v}/artifacts` (with the token),
+every non-viewer `*.parquet` file from its presigned URL **without** the
+token and **without following redirects** (https on the server's own host
+or an object-storage host: `*.digitaloceanspaces.com`, `*.amazonaws.com`,
+`*.r2.cloudflarestorage.com`, `storage.googleapis.com`,
+`*.blob.core.windows.net`), all files together under the reader's download
+limit, into a private temporary directory read by an in-memory DuckDB
+locked to that directory (no extension autoload or install, external
+access off). The tables are projected onto the Revit connector's tree
+(`project_bundle_to_revit_tree`: EAV paths as nested properties,
+`properties.Parameters.*` as Revit parameters, LEVEL nodes + `ON_LEVEL` as
+`levelProxies`, `HOSTED_ON` as `parentApplicationId`, `SUBELEMENT` as
+nesting, DEFINITION / INSTANCE nodes as instance proxies, SGEO meshes as
+`displayValue`, a mesh shared by several objects once behind an identity
+instance) and mapped by the same `import_revit()`, so the stored rows and
+meshes follow the rules above. The meshes' parameters carry `format:
+bundle`.
+
+Bounds (`io/speckle_bundle_options.hpp`, set by the front end through
+`StageExecutorOptions::speckle_bundle_read` / `speckle_bundle_projection`;
+defaults for a shared server): DuckDB 1 GB / 2 threads, 2 M rows per table,
+1 GiB of strings and blobs, 50 M mesh values, 50 M vertices once every
+instance placement is baked, 20 M property rows, 50 M JSON nodes; a
+property path over 32 segments or 1 KiB is dropped (counted, warn). Past a
+budget, or on a cancel (checked per DuckDB chunk and per object), the stage
+fails before anything is stored. `import_revit` refuses a tree nesting
+deeper than 256 levels (both formats).
+
+Levels. A level no object is `ON_LEVEL` of is dropped; levels sharing a
+name are renamed `<name> (2)`, ... in (elevation, node id) order; a
+`Levels` object of the same name, when the bundle carries one, lends its
+applicationId and properties (`LEVEL_IS_BUILDING_STORY`, elementId, IFC
+GUID). Without one -- the bundles seen so far -- every level becomes a
+storey and its GUID derives from the level name, while the classic path
+derives it from the level's applicationId: the same Revit model imported
+both ways gets different storey GUIDs (walls, openings and spaces agree;
+reusex-aqho). Duplicate object applicationIds get `#2`, `#3` in object
+order; a placement without a definition is skipped (counted).
+
+Without DuckDB the stage fails with `io::speckle::BundleVersionUnsupported`
+right after the version query: nothing is downloaded and no table or mesh
+is touched (a run with a `pipeline_log` row records the failure there). Its
+message starts with `kBundleUnsupportedMessage` ("Denne Speckle-version er
+gemt i Speckles nye bundle-format, som ReUseX endnu ikke kan læse.") and
+ends with the tag `[speckle-bundle-unsupported]`, which a front end may
+match on. The SDKs' `version.received` mutation is never sent.
 
 **The token is never a parameter.** Job parameters are persisted (job
 history, `pipeline_log.parameters`), so the Speckle token is resolved per run

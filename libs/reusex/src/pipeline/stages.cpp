@@ -30,6 +30,7 @@
 #include "reusex/geometry/transform_utils.hpp"
 #include "reusex/io/ifc.hpp"
 #include "reusex/io/reusex.hpp"
+#include "reusex/io/rtabmap.hpp"
 #include "reusex/io/solid_model_json.hpp"
 #include "reusex/io/speckle_revit.hpp"
 #include "reusex/reconstruction/mesh.hpp"
@@ -88,7 +89,7 @@ struct StageName {
 // used in `ruxd`'s HTTP contract (docs/gui/openapi.yaml, in its own repo) and
 // `contract` selects the input check run before the stage executes
 // (docs/CONTRACTS.md).
-constexpr std::array<StageName, 16> kStages{{
+constexpr std::array<StageName, 17> kStages{{
     {JobStage::clouds, "clouds", "cloud_reconstruction",
      core::PipelineStage::clouds, false},
     {JobStage::planes, "planes", "segment_planes", core::PipelineStage::planes,
@@ -156,6 +157,10 @@ constexpr std::array<StageName, 16> kStages{{
     {JobStage::import_speckle, "import_speckle", "import_speckle",
      core::PipelineStage::import, true},
     {JobStage::import_ifc, "import_ifc", "import_ifc",
+     core::PipelineStage::import, false},
+    // Not cancellable: RTAB-Map loads the whole graph at once, then one
+    // pass stores the frames (minutes for a large session).
+    {JobStage::import_rtabmap, "import_rtabmap", "import_rtabmap",
      core::PipelineStage::import, false},
 }};
 
@@ -1715,8 +1720,8 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
              planes->size(), cloud->size());
       else
         geometry::fit_sloped_ceilings(sp.spaces, storeys, *cloud, *normals,
-                                      *planes, labels, label_storeys,
-                                      so.spaces);
+                                      *planes, labels, label_storeys, so.spaces,
+                                      &walls);
     }
   }
   info("spaces: {} matched a stored space by footprint ({} locked, {} took "
@@ -1992,6 +1997,8 @@ StageResult run_import_speckle(ProjectDB &db, const StageContext &ctx,
   imp.timeout_s = options.speckle_timeout_s;
   imp.connect_filter = options.speckle_connect_filter;
   imp.curl_setup = options.speckle_curl_setup;
+  imp.bundle_read = options.speckle_bundle_read;
+  imp.bundle_projection = options.speckle_bundle_projection;
 
   const auto skipped = [](const io::speckle::RevitImportStats &s) {
     info("import_speckle: {} levels ({} reference levels, no storey); "
@@ -2075,6 +2082,42 @@ StageResult run_import_ifc(ProjectDB &db, const StageContext &ctx,
       import_outputs(r.stored, r.mesh_names));
 }
 
+StageResult run_import_rtabmap(ProjectDB &db, const StageContext &ctx,
+                               const StageExecutorOptions &options) {
+  RtabmapStageOptions o;
+  std::filesystem::path file;
+  try {
+    o = rtabmap_options_from_parameters(ctx.parameters);
+    file = resolve_import_path(ctx.project, o.path,
+                               options.allow_paths_outside_project,
+                               "import_rtabmap");
+  } catch (const std::invalid_argument &e) {
+    return StageResult::invalid(e.what());
+  }
+  io::ImportRtabmapResult r;
+  try {
+    r = io::import_rtabmap(db, file,
+                           {.append_session = o.append_session,
+                            .author = ctx.submitted_by,
+                            .source_name = o.source_name});
+  } catch (const io::DuplicateSessionError &e) {
+    return StageResult::invalid(e.what());
+  }
+  if (r.frames == 0)
+    warn("import_rtabmap: {} held no frame with a colour image; nothing "
+         "imported",
+         file.filename().string());
+  return StageResult::success(
+      fmt::format("{}: session (scan) {}, {} frames (nodes {}..{}), {} "
+                  "odometry + {} loop edges{}",
+                  file.filename().string(), r.scan_id, r.frames, r.first_node,
+                  r.last_node, r.odometry_edges, r.loop_edges,
+                  r.version_id ? fmt::format("; pose version {}", *r.version_id)
+                               : std::string()),
+      {{"table", "sensor_frames", r.frames},
+       {"table", "pose_graph_edges", r.odometry_edges + r.loop_edges}});
+}
+
 StageResult dispatch(ProjectDB &db, const StageContext &ctx, const json &params,
                      const StageExecutorOptions &options, int log_id) {
   switch (ctx.stage) {
@@ -2126,6 +2169,8 @@ StageResult dispatch(ProjectDB &db, const StageContext &ctx, const json &params,
     return run_import_speckle(db, ctx, options, log_id);
   case JobStage::import_ifc:
     return run_import_ifc(db, ctx, options, log_id);
+  case JobStage::import_rtabmap:
+    return run_import_rtabmap(db, ctx, options);
   }
   return StageResult::failure("unknown stage");
 }

@@ -18,6 +18,7 @@
 // (segmentation / reconstruction / slam / io) — it is the one place allowed to
 // link several of them at once. See docs/STANDARDS.md §1.
 
+#include "reusex/io/speckle_bundle_options.hpp"
 #include "reusex/io/speckle_transport.hpp"
 
 #include <atomic>
@@ -65,6 +66,9 @@ enum class JobStage {
   /// IFC file -> imported storeys / walls / openings / spaces +
   /// `imported/ifc/<class>` meshes (needs web-ifc, REUSEX_HAVE_WEB_IFC).
   import_ifc,
+  /// RTAB-Map session database -> sensor frames of one more session,
+  /// appended detached (io::import_rtabmap, append_session; reusex-y2lg.30).
+  import_rtabmap,
 };
 
 /// Canonical lower-case stage name (the token used on the wire and the CLI).
@@ -210,6 +214,13 @@ struct StageExecutorOptions {
   /// (io::speckle::CurlSetup: e.g. no redirects). Empty = none. Not
   /// consulted when speckle_download replaces the network read.
   io::speckle::CurlSetup speckle_curl_setup;
+  /// Bounds of reading a Speckle bundle-only version: DuckDB memory /
+  /// threads, rows per table, bytes of strings and blobs, and the
+  /// projection's mesh / vertex / row / node budgets
+  /// (io/speckle_bundle_options.hpp; the defaults suit a shared server).
+  /// The cancel tokens in them are ignored: the run's own is used.
+  io::speckle::BundleReadOptions speckle_bundle_read;
+  io::speckle::BundleProjectionOptions speckle_bundle_projection;
 
   /// import_ifc may read a file outside the project's directory. Off (the
   /// default), the path must resolve -- symlinks followed -- inside the

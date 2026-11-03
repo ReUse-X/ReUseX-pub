@@ -20,6 +20,7 @@
 // in `pipeline_log.parameters`. A `token` key is refused (kSecretParameterKey).
 
 #include <reusex/io/ifc.hpp>
+#include <reusex/io/rtabmap.hpp>
 #include <reusex/io/speckle_revit.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
 
@@ -106,7 +107,30 @@ IfcStageOptions ifc_options_from_parameters(std::string_view parameters);
 /// The JSON parameters for @p options (path only when set).
 std::string ifc_parameters_json(const IfcStageOptions &options);
 
-/// True for import_speckle / import_ifc.
+// --- import_rtabmap ---------------------------------------------------------
+
+/// Everything the import_rtabmap stage is tuned by (reusex-y2lg.30).
+struct RtabmapStageOptions {
+  /// The RTAB-Map .db: absolute, or relative to the project's directory
+  /// (the same rule as IfcStageOptions::path).
+  std::string path;
+  /// io::ImportRtabmapOptions::append_session; on by default for a job: the
+  /// web editor appends sessions one by one.
+  bool append_session = true;
+  /// io::ImportRtabmapOptions::source_name: the uploaded file's own name.
+  std::string source_name;
+};
+
+using RtabmapParameter = ImportParameter<RtabmapStageOptions>;
+
+const std::vector<RtabmapParameter> &rtabmap_parameter_table();
+const std::vector<ParameterDescriptor> &rtabmap_stage_parameters();
+/// @throws std::invalid_argument as ifc_options_from_parameters().
+RtabmapStageOptions
+rtabmap_options_from_parameters(std::string_view parameters);
+std::string rtabmap_parameters_json(const RtabmapStageOptions &options);
+
+/// True for import_speckle / import_ifc / import_rtabmap.
 bool is_import_stage(JobStage stage);
 
 /// An import stage's parameters re-serialised from its table: validated
@@ -140,5 +164,11 @@ bool default_speckle_server_allowed(const std::string &url,
 std::filesystem::path resolve_ifc_path(const std::filesystem::path &project,
                                        const std::string &path,
                                        bool allow_outside_project = false);
+
+/// resolve_ifc_path() for any import stage; @p stage names it in messages.
+std::filesystem::path resolve_import_path(const std::filesystem::path &project,
+                                          const std::string &path,
+                                          bool allow_outside_project,
+                                          std::string_view stage);
 
 } // namespace reusex::pipeline

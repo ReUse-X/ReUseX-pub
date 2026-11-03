@@ -5,6 +5,7 @@
 #include "io/speckle_revit.hpp"
 
 #include "bim_mapping.hpp"
+#include "io/speckle_bundle.hpp"
 
 #include "core/ProjectDB.hpp"
 #include "core/logging.hpp"
@@ -37,6 +38,15 @@ constexpr const char *kDefaultGuidNamespace =
     "3d1c7a9e-5b0f-4e2a-9c4d-7f6e2b8a1c35";
 
 constexpr int kMaxInstanceDepth = 8;
+/// Deepest JSON nesting the tree walkers follow: deeper input (server data)
+/// is refused with a clear error rather than recursed into.
+constexpr int kMaxTreeDepth = 256;
+
+[[noreturn]] void too_deep(const char *where) {
+  throw std::runtime_error(fmt::format(
+      "import_revit: the model nests deeper than {} levels ({}); refused",
+      kMaxTreeDepth, where));
+}
 /// An opening narrower than this along its host is not an opening [m].
 constexpr double kMinOpeningWidthM = 0.05;
 
@@ -83,6 +93,8 @@ std::string str_of(const json &obj, const char *key) {
     return {};
   if (it->is_string())
     return it->get<std::string>();
+  if (it->is_structured())
+    return {}; // never dump a (possibly deep) object or array
   return it->dump();
 }
 
@@ -114,15 +126,17 @@ bool is_element(const json &obj) {
 
 /// The Revit parameter with internal name @p idn anywhere under
 /// properties.Parameters ({value, name, units, internalDefinitionName}).
-const json *find_param(const json &node, std::string_view idn) {
+const json *find_param(const json &node, std::string_view idn, int depth = 0) {
   if (!node.is_object())
     return nullptr;
+  if (depth > kMaxTreeDepth)
+    too_deep("parameters");
   auto it = node.find("internalDefinitionName");
   if (it != node.end() && node.contains("value")) {
     return (it->is_string() && it->get<std::string>() == idn) ? &node : nullptr;
   }
   for (const auto &[k, v] : node.items())
-    if (const json *p = find_param(v, idn))
+    if (const json *p = find_param(v, idn, depth + 1))
       return p;
   return nullptr;
 }
@@ -169,18 +183,20 @@ struct Geometry {
   double root_scale = 1.0;
   std::size_t proxies = 0, unresolved = 0;
 
-  void index(const json &node) {
+  void index(const json &node, int depth = 0) {
+    if (depth > kMaxTreeDepth)
+      too_deep("object index");
     if (node.is_object()) {
       auto it = node.find("applicationId");
       if (it != node.end() && it->is_string())
         by_app_id.emplace(it->get<std::string>(), &node);
       for (const auto &[k, v] : node.items())
         if (v.is_structured())
-          index(v);
+          index(v, depth + 1);
     } else if (node.is_array()) {
       for (const auto &v : node)
         if (v.is_structured())
-          index(v);
+          index(v, depth + 1);
     }
   }
 
@@ -404,11 +420,13 @@ RevitImport import_revit(const json &root, const RevitImportOptions &opt) {
   // ---- elements and their geometry
   std::vector<Element> walls, openings, rooms;
   bim::MeshMerger merger("imported/revit/"); // per-category meshes
-  std::function<void(const json &, const std::string &)> walk =
-      [&](const json &node, const std::string &parent) {
+  std::function<void(const json &, const std::string &, int)> walk =
+      [&](const json &node, const std::string &parent, int depth) {
+        if (depth > kMaxTreeDepth)
+          too_deep("elements");
         if (node.is_array()) {
           for (const auto &x : node)
-            walk(x, parent);
+            walk(x, parent, depth + 1);
           return;
         }
         if (!node.is_object())
@@ -445,11 +463,11 @@ RevitImport import_revit(const json &root, const RevitImportOptions &opt) {
             rooms.push_back(std::move(e));
         }
         if (auto it = node.find("elements"); it != node.end())
-          walk(*it, self);
+          walk(*it, self, depth + 1);
       };
   // Walk the root itself: a copy would leave Element::obj dangling.
   if (auto it = root.find("elements"); it != root.end())
-    walk(*it, std::string{});
+    walk(*it, std::string{}, 0);
   if (st.elements_bad_geometry > 0)
     core::warn("import_revit: {} elements have a mesh with an invalid face "
                "list (negative / out-of-range index); skipped",
@@ -921,16 +939,44 @@ import_speckle_revit(ProjectDB &db, const SpeckleRevitImportOptions &opt,
   core::info("import_speckle_revit: project {} model {} version {} ({}, {})",
              opt.project, opt.model, res.version.id,
              res.version.source_application, res.version.created_at);
+  // A bundle-only version (reusex-fo1t) has no object graph: its Parquet
+  // bundle is read through DuckDB when this build has it, and refused
+  // before anything is written to the project otherwise.
+  const bool bundle = res.version.is_bundle();
+  if (bundle && !has_bundle_support()) {
+    core::warn("import_speckle_revit: version {} is bundle-only and this "
+               "build has no DuckDB (REUSEX_HAVE_DUCKDB off)",
+               res.version.id);
+    throw BundleVersionUnsupported(res.version.referenced_object);
+  }
 
-  const json source = {{"source", "speckle"},
-                       {"server", reader.server_url()},
-                       {"project", opt.project},
-                       {"model", opt.model},
-                       {"version", res.version.id},
-                       {"root_object", res.version.referenced_object},
-                       {"source_application", res.version.source_application}};
+  json source = {{"source", "speckle"},
+                 {"server", reader.server_url()},
+                 {"project", opt.project},
+                 {"model", opt.model},
+                 {"version", res.version.id},
+                 {"root_object", res.version.referenced_object},
+                 {"source_application", res.version.source_application}};
+  if (bundle)
+    source["format"] = "bundle";
   auto fetch = [&]() {
     throw_if_cancelled("before the download");
+    if (bundle) {
+      BundleFetchReport report;
+      BundleReadOptions read = opt.bundle_read;
+      read.cancel = opt.cancel_token;
+      BundleProjectionOptions projection = opt.bundle_projection;
+      projection.cancel = opt.cancel_token;
+      json root =
+          fetch_bundle_tree(reader, opt.project, res.version.referenced_object,
+                            &report, read, projection);
+      throw_if_cancelled("after the download");
+      core::info("import_speckle_revit: bundle of {} files ({:.1f} MiB), {} "
+                 "objects, {} meshes",
+                 report.files, static_cast<double>(report.bytes) / (1 << 20),
+                 report.projection.objects, report.projection.meshes);
+      return root;
+    }
     const ObjectTree tree =
         reader.fetch_object_tree(opt.project, res.version.referenced_object);
     throw_if_cancelled("after the download");

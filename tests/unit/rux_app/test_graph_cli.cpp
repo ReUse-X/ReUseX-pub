@@ -13,6 +13,7 @@
 #include <optimize.hpp>
 
 #include <reusex/core/ProjectDB.hpp>
+#include <reusex/core/working_pose_edits.hpp>
 #include <reusex/slam/graph_discover.hpp>
 
 #include "../../support/pose_fixture.hpp"
@@ -22,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -167,4 +169,58 @@ TEST_CASE("GraphCli_Prune_RejectsUnknownTypeOrSource_AndLogsTheFilter",
   CHECK(p.at("deviation_above_deg").is_null());
   CHECK(p.at("include_confirmed") == false);
   CHECK(p.at("dry_run") == true);
+}
+
+namespace {
+
+/// Parse and run `rux -p <project> optimize <args...>`.
+bool run_optimize(const std::filesystem::path &project,
+                  std::vector<std::string> args) {
+  CLI::App app{"rux"};
+  auto global = std::make_shared<RuxOptions>();
+  app.add_option("-p,--project", global->project_db);
+  setup_subcommand_optimize(app, global);
+  args.insert(args.begin(), {"-p", project.string(), "optimize"});
+  std::vector<std::string> reversed(args.rbegin(), args.rend());
+  try {
+    app.parse(reversed);
+  } catch (const CLI::RuntimeError &) {
+    return false;
+  }
+  return true;
+}
+
+/// Six frames looking at one wall 1.5 m away (enough surfels to solve).
+void make_wall_chain(const std::filesystem::path &path) {
+  reusex::ProjectDB db(path);
+  for (int k = 0; k < 6; ++k)
+    db.save_sensor_frame(k, make_color(64, 48), make_depth(64, 48, 1.5),
+                         cv::Mat(), translation_pose(0.1 * k, 0, 0),
+                         make_intrinsics(64.0, 64.0, 32.0, 24.0, 64, 48),
+                         static_cast<double>(k));
+}
+
+} // namespace
+
+// reusex-fkqd: `rux optimize` without --edits solves with the project's
+// working pose edits (the editor's detach cuts and holds); --edits replaces
+// them for that run.
+TEST_CASE("OptimizeCli_WithoutEdits_UsesTheStoredWorkingEdits",
+          "[rux_app][cli][optimize][pose_edits]") {
+  TempPath tmp("test_optimize_cli_working_edits");
+  TempPath none("test_optimize_cli_no_edits", ".json");
+  make_wall_chain(tmp.path);
+  {
+    reusex::ProjectDB db(tmp.path);
+    reusex::core::put_working_pose_edit(
+        db, reusex::core::reject_odometry_edit(2, 3, "session 2"));
+  }
+  std::ofstream(none.path)
+      << R"({"schema":"reusex.pose_edits.v1","frame":"world","edits":[]})";
+
+  // The stored cut detaches frames 3..5 and nothing ties them back.
+  CHECK_FALSE(run_optimize(tmp.path, {"--min-observations", "2", "--dry-run"}));
+  // An explicit (empty) edits file replaces the working document.
+  CHECK(run_optimize(tmp.path, {"--min-observations", "2", "--dry-run",
+                                "--edits", none.path.string()}));
 }

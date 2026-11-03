@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "io/speckle_reader.hpp"
+#include "io/speckle_bundle.hpp"
 
 #include "core/logging.hpp"
 
@@ -13,11 +14,14 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -71,6 +75,55 @@ bool is_valid_speckle_id(std::string_view id) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
            (c >= 'A' && c <= 'Z');
   });
+}
+
+namespace {
+constexpr std::string_view kBundlePrefix = "bundle.";
+
+std::string bundle_unsupported_message(std::string_view reference) {
+  std::string shown(reference.substr(0, 200));
+  // Only the validated form is echoed verbatim; anything else could carry
+  // control characters into a log line.
+  if (!parse_bundle_reference(reference))
+    shown = "(ugyldig bundle-reference)";
+  return fmt::format(
+      "{} Vælg en ældre version af modellen, der er sendt i det klassiske "
+      "objektformat, eller eksportér modellen som IFC og importér den med "
+      "'rux import ifc'. (referencedObject: {}) {}",
+      kBundleUnsupportedMessage, shown, kBundleUnsupportedTag);
+}
+} // anonymous namespace
+
+std::optional<BundleReference> parse_bundle_reference(std::string_view ref) {
+  if (!ref.starts_with(kBundlePrefix))
+    return std::nullopt;
+  ref.remove_prefix(kBundlePrefix.size());
+  std::array<std::string_view, 3> parts;
+  for (std::size_t i = 0; i < parts.size(); ++i) {
+    const auto dot = ref.find('.');
+    const bool last = i + 1 == parts.size();
+    if (last != (dot == std::string_view::npos))
+      return std::nullopt; // too few or too many parts
+    parts[i] = ref.substr(0, dot);
+    if (!is_valid_speckle_id(parts[i]))
+      return std::nullopt;
+    if (!last)
+      ref.remove_prefix(dot + 1);
+  }
+  return BundleReference{std::string(parts[0]), std::string(parts[1]),
+                         std::string(parts[2])};
+}
+
+bool is_bundle_reference(std::string_view ref) {
+  return ref.starts_with(kBundlePrefix);
+}
+
+BundleVersionUnsupported::BundleVersionUnsupported(const std::string &reference)
+    : std::runtime_error(bundle_unsupported_message(reference)),
+      reference_(reference.substr(0, 200)) {}
+
+bool VersionInfo::is_bundle() const {
+  return is_bundle_reference(referenced_object);
 }
 
 bool is_query_document(std::string_view doc) {
@@ -160,8 +213,14 @@ std::string http_error_message(long status, const std::string &what,
     reason = "not authenticated — the token is missing or invalid";
   else if (status == 403)
     reason = fmt::format("token invalid or no access to project '{}'", project);
+  else if (status == 404 &&
+           body.find("BUNDLE_REFERENCE_NOT_FOUND") != std::string::npos)
+    reason =
+        fmt::format("{} {}", kBundleUnsupportedMessage, kBundleUnsupportedTag);
   else if (status == 404)
     reason = "not found — check the project and object ids";
+  else if (status >= 300 && status < 400)
+    reason = "redirect refused (bundle downloads do not follow redirects)";
   else
     reason = "unexpected response";
   constexpr std::size_t max_body = 300;
@@ -298,6 +357,15 @@ struct HttpRequest {
   long timeout_s = 0;                            ///< overall limit; 0 = default
   const ConnectFilter *connect_filter = nullptr; ///< unset/empty = none
   const CurlSetup *curl_setup = nullptr;         ///< unset/empty = none
+  /// The URL as messages show it (a presigned URL's query is its
+  /// signature); empty = `url`.
+  std::string shown_url;
+  /// Follow redirects (to https only). Off for presigned artifact URLs: a
+  /// redirect could leave the vetted storage host.
+  bool follow_redirects = true;
+  [[nodiscard]] const std::string &url_for_messages() const {
+    return shown_url.empty() ? url : shown_url;
+  }
 };
 
 /// "1.2.3.4:443" / "[::1]:80" for a refusal message.
@@ -376,7 +444,7 @@ std::string http_perform(const HttpRequest &req) {
   const bool plain_http = lower(req.url).rfind("http://", 0) == 0;
   curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, plain_http ? "http" : "https");
   curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, req.follow_redirects ? 1L : 0L);
   curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
   // Required for signal-based timeout to work in multithreaded programs.
   curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
@@ -430,7 +498,7 @@ std::string http_perform(const HttpRequest &req) {
     throw std::runtime_error(fmt::format(
         "Speckle {}: response exceeds the download limit of {} MiB ({}); "
         "raise SpeckleReader::set_max_download_bytes if this is expected",
-        req.what, req.max_bytes >> 20, req.url));
+        req.what, req.max_bytes >> 20, req.url_for_messages()));
   if (res == CURLE_ABORTED_BY_CALLBACK)
     throw std::runtime_error(fmt::format("Speckle {}: cancelled", req.what));
   if (res != CURLE_OK && !guard.refused.empty()) {
@@ -439,12 +507,12 @@ std::string http_perform(const HttpRequest &req) {
       refused += (refused.empty() ? "" : ", ") + a;
     throw std::runtime_error(
         fmt::format("Speckle {}: connection to {} refused by policy ({})",
-                    req.what, refused, req.url));
+                    req.what, refused, req.url_for_messages()));
   }
   if (res != CURLE_OK)
     throw std::runtime_error(fmt::format("Speckle {}: curl error: {} ({})",
                                          req.what, curl_easy_strerror(res),
-                                         req.url));
+                                         req.url_for_messages()));
   if (http_code < 200 || http_code >= 300)
     throw std::runtime_error(detail::http_error_message(
         http_code, req.what, req.project, sink.body));
@@ -1046,9 +1114,23 @@ VersionInfo SpeckleReader::latest_version(const std::string &project,
   return std::move(versions.front());
 }
 
+namespace {
+/// A bundle reference names no object: never send it to /objects.
+void refuse_bundle_reference(const std::string &object_id) {
+  if (!is_bundle_reference(object_id))
+    return;
+  if (!has_bundle_support())
+    throw BundleVersionUnsupported(object_id);
+  throw std::invalid_argument(
+      "Speckle: a bundle reference names no object; read the version with "
+      "fetch_bundle_tree()");
+}
+} // anonymous namespace
+
 ObjectTree
 SpeckleReader::fetch_object_tree(const std::string &project,
                                  const std::string &object_id) const {
+  refuse_bundle_reference(object_id);
   require_id(project, "project");
   require_id(object_id, "object");
   HttpRequest req;
@@ -1076,6 +1158,7 @@ SpeckleReader::fetch_object_tree(const std::string &project,
 
 json SpeckleReader::fetch_object(const std::string &project,
                                  const std::string &object_id) const {
+  refuse_bundle_reference(object_id);
   require_id(project, "project");
   require_id(object_id, "object");
   HttpRequest req;
@@ -1096,6 +1179,225 @@ json SpeckleReader::fetch_object(const std::string &project,
     throw std::runtime_error(fmt::format(
         "Speckle object fetch: invalid JSON for {}: {}", object_id, e.what()));
   }
+}
+
+// ============================================================
+// Bundle-only versions: artifact listing + presigned downloads
+// ============================================================
+
+namespace {
+
+struct UrlParts {
+  std::string scheme; ///< lower case
+  std::string host;   ///< lower case, "[...]" kept for IPv6
+  std::string port;
+};
+
+/// Split scheme://authority; nullopt for userinfo, whitespace / control
+/// characters or a malformed authority.
+std::optional<UrlParts> split_url(std::string_view url) {
+  for (const char c : url)
+    if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f || c == '\\')
+      return std::nullopt;
+  const auto sep = url.find("://");
+  if (sep == std::string_view::npos || sep == 0)
+    return std::nullopt;
+  UrlParts p;
+  p.scheme = lower(std::string(url.substr(0, sep)));
+  std::string_view rest = url.substr(sep + 3);
+  const std::string_view authority = rest.substr(0, rest.find_first_of("/?#"));
+  if (authority.empty() || authority.find('@') != std::string_view::npos)
+    return std::nullopt;
+  std::string_view host = authority, port;
+  if (authority.front() == '[') {
+    const auto close = authority.find(']');
+    if (close == std::string_view::npos)
+      return std::nullopt;
+    host = authority.substr(0, close + 1);
+    port = authority.substr(close + 1);
+  } else if (const auto colon = authority.find(':');
+             colon != std::string_view::npos) {
+    host = authority.substr(0, colon);
+    port = authority.substr(colon);
+  }
+  if (!port.empty()) {
+    if (port.front() != ':' || port.size() < 2 ||
+        !std::all_of(port.begin() + 1, port.end(),
+                     [](char c) { return c >= '0' && c <= '9'; }))
+      return std::nullopt;
+    port.remove_prefix(1);
+  }
+  if (host.empty())
+    return std::nullopt;
+  p.host = lower(std::string(host));
+  p.port = std::string(port);
+  return p;
+}
+
+bool host_is_or_under(const std::string &host, std::string_view base) {
+  if (host == base)
+    return true;
+  return host.size() > base.size() + 1 &&
+         host.compare(host.size() - base.size(), base.size(), base) == 0 &&
+         host[host.size() - base.size() - 1] == '.';
+}
+
+/// Object-storage hosts a Speckle server presigns artifact URLs for.
+constexpr std::array<std::string_view, 5> kStorageHostSuffixes = {
+    "digitaloceanspaces.com", "amazonaws.com", "r2.cloudflarestorage.com",
+    "storage.googleapis.com", "blob.core.windows.net"};
+
+} // anonymous namespace
+
+std::string url_without_query(std::string_view url) {
+  return std::string(url.substr(0, url.find_first_of("?#")));
+}
+
+bool is_bundle_file_name(std::string_view name) {
+  if (name.empty() || name.size() > 200 || name.front() == '.')
+    return false;
+  return std::all_of(name.begin(), name.end(), [](char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') || c == '.' || c == '_' || c == '-';
+  });
+}
+
+bool is_allowed_artifact_url(const std::string &url,
+                             const std::string &server_url) {
+  const auto u = split_url(url);
+  const auto srv = split_url(server_url);
+  if (!u || !srv)
+    return false;
+  if (u->scheme == "http") {
+    // Only a plain-http localhost dev server may hand out http URLs, and
+    // only to itself.
+    return srv->scheme == "http" && detail::is_allowed_server_url(server_url) &&
+           u->host == srv->host;
+  }
+  if (u->scheme != "https")
+    return false;
+  if (host_is_or_under(u->host, srv->host))
+    return true;
+  return std::any_of(
+      kStorageHostSuffixes.begin(), kStorageHostSuffixes.end(),
+      [&](std::string_view s) { return host_is_or_under(u->host, s); });
+}
+
+std::vector<BundleFile> parse_artifact_listing(const json &listing,
+                                               const std::string &server_url) {
+  constexpr std::size_t max_files = 1000;
+  if (!listing.is_object())
+    throw std::runtime_error("Speckle artifact listing: not a JSON object");
+  const auto files = listing.find("files");
+  if (files == listing.end() || !files->is_array())
+    throw std::runtime_error("Speckle artifact listing: no 'files' array");
+  if (files->size() > max_files)
+    throw std::runtime_error(
+        fmt::format("Speckle artifact listing: {} files (more than {})",
+                    files->size(), max_files));
+  std::vector<BundleFile> out;
+  std::set<std::string> seen;
+  for (const auto &f : *files) {
+    const std::string name = f.is_object() ? string_or_empty(f, "name") : "";
+    const std::string url = f.is_object() ? string_or_empty(f, "url") : "";
+    if (!is_bundle_file_name(name))
+      throw std::runtime_error(
+          fmt::format("Speckle artifact listing: invalid file name '{}'",
+                      name.substr(0, 64)));
+    // As the SDKs: the viewer's own files are not part of a receive.
+    if (name.find(".viewer.") != std::string::npos ||
+        !name.ends_with(".parquet"))
+      continue;
+    if (!is_allowed_artifact_url(url, server_url))
+      throw std::runtime_error(fmt::format(
+          "Speckle artifact listing: download URL for '{}' refused by "
+          "policy ({})",
+          name, url_without_query(url).substr(0, 200)));
+    if (!seen.insert(name).second)
+      throw std::runtime_error(fmt::format(
+          "Speckle artifact listing: file '{}' listed twice", name));
+    out.push_back({name, url});
+  }
+  return out;
+}
+
+std::vector<BundleFile>
+SpeckleReader::list_bundle_artifacts(const BundleReference &ref) const {
+  require_id(ref.project, "project");
+  require_id(ref.model, "model");
+  require_id(ref.version, "version");
+  HttpRequest req;
+  req.url = fmt::format("{}/api/v2/projects/{}/models/{}/versions/{}/artifacts",
+                        server_url_, ref.project, ref.model, ref.version);
+  req.token = token_;
+  req.what = "bundle listing";
+  req.project = ref.project;
+  req.max_bytes = std::size_t{16} << 20;
+  req.cancel = cancel_;
+  req.timeout_s = timeout_s_;
+  req.connect_filter = &connect_filter_;
+  req.curl_setup = &curl_setup_;
+  const std::string body = http_perform(req);
+  json parsed;
+  try {
+    parsed = json::parse(body);
+  } catch (const json::parse_error &e) {
+    throw std::runtime_error(
+        fmt::format("Speckle bundle listing: invalid JSON: {}", e.what()));
+  }
+  return parse_artifact_listing(parsed, server_url_);
+}
+
+std::size_t SpeckleReader::download_bundle(
+    const BundleReference &ref, const std::filesystem::path &dir,
+    std::vector<std::filesystem::path> *files) const {
+  const auto listed = list_bundle_artifacts(ref);
+  if (listed.empty())
+    throw std::runtime_error(
+        fmt::format("Speckle: version {} lists no bundle files", ref.version));
+  std::size_t total = 0;
+  for (const auto &f : listed) {
+    if (cancel_ && cancel_->load(std::memory_order_acquire))
+      throw std::runtime_error("Speckle bundle download: cancelled");
+    if (total >= max_download_bytes_)
+      throw std::runtime_error(fmt::format(
+          "Speckle bundle download: exceeds the download limit of {} MiB; "
+          "raise SpeckleReader::set_max_download_bytes if this is expected",
+          max_download_bytes_ >> 20));
+    HttpRequest req;
+    req.url = f.url;
+    req.shown_url = url_without_query(f.url);
+    // No token: a presigned URL is its own authorisation, and the Speckle
+    // token must never reach the storage host (as the SDKs do).
+    req.what = fmt::format("bundle file '{}'", f.name);
+    req.project = ref.project;
+    req.accept = "*/*";
+    req.follow_redirects = false; // never leave the vetted storage host
+    req.long_transfer = true;
+    req.max_bytes = max_download_bytes_ - total;
+    req.cancel = cancel_;
+    req.timeout_s = timeout_s_;
+    req.connect_filter = &connect_filter_;
+    req.curl_setup = &curl_setup_;
+    const std::string body = http_perform(req);
+    const auto path = dir / f.name;
+    {
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      out.write(body.data(), static_cast<std::streamsize>(body.size()));
+      if (!out)
+        throw std::runtime_error(fmt::format(
+            "Speckle bundle download: cannot write {}", path.string()));
+    }
+    total += body.size();
+    if (files)
+      files->push_back(path);
+    core::debug("Speckle: bundle file {} ({:.1f} KiB)", f.name,
+                static_cast<double>(body.size()) / 1024.0);
+  }
+  core::info("Speckle: downloaded {} bundle files ({:.1f} MiB) for version {}",
+             listed.size(), static_cast<double>(total) / (1 << 20),
+             ref.version);
+  return total;
 }
 
 } // namespace reusex::io::speckle

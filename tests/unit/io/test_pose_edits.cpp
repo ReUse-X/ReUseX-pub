@@ -11,7 +11,9 @@
 #include "../../support/source_dir.hpp"
 #include "../../support/temp_path.hpp"
 
+#include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/pose_edits.hpp>
+#include <reusex/core/working_pose_edits.hpp>
 #include <reusex/io/pose_edits.hpp>
 
 #include "io/yaml_json.hpp" // reusex_io-private: the YAML -> JSON front end
@@ -387,4 +389,35 @@ TEST_CASE("PoseReferenceFixtures_AreValidDraftReferences", "[io][pose_edits]") {
     CHECK(draft);
     CHECK(poses == r.frames);
   }
+}
+
+// reusex-fkqd: the working document the editor stores in project_settings
+// (core/working_pose_edits.hpp) is what a solve reads when no edits file is
+// given; io::stored_pose_edits() parses it with the full reader.
+TEST_CASE("PoseEdits_StoredWorkingDocument_ParsesWithTheFullReader",
+          "[io][pose_edits]") {
+  test_support::TempPath tmp("test_pose_edits_stored_working");
+  ProjectDB db(tmp.path);
+  CHECK(io::stored_pose_edits(db).edits.empty());
+
+  core::put_working_pose_edit(db, core::reject_odometry_edit(5, 4, "detached"));
+  core::put_working_pose_edit(
+      db, core::hold_edit("hold-5-8", 5, 8, core::Dof::all, 0.01, 0.1, ""));
+  const auto edits = io::stored_pose_edits(db);
+  REQUIRE(edits.edits.size() == 2);
+  CHECK(edits.edits[0].id == "detach-4-5");
+  CHECK(edits.edits[0].kind == PoseEditKind::reject_edge);
+  CHECK(edits.edits[0].nodes.first == 4);
+  CHECK(edits.edits[0].nodes_b.first == 5);
+  CHECK(edits.edits[1].id == "hold-5-8");
+  CHECK(edits.edits[1].kind == PoseEditKind::move);
+  CHECK(edits.edits[1].nodes.first == 5);
+  CHECK(edits.edits[1].nodes.last == 8);
+
+  // A stored document a newer field this build cannot read is refused with
+  // the reader's message, not silently dropped.
+  auto doc = nlohmann::json::parse(core::working_pose_edits(db));
+  doc["edits"][1]["bogus"] = 1;
+  db.set_setting(core::kSettingWorkingPoseEdits, doc.dump());
+  CHECK_THROWS_WITH(io::stored_pose_edits(db), ContainsSubstring("bogus"));
 }

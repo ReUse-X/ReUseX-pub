@@ -96,7 +96,8 @@ struct SubcommandOptimizeOptions {
   std::string manhattan_up = "z"; ///< auto | x | y | z
 
   // Pose edits (reusex-rcv.1.3): a reusex.pose_edits.v1 file
-  // (docs/design/pose-edits.md); empty = none. Default mirrors
+  // (docs/design/pose-edits.md); empty = the project's working
+  // pose edits (io::stored_pose_edits, reusex-fkqd). Default mirrors
   // PlaneGraphOptions.
   std::string edits;
   float edit_inlier_cost =

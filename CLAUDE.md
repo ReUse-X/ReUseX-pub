@@ -761,7 +761,21 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   ('' = flat; `core/sloped_ceiling.hpp`: `ceiling_at()` = min(z_ceiling,
   planes), `wall_top_at()`, checks and codecs), written by the spaces
   stage's `fit_sloped_ceilings()` and by imports; solid-model JSON
-  `model_version` 2 carries them (a flat model is still written as 1)
+  `model_version` 2 carries them (a flat model is still written as 1).
+  Schema v40 adds the scan-repair editor's tables (reusex-y2lg):
+  `pose_blocks` (the trajectory split into named blocks per session,
+  `replace_pose_blocks` / `pose_blocks()`; rules in `core/pose_blocks.hpp`)
+  and `pose_versions` (a snapshot of every frame's `transform` /
+  `initial_transform`, the whole pose graph and the working pose edits per
+  repair step, `add_pose_version` / `pose_versions()` /
+  `pose_version_snapshot()`; undo / redo / restore / diff in
+  `core/pose_versions.hpp`, current version in project setting
+  `pose_versions.current`). A version's blobs hold only what differs from
+  its parent, with a full keyframe every 16 links (reusex-md4a, no schema
+  change; v40's full "RXF1" / "RXE1" blobs are still read): read a
+  version's state with `core::pose_version_state()`, never by unpacking
+  `pose_version_snapshot()` alone. `posed_frames()` reads every posed frame's
+  poses, scan and stamp in one query
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)
@@ -801,6 +815,16 @@ Other core pieces: `logging.hpp`, `stages.hpp` (`Stage` enum),
 `validate.hpp` (`check_stage_inputs`, backing `rux validate --stage`),
 `MaterialPassport.hpp` + `materialepas_*`, `guid.hpp`, `SensorIntrinsics.hpp`,
 `processing_observer.hpp` / `visual_observer.hpp`, `filter_expression.hpp`,
+the scan-repair editor (reusex-y2lg, Qt-free and GTSAM-free so ruxd's light
+API library links them): `pose_blocks.hpp` (`suggest_block_splits()`:
+session / time-gap > 100 s / tracking-gap > 5 s / storey-band / odometry-jump
+cuts with a reason and score, glitch frames; stored blocks, split / merge /
+rename / detach), `pose_repair.hpp` (`rebuild_odometry()`,
+`apply_block_transform()`: re-seed or local move with smoothstep blend at
+attached joints, preview or apply, optional hold; JSON in/out shared with
+ruxd), `pose_versions.hpp`, `working_pose_edits.hpp` (the project's
+reusex.pose_edits.v1 document, setting `pose_edits.working`),
+`file_fingerprint.hpp` (duplicate-session check),
 `storey_lookup.hpp` (`which_storey()`: world point -> storey idx through each
 row's level frame, half-open `[z_floor, z_ceiling)`, optional clamp to the
 nearest band; reusex-3iy8.4), `panorama_pose.hpp` (manual 360 poses:
@@ -821,7 +845,18 @@ External-format adapters only — project state itself lives in `core/ProjectDB`
 - `speckle_reader.hpp`: Speckle receive, read-only by construction
   (`SpeckleReader`: GraphQL queries + HTTP GETs only). Project / model /
   version lookup, the whole object tree in one GET (`ObjectTree`), and
-  `ObjectTree::resolve` (references, `@`-detached keys, DataChunk joins)
+  `ObjectTree::resolve` (references, `@`-detached keys, DataChunk joins);
+  bundle-only versions (`referencedObject` `bundle.<p>.<m>.<v>`): the
+  `/api/v2/.../artifacts` listing and token-less presigned downloads
+  (`list_bundle_artifacts`, `download_bundle`, URL policy
+  `is_allowed_artifact_url`)
+- `speckle_bundle.hpp`: reads a bundle-only version (reusex-fo1t): SGEO
+  mesh decoder, `read_bundle_directory` (Parquet via DuckDB, needs
+  `REUSEX_HAVE_DUCKDB`; the only `duckdb.h` include is
+  `src/io/speckle_bundle_duckdb.cpp`), `project_bundle_to_revit_tree`
+  (bundle tables -> the Revit connector's object tree, so `import_revit`
+  reads both), `fetch_bundle_tree`; without DuckDB such versions are
+  refused with `BundleVersionUnsupported`
 - `speckle_revit.hpp`: Revit model (Speckle v3 Revit connector) -> solid
   model + per-category meshes (`import_revit`, pure), and the entry point
   `import_speckle_revit` (fetch, map, store as imported) of the job stage
@@ -877,14 +912,14 @@ Top-level commands, as registered in `apps/rux/src/rux.cpp`:
 
 | Command | Sub-commands | Source |
 |---|---|---|
-| `import` | `rtabmap`, `mushroom`, `arkitscenes`, `e57`, `ply`, `gsplat`, `materialepas`, `csv`, `360`, `photos`, `speckle` (Revit model via Speckle, read-only: storeys / walls / openings / spaces as imported rows + `imported/revit/<category>` meshes), `ifc` (IFC file via web-ifc: the same tables + `imported/ifc/<IFC class>` meshes; needs `REUSEX_HAVE_WEB_IFC`) | `src/import/` |
+| `import` | `rtabmap` (`--append`: one more detached session, reusex-y2lg.30; job stage `import_rtabmap`), `mushroom`, `arkitscenes`, `e57`, `ply`, `gsplat`, `materialepas`, `csv`, `360`, `photos`, `speckle` (Revit model via Speckle, read-only: storeys / walls / openings / spaces as imported rows + `imported/revit/<category>` meshes), `ifc` (IFC file via web-ifc: the same tables + `imported/ifc/<IFC class>` meshes; needs `REUSEX_HAVE_WEB_IFC`) | `src/import/` |
 | `create` | `clouds`, `dense`, `annotate`, `annotate-360`, `material`, `project`, `planes`, `rooms`, `instances`, `storeys`, `classify`, `walls`, `openings`, `spaces`, `solids`, `materials`, `survey`, `mesh`, `texture`, `windows` (deprecated) | `src/create/` |
 | `export` | `ply`, `e57`, `materialepas`, `csv`, `rhino`, `semantic-images`, `speckle`, `colmap`, `pdf` | `src/export/` |
 | `align` | `360` (content-based panorama pose refinement; skips manually placed panoramas unless `--force`) | `src/align/` |
 | `edit` | `downsample`, `perturb-poses` (drift synthesis, #338) | `src/edit/` |
 | `analyze` | `quality`, `accuracy`, `solid` (typed model vs a reference plan), `drift` (where the stored poses disagree: pass-to-pass residual vs noise floor, segment pairs + ICP suggestions, through-wall crossings) | `src/analyze/` |
 | `optimize` | — (solves the stored pose graph; `--edits e.yaml` steers it with pose edits, `--edits e.yaml --watch` is the hot-reload pose loop: in-memory re-solve on every save, preview cloud, drift renders, metrics block with a shear indicator and paste-ready YAML suggestions, `optimize_watch.hpp`, [`docs/guides/pose-reference-authoring.md`](docs/guides/pose-reference-authoring.md)) | `src/optimize.cpp` |
-| `graph` | `init`, `discover`, `prune` (stored pose graph) | `src/graph/` |
+| `graph` | `init` (`--rebuild-odometry [--from-current]`), `discover`, `prune` (stored pose graph); `blocks suggest\|list\|split\|merge\|rename\|detach`, `block-transform` (re-seed / local move of blocks or node ranges, `--preview --json`, `--request body.json`), `versions list\|undo\|redo\|restore\|diff` (scan-repair editor, reusex-y2lg) | `src/graph/` |
 | `register` | — (joint pairwise registration) | `src/register.cpp` |
 | `validate` | — (`--stage`, `--json`) | `src/validate.cpp` |
 | `get` / `set` / `del` | path-based DB access (`src/database/*_router.cpp`; `rux set panoramas.<name>.pose` takes a 4x4, `[x,y,z,yaw]` or a `{x,y,z,yaw_deg}` nudge) | `src/get.cpp`, `src/set.cpp`, `src/del.cpp` |
@@ -1079,6 +1114,13 @@ Anything not found there is not a dependency.
   `cache/` include dirs. It logs through spdlog's *default* logger (rux's), so
   `src/io/ifc.cpp` wraps every web-ifc call in a `WebIfcLog::Scope` that
   swaps in a `[web-ifc]` logger at >= warn and counts its errors
+- DuckDB (libduckdb, MIT, nixpkgs `duckdb`) - reads the Parquet tables of
+  Speckle bundle-only versions. **Optional**: found -> `REUSEX_HAVE_DUCKDB`
+  (capability flag), linked PRIVATE into `reusex_io`, include confined to
+  `src/io/speckle_bundle_duckdb.cpp`; the in-memory database runs with
+  extension autoload / install off and external access limited to the
+  bundle's temporary directory. Adds ~255 MiB (the `duckdb.lib` output,
+  substitutable from cache.nixos.org) to the runtime closure
 - OpenCV (`core`, `imgproc`, `highgui`) - image processing
 - VTK (`CommonCore`, `CommonDataModel`, `CommonExecutionModel`, `RenderingCore`,
   `RenderingOpenGL2`, `RenderingFreeType` for the plan overlay's labels) - the rendering backend behind `reusex_visualize`'s

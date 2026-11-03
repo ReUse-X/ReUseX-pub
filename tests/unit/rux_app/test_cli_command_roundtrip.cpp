@@ -73,10 +73,14 @@ const std::set<std::string> kSentOnlyWhenExplicit = {"rooms.method"};
 /// even a pipeline::JobStage (core::PipelineStage only) and never appears in
 /// job_stage_names(), but is listed for the same reason
 /// CliCommand_UnknownStage_IsUnsupported (test_workspace_logic.cpp) uses it:
-/// a byword for "a stage name with no CLI mapping".
+/// a byword for "a stage name with no CLI mapping". "import_rtabmap"
+/// (reusex-y2lg.30) is ruxd's session-upload job: the CLI form is `rux
+/// import rtabmap [--append] DB`, a positional file and append as opt-in,
+/// not the job's parameters one to one, and the Qt client hides the stage.
 const std::set<std::string> kNoCliMapping = {
     "gsplat",
     "annotate",
+    "import_rtabmap",
 };
 
 struct Captured {
