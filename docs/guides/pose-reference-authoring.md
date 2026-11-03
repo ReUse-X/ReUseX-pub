@@ -448,6 +448,135 @@ cross-check against `rux create walls` on a reference copy before moving a
 wall: of five walls the face check wanted to move, the detector agreed on
 two. The rest is `reusex-gjjb`.
 
+### house1: when the segment ICP is wrong (2026-11-01)
+
+The third reference, `tests/fixtures/pose_reference/house1.*` (238 frames,
+one storey with a split level: frames 1-118 on the north block's floor
+0.75 m up, 119-239 below). It was the "mild" control (no through-wall
+crossings on the stored poses), and its lesson is the opposite of
+NewOffice's: here the solver needed help, and the drift numbers pointed the
+wrong way for the biggest fix.
+
+**0. Audit first, then the Manhattan prior.** No stored pose graph at all,
+so no loop edges to audit; the stored poses are the RTABMap import plus one
+`rux register` run (the pipeline log). Plain optimize changed nothing
+measurable (segment headings +3.3..-3.1 deg). `--manhattan
+--manhattan-max-angle 30` took them to max 1.2 deg and turned the whole
+trajectory ~4 deg about node 1 (gauge), so the plan had to follow.
+
+**1. Measure walls per frame range, not pooled.** With the Manhattan solve
+the split wall's two faces were in the wrong order behind room S2 and the
+bathroom: the face the lower rooms see lay 4-12 cm *north* of the face
+bedroom 2 sees above it, and the south facade the same rooms see lay 0.2 m
+north of the living room's, while the stored poses drew it straight. Wall
+i-s1 (living room | S2) was inverted too, against a ~0.12 m door reveal.
+Three independent faces agreed on one fix: S2 and the bathroom 0.2 m south
+and 0.2 m east. A small script that fits each face per side (frames whose
+camera stands on that side) and per bin found this; the pooled residual did
+not.
+
+**2. Do not paste a suggestion that collapses a wall.** The segment ICP
+suggested the opposite move for both rooms (seg 8 into the rest 67 -> 18
+mm): the 0.15 m pair gate catches both faces of a 0.1-0.2 m wall, and the
+fit lays them on top of each other. After the hand move the worst segment
+pairs are exactly those two faces (110-127 mm), and the segment-pair median
+barely moved (29.9 -> 30.4 mm). A move justified by wall faces is judged on
+the faces; the pair numbers only have to not get worse elsewhere.
+
+**3. Then the suggestions worked.** On that base the seg 5 suggestion (the
+hall walk and the stair, 102-120) took pass-to-pass from 14.3 to 9.1 mm:
+checked on *shared* faces (one physical face seen by two passes), its
+disagreement with the passes around it fell from 34-40 to 4-10 mm. Seg 3
+and seg 4 added 1-2 mm on the segment pairs. Two heading moves (S2 and the
+bathroom from +0.85 / +1.23 deg, the back entry from -1.05) brought every
+segment within 1 deg of the grid. A guard on the walk into S2 fought its
+move (i-s1 0.31 m with it, 0.12 m without): drop it, as in NewOffice.
+
+**4. Floors: masks can hurt.** Restricting the moves to `dofs: [x, y,
+yaw]` (so the planes set height and tilt) tilted the lower floor from 0.12
+to 0.30 deg; the all-DoF moves keep both floors within +-2.5 cm. The upper
+floor's 0.3 deg west-east tilt is in every pose set, stored included.
+
+| | stored | plain optimize | Manhattan, no edits | DRAFT reference |
+|---|---|---|---|---|
+| pass-to-pass median (p90) | 15.6 (60.3) mm | 15.3 (59.2) mm | 14.5 (46.1) mm | 8.6 (35.3) mm, 2.2x the floor (3.9 mm) |
+| segment-pair median | 36.8 mm | 33.5 mm | 29.9 mm | 22.9 mm |
+| segment heading, median / max | 1.25 / 3.40 deg | 1.14 / 3.25 deg | 0.46 / 1.23 deg | 0.22 / 0.69 deg |
+| split wall behind S2 / bathroom | -- | -- | -36 / -123 mm (inverted) | +202 / +124 mm |
+
+The 1.5x-floor target was not reached; the plateau is in the edits header
+(the remaining suggestions either undo the S2 / bathroom move or, for the
+living room, made it worse twice). This scan's floor is half of house2's
+(3.6-3.9 mm), which makes the bound tighter, not looser.
+
+**Re-fitting the plan per room.** A rigid fit cannot follow a reference
+that moved two rooms 0.2 m against the rest: house1.plan.yaml was moved per
+room, each wall axis and space vertex by the median displacement (stored ->
+reference poses) of the cloud points near it seen by its room's camera
+block, then every wall's faces fitted on the reference cloud and the axes
+more than 2 cm off re-measured. The old plan on the reference copy scores
+wall rms 0.337 m; the re-fitted one 0.046 m (0.066 m for the old plan on
+its own copy). Wall recall drops (0.83 -> 0.63) because facade pieces the
+old plan split at drift jogs are now collinear and detected as one wall.
+
+### house1 v2: judge the reference in the plan view the reviewer uses (2026-11-03)
+
+The maintainer's review of v1 looked at `rux render --view plan --layers
+passes` and found four things the drift numbers had not flagged: walls bent
+in a V, the two faces of one wall crossing, the whole house turned against
+the grid, and walls drawn twice side by side. All four were real, and none
+of them moved v1's headline metrics.
+
+**The gauge is part of the reference.** `--manhattan` estimates the grid's
+azimuth as a free variable and the first frame holds the gauge, so the grid
+ends wherever the solve leaves it: v1's sat at +1.6 deg from world x, and
+every plan render (world axes) drew the house turned. v2 pins it: with
+`--prior-sigma-rot 1` the seed prior no longer fixes node 1's rotation, and
+an `anchor` on node 1 (rotation DoFs only) holds it at its pose turned by
+the measured grid azimuth. One iteration lands the grid at 0.08 deg.
+
+**A per-segment heading can be fine while the rooms are bent.** v1 scored
+every 12-node segment within 0.7 deg of the grid, yet the bedroom 1 frames
+sat at -0.87 deg and the living room's at +1.04 deg as blocks, and v1's
+pasted ICP suggestions added yaws of 3-6 deg to fit passes onto each other.
+Median wall heading per room block is the check that shows it. A tighter
+prior removed it: wall gate 30 -> 10 deg (at 30 deg the GNC threshold is
+450, so nothing is robust), landmark sigma 1 -> 0.25 deg, per-frame heading
+sigma 4 -> 1 deg. Every block now lies within 0.5 deg. Loosening odometry did
+not help.
+
+**Translate, don't rotate, when the grid sets the heading.** The one move
+left (S2 + bathroom, 0.09 m south) is `dofs: [x, y, z]`, sized by the two
+lines it has to agree with (the living room's north face, the south facade)
+and checked on the wall faces: split wall 0.04-0.14 m in the right order,
+i-s1 0.105 m, i-s2 0.13-0.16 m, the facade one line within 0.1 m.
+
+**What it costs.** Pass-to-pass rose from 8.6 to 11.6 mm: v1 bought its
+number with block rotations off the grid. Some of the bend is not in the
+poses at all. Frames 131-133 see two walls of the living room 1.2 deg off
+square in a single depth image, so no rigid pose removes the last 1.6 deg
+of that V.
+
+| | v1 | v2 |
+|---|---|---|
+| grid azimuth vs world x | +2.07 deg | +0.08 deg |
+| room-block wall heading, worst | 1.04 deg | 0.49 deg |
+| bedroom 1 / 2 wall faces | crossing (4.965 / 4.968, 1.5 deg apart) | 7 cm, right order |
+| i-s1 faces (S2 / living) | 0.32 m apart (door reveal 0.12) | 0.105 m |
+| plan walls off the grid, median | 1.41 deg | 0.78 deg |
+| pass-to-pass median | 8.6 mm | 11.6 mm |
+
+**The plan, second review (v3).** "A very straight and orderly building":
+the re-fitted plan still followed every few-cm face wobble of the cloud. v3
+snaps it: every wall on the grid (constant x or y), wall lines continuous
+across rooms (one south facade, one split-level wall, one gable inner face),
+one thickness per wall type, spaces on the axes, built-in closets carved out
+of their rooms, and the roof pitches as one shared ceiling plane per pitch.
+Wall rms against the detected walls fell from 0.059 to 0.022 m. Two lessons:
+the plan overlay filled concave spaces as a fan, painting wedges that read
+as slanted walls (fixed in the renderer on branch `plan-overlay-earcut`),
+and the format has no roof element (reusex-v5jl).
+
 ## Pose references: scoring a trajectory against a frozen ground truth
 
 This half covers the artefact the loop above produces once a cycle's result
@@ -459,6 +588,8 @@ above).
 
 ```
 tests/fixtures/pose_reference/
+├── house1.trajectory.tum
+├── house1.edits.yaml
 ├── house2.trajectory.tum      # the frozen trajectory, TUM format
 ├── house2.edits.yaml          # the pose-edits file that produced it (reusex-rcv.1.2)
 ├── newoffice.trajectory.tum

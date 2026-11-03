@@ -355,7 +355,8 @@ TEST_CASE("PoseReferenceFixtures_AreValidDraftReferences", "[io][pose_edits]") {
     std::size_t frames;
   };
   const auto s = schema();
-  for (const Ref &r : {Ref{"house2", 384}, Ref{"newoffice", 3876}}) {
+  for (const Ref &r :
+       {Ref{"house1", 238}, Ref{"house2", 384}, Ref{"newoffice", 3876}}) {
     INFO(r.scan);
     const auto dir =
         reusex::test_support::source_dir() / "tests/fixtures/pose_reference";
