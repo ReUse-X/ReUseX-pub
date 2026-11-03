@@ -54,31 +54,31 @@ newoffice         local      tests/fixtures/solid_model/newoffice.plan.yaml -   
 # at a copy of each project.rux whose clouds/planes were regenerated (sensor-
 # oriented normals): the references use the detected level frames, which the
 # row's storeys stage re-detects (deterministic). house1 = one storey with a
-# split level, re-fitted (reusex-rcv.1.8, 2026-11-01) on the house1 pose
-# reference (DRAFT, tests/fixtures/pose_reference/house1.*), so build
-# $REUSEX_HOUSE1_RUX on the REFERENCE poses:
+# split level, re-fitted (reusex-rcv.1.8, 2026-11-01; again 2026-11-03 on v2)
+# on the house1 pose reference (DRAFT v2, tests/fixtures/pose_reference/
+# house1.*), so build $REUSEX_HOUSE1_RUX on the REFERENCE poses:
 #   cp <scan archive>/2024-06-13_house-1_afb3234950/reusex/project.rux house1-ref.rux
 #   rux -p house1-ref.rux optimize \
 #       --edits tests/fixtures/pose_reference/house1.edits.yaml \
-#       --manhattan --manhattan-max-angle 30
+#       --manhattan --manhattan-max-angle 10 --manhattan-sigma 0.25 \
+#       --manhattan-frame-sigma 1 --prior-sigma-rot 1
 #   rux -p house1-ref.rux analyze poses \
 #       --reference tests/fixtures/pose_reference/house1.trajectory.tum  # ATE 0
 #   rux -p house1-ref.rux create clouds   # defaults
 #   rux -p house1-ref.rux create planes   # defaults
 #   rux -p house1-ref.rux create storeys
-# The reference turns the trajectory ~4 deg against the stored poses (the
-# Manhattan gauge) and moves room S2 / the bathroom 0.2 m, so a copy on the
-# stored poses scores far lower against this plan: expected.
-# (2026-11-01, chain storeys,classify,walls,openings,rooms,spaces: room IoU
-# 0.792 / 0, wall recall 0.63 / precision 0.60, rms 0.046 m, thickness err
-# 0.011 m, openings 0.50 / 0.52 (IoU 0.38), floor / ceiling err 0.011 /
-# 0.015 m -- the old plan on its stored-pose copy: 0.792 / 0, 0.83 / 0.69,
-# rms 0.066 m, openings 0.60 / 0.58; the old plan on the reference copy:
-# rms 0.337 m, room IoU 0.603. Recall drops because facade pieces the old
-# plan split at drift jogs are now collinear and detected as one wall
-# (x-south-2 + x-south-3, x-north-w + x-north-e), and the living room's
-# facade (x-south-1), still ~1 deg off the grid in the cloud, is not
-# detected at all.)
+# The reference puts the Manhattan grid on world x / y and moves room S2 /
+# the bathroom 0.09 m against the north block, so a copy on the stored poses
+# (turned ~2.7 deg) scores far lower against this plan: expected.
+# (2026-11-03, v2 plan on a v2 copy, chain storeys,classify,walls,openings,
+# rooms,spaces: room IoU 0.791 / 0, wall recall 0.62 / precision 0.75, rms
+# 0.059 m, thickness err 0.012 m, openings 0.53 / 0.46 (IoU 0.43), floor /
+# ceiling err 0.009 / 0.012 m, 20 detected walls -- the v1 plan on its v1
+# copy: 0.792 / 0, 0.62 / 0.60, rms 0.046 m, openings 0.50 / 0.52, 25
+# detected walls; the v1 plan on the v2 copy: rms 0.228 m, room IoU 0.675.
+# Precision rises because the straighter walls are detected as fewer, longer
+# walls; recall stays low because facade pieces the plan splits (x-south-1/2/3,
+# x-north-w + x-north-e) are collinear and detected as one wall.)
 # house2 = two storeys, re-fitted (reusex-ghy, 2026-10-17) on the house2 pose
 # reference (DRAFT v3, tests/fixtures/pose_reference/house2.*), so build
 # $REUSEX_HOUSE2_RUX on the REFERENCE poses, not the stored ones:

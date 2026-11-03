@@ -837,18 +837,18 @@ TEST_CASE("SolidModelFixture_House2_IsAManhattanDraftOnThePoseReference",
 
 TEST_CASE("SolidModelFixture_House1_IsFittedOnThePoseReference",
           "[io][solid_model]") {
-  // Re-fitted (reusex-rcv.1.8) on the house1 DRAFT pose reference
-  // (tests/fixtures/pose_reference/house1.*), room by room: the reference
-  // turns the trajectory ~4 deg (the Manhattan gauge) and moves room S2 and
-  // the bathroom 0.2 m against the north block. Every element kept its guid;
-  // the level frame is the one `rux create storeys` detects on the reference
-  // copy.
+  // Re-fitted (reusex-rcv.1.8) on the house1 DRAFT v2 pose reference
+  // (tests/fixtures/pose_reference/house1.*), room by room. v2 fixes the
+  // Manhattan grid on world x / y (v1 left it at +1.6 deg, so the plan ran
+  // turned in its level frame) and moves room S2 and the bathroom 0.09 m
+  // south only. Every element kept its guid; the level frame is the one
+  // `rux create storeys` detects on the v2 reference copy.
   const SolidModel m =
       reusex::io::solid_model_from_file(fixture("house1.plan.yaml"));
   CHECK_THAT(m.description, ContainsSubstring("pose reference"));
-  CHECK_THAT(m.description, ContainsSubstring("DRAFT"));
+  CHECK_THAT(m.description, ContainsSubstring("DRAFT v2"));
   REQUIRE(m.storeys.size() == 1);
-  CHECK(std::abs(m.storeys[0].level_transform[3] - -9.0957) < 1e-3);
+  CHECK(std::abs(m.storeys[0].level_transform[3] - -8.8529) < 1e-3);
   CHECK(m.walls.size() == 24);
   CHECK(m.spaces.size() == 12);
   CHECK(m.openings.size() == 30);
@@ -858,19 +858,22 @@ TEST_CASE("SolidModelFixture_House1_IsFittedOnThePoseReference",
     REQUIRE(it != m.walls.end());
     return *it;
   };
-  // The reference's Manhattan grid runs ~1.5-2.5 deg off the level frame's
-  // x axis; on the stored poses the south facade ran at -3 deg.
-  const auto south = wall("x-south-1");
-  const double deg = std::atan2(south.y1 - south.y0, south.x1 - south.x0) *
-                     180.0 / std::numbers::pi;
-  CHECK(deg > 1.0);
-  CHECK(deg < 3.5);
-  // The bathroom's south facade and the wing's meet within a few cm: on the
-  // stored poses the wing's started 10 cm north of it (m-161-187 in the
-  // edits moved the bathroom, and the wing with it, onto the facade line).
+  const auto deg = [](const auto &w) {
+    return std::atan2(w.y1 - w.y0, w.x1 - w.x0) * 180.0 / std::numbers::pi;
+  };
+  // The south facade runs along the level frame's x axis now (within 1 deg
+  // per piece; on v1 it ran at +1.6..+2.8 deg, on the stored poses at -3).
+  const auto s1 = wall("x-south-1");
   const auto s2 = wall("x-south-2");
   const auto s3 = wall("x-south-3");
+  for (const auto &w : {s1, s2, s3}) {
+    INFO(w.guid);
+    CHECK(std::abs(deg(w)) < 1.0);
+  }
+  // ...and is one line: the bathroom's piece and the wing's meet within a
+  // few cm (the wing follows the bathroom's 0.09 m move).
   CHECK(std::abs(s3.y0 - s2.y1) < 0.05);
+  CHECK(std::abs(s2.y0 - s1.y1) < 0.10);
 }
 
 TEST_CASE("SolidModelFixture_NewOffice_IsFittedOnThePoseReference",

@@ -519,6 +519,53 @@ wall rms 0.337 m; the re-fitted one 0.046 m (0.066 m for the old plan on
 its own copy). Wall recall drops (0.83 -> 0.63) because facade pieces the
 old plan split at drift jogs are now collinear and detected as one wall.
 
+### house1 v2: judge the reference in the plan view the reviewer uses (2026-11-03)
+
+The maintainer's review of v1 looked at `rux render --view plan --layers
+passes` and found four things the drift numbers had not flagged: walls bent
+in a V, the two faces of one wall crossing, the whole house turned against
+the grid, and walls drawn twice side by side. All four were real, and none
+of them moved v1's headline metrics.
+
+**The gauge is part of the reference.** `--manhattan` estimates the grid's
+azimuth as a free variable and the first frame holds the gauge, so the grid
+ends wherever the solve leaves it: v1's sat at +1.6 deg from world x, and
+every plan render (world axes) drew the house turned. v2 pins it: with
+`--prior-sigma-rot 1` the seed prior no longer fixes node 1's rotation, and
+an `anchor` on node 1 (rotation DoFs only) holds it at its pose turned by
+the measured grid azimuth. One iteration lands the grid at 0.08 deg.
+
+**A per-segment heading can be fine while the rooms are bent.** v1 scored
+every 12-node segment within 0.7 deg of the grid, yet the bedroom 1 frames
+sat at -0.87 deg and the living room's at +1.04 deg as blocks, and v1's
+pasted ICP suggestions added yaws of 3-6 deg to fit passes onto each other.
+Median wall heading per room block is the check that shows it. A tighter
+prior removed it: wall gate 30 -> 10 deg (at 30 deg the GNC threshold is
+450, so nothing is robust), landmark sigma 1 -> 0.25 deg, per-frame heading
+sigma 4 -> 1 deg. Every block now lies within 0.5 deg. Loosening odometry did
+not help.
+
+**Translate, don't rotate, when the grid sets the heading.** The one move
+left (S2 + bathroom, 0.09 m south) is `dofs: [x, y, z]`, sized by the two
+lines it has to agree with (the living room's north face, the south facade)
+and checked on the wall faces: split wall 0.04-0.14 m in the right order,
+i-s1 0.105 m, i-s2 0.13-0.16 m, the facade one line within 0.1 m.
+
+**What it costs.** Pass-to-pass rose from 8.6 to 11.6 mm: v1 bought its
+number with block rotations off the grid. Some of the bend is not in the
+poses at all. Frames 131-133 see two walls of the living room 1.2 deg off
+square in a single depth image, so no rigid pose removes the last 1.6 deg
+of that V.
+
+| | v1 | v2 |
+|---|---|---|
+| grid azimuth vs world x | +2.07 deg | +0.08 deg |
+| room-block wall heading, worst | 1.04 deg | 0.49 deg |
+| bedroom 1 / 2 wall faces | crossing (4.965 / 4.968, 1.5 deg apart) | 7 cm, right order |
+| i-s1 faces (S2 / living) | 0.32 m apart (door reveal 0.12) | 0.105 m |
+| plan walls off the grid, median | 1.41 deg | 0.78 deg |
+| pass-to-pass median | 8.6 mm | 11.6 mm |
+
 ## Pose references: scoring a trajectory against a frozen ground truth
 
 This half covers the artefact the loop above produces once a cycle's result

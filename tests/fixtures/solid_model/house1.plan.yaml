@@ -10,9 +10,11 @@
 #
 # Source scan: scan archive 2024-06-13_house-1_afb3234950/reusex/project.rux
 # (238 frames). Since 2026-11-01 (reusex-rcv.1.8) the plan is RE-FITTED on the
-# house1 pose reference (DRAFT, tests/fixtures/pose_reference/house1.*): solve
-# the copy with `rux optimize --edits house1.edits.yaml --manhattan
-# --manhattan-max-angle 30`, then `rux create clouds`, `create planes`,
+# house1 pose reference (DRAFT v2 since 2026-11-03, tests/fixtures/pose_reference/
+# house1.*): solve the copy with the replay command in house1.edits.yaml
+# (`rux optimize --edits house1.edits.yaml --manhattan --manhattan-max-angle 10
+# --manhattan-sigma 0.25 --manhattan-frame-sigma 1 --prior-sigma-rot 1`), then
+# `rux create clouds`, `create planes`,
 # `create storeys` (one storey; recipe in scripts/bench-solid.manifest). Nothing
 # derived from the scan except this file is committed; point $REUSEX_HOUSE1_RUX
 # at such a copy to use it.
@@ -67,20 +69,30 @@
 # 0.18 m) and i-s1's too; thicknesses stay unknown (-1) where the plan had them
 # so. Guids and names unchanged; space polygons were moved, not re-measured
 # (corners within a few cm of the wall axes).
+# Re-fit on pose reference v2 (2026-11-03, PR #116 review): v2 puts the Manhattan
+# grid on world x / y (v1 left it at +1.6 deg, so the house was drawn turned),
+# straightens per-room headings and moves S2 + bathroom 0.09 m south only (v1:
+# 0.2 m S + 0.2 m E). The same per-room procedure, v1 reference -> v2 reference
+# (per-room rigid fits: yaw -1.3..-2.6 deg, shifts 3-16 cm), then wallfit on the
+# v2 cloud and the axes > 2 cm off re-measured: x-south-1/-2/-3, x-east-n,
+# x-north-e (inner face), i-split-e, i-s3, i-s4, i-n-w1, i-n3, i-n1 (face mean).
+# Walls off the grid: median 1.41 -> 0.78 deg (length-weighted 1.49 -> 0.74).
+# The south facade is now one line within 0.1 m (x-south-1/2/3 at +0.8 / -0.6
+# / +0.9 deg; v1 had a 10 cm jog at the wing, which came from v1's 0.2 m move).
 model_version: 2
 units: m
 name: "house1 reference (DRAFT)"
-description: "DRAFT - needs maintainer review. Agent-authored on the house1 scan (scan archive 2024-06-13_house-1_afb3234950) with the loop in docs/guides/solid-model-reference-authoring.md; not ground truth (decision D5). Re-fitted on the house1 pose reference (DRAFT, tests/fixtures/pose_reference/house1.*). One storey with a split level: north block floor at level z 0.75, south block and east wing at z 0; the south block and wing have a mono-pitch ceiling (one ceiling plane per space, sloped wall tops). Coordinates in the detected level frame stored in level_transform."
+description: "DRAFT - needs maintainer review. Agent-authored on the house1 scan (scan archive 2024-06-13_house-1_afb3234950) with the loop in docs/guides/solid-model-reference-authoring.md; not ground truth (decision D5). Re-fitted on the house1 pose reference (DRAFT v2, tests/fixtures/pose_reference/house1.*). One storey with a split level: north block floor at level z 0.75, south block and east wing at z 0; the south block and wing have a mono-pitch ceiling (one ceiling plane per space, sloped wall tops). Coordinates in the detected level frame stored in level_transform."
 storeys:
   - guid: "storey-0"
     idx: 0
     name: "Stueetage"
     z_floor: 0.0
     z_ceiling: 3.09
-    # Detected level frame (rux create storeys on the pose-reference copy, 2026-11-01),
-    # copied verbatim: a shift of world x/y/z plus a < 0.03 deg tilt. Plan x/y below are
+    # Detected level frame (rux create storeys on the pose-reference v2 copy, 2026-11-03),
+    # copied verbatim: a shift of world x/y/z plus a 0.14 deg tilt. Plan x/y below are
     # in THIS frame (not world x/y).
-    level_transform: [0.999999888, -3.99298839e-08, 0.000473749841, -9.09565979, -3.99298839e-08, 0.999999986, 0.000168569477, 4.26754557, -0.000473749841, -0.000168569477, 0.999999874, 2.37070117, 0, 0, 0, 1]
+    level_transform: [1, -3.03489114e-08, -2.44231161e-05, -8.85290063, -3.03489114e-08, 0.999996912, -0.00248525736, 4.52787904, 2.44231161e-05, 0.00248525736, 0.999996911, 2.37762294, 0, 0, 0, 1]
     source: manual
     locked: true
     metadata: {status: "draft - needs maintainer review", split_level: "north block floor at z 0.75, south block at z 0 (one storey; the split level is carried by z_floor of the spaces and z_base of the walls)", sloped_ceiling: "south block ceiling rises from ~2.34 (south facade) to ~3.08 (split wall), ~10 deg; the wing ~8 deg; one ceiling plane per space (model_version 2)"}
@@ -90,7 +102,7 @@ walls:
   # line would sit off the points at both ends.
   - guid: "x-south-1"
     storey: 0
-    axis: [[-9.415, -2.161], [-3.113, -1.855]]
+    axis: [[-9.427, -1.856], [-3.216, -1.767]]
     z_base: 0.00
     height: 2.38
     thickness: -1.00
@@ -100,7 +112,7 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. South facade of the living room; top = eave at ~2.38."}
   - guid: "x-south-2"
     storey: 0
-    axis: [[-3.009, -1.976], [1.776, -1.845]]
+    axis: [[-3.204, -1.768], [1.588, -1.818]]
     z_base: 0.00
     height: 2.38
     thickness: -1.00
@@ -110,17 +122,17 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. Facade of room S2 and the bathroom."}
   - guid: "x-south-3"
     storey: 0
-    axis: [[1.810, -1.818], [8.003, -1.562]]
+    axis: [[1.624, -1.839], [7.791, -1.739]]
     z_base: 0.00
     height: 2.38
     thickness: -1.00
     is_external: true
     source: manual
     locked: true
-    metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. Facade of the east wing (bedroom + back entry). Starts ~10 cm north of x-south-2 at x=0.6: the wing appears to be an extension (see i-s3, 0.33 m, likely the old external wall)."}
+    metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. Facade of the east wing (bedroom + back entry). On the v2 pose reference it continues x-south-2's line (v1: ~10 cm north of it, taken then as a sign the wing is an extension; i-s3, 0.35 m, is still likely the old external wall)."}
   - guid: "x-east"
     storey: 0
-    axis: [[8.063, -1.573], [8.012, 2.363]]
+    axis: [[7.876, -1.752], [7.941, 2.183]]
     z_base: 0.00
     height: 2.89
     top: [[0.0, 2.383], [3.942, 2.886]]  # follows the mono pitch
@@ -132,7 +144,7 @@ walls:
   # North wall of the east wing (the house is L-shaped; outside to the north).
   - guid: "x-north-wing-e"
     storey: 0
-    axis: [[8.021, 2.377], [5.794, 2.405]]
+    axis: [[7.950, 2.197], [5.723, 2.275]]
     z_base: 0.00
     height: 2.95
     thickness: -1.00
@@ -142,7 +154,7 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. North wall of the back entry (wing). Split from x-north-wing-w at x=5.0: the back entry was scanned with a ~6 deg yaw drift (see i-s4), so its stretch of this wall is rotated against the bedroom stretch."}
   - guid: "x-north-wing-w"
     storey: 0
-    axis: [[5.844, 2.215], [1.826, 2.030]]
+    axis: [[5.753, 2.093], [1.735, 2.027]]
     z_base: 0.00
     height: 2.95
     thickness: -1.00
@@ -153,7 +165,7 @@ walls:
   # North block (north block (raised floor at level z 0.75, flat ceiling 3.09)): its walls start at z_base 0.75, the raised floor.
   - guid: "x-east-n"
     storey: 0
-    axis: [[1.302, 2.267], [1.136, 7.771]]
+    axis: [[1.474, 2.278], [1.390, 7.864]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -163,7 +175,7 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. East facade of the north block (raised floor at level z 0.75, flat ceiling 3.09)."}
   - guid: "x-north-e"
     storey: 0
-    axis: [[1.129, 7.758], [-2.543, 7.650]]
+    axis: [[1.420, 7.856], [-2.232, 7.801]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -173,7 +185,7 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. North facade, bedroom 1; 6 cm south of x-north-w where they meet at x=-2.75 (drift), so split there."}
   - guid: "x-north-w"
     storey: 0
-    axis: [[-2.542, 7.709], [-9.689, 7.582]]
+    axis: [[-2.224, 7.834], [-9.381, 7.863]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -183,7 +195,7 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. North facade of kitchen + utility room."}
   - guid: "x-west-n"
     storey: 0
-    axis: [[-9.675, 7.572], [-9.634, 2.298]]
+    axis: [[-9.367, 7.853], [-9.436, 2.578]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -193,7 +205,7 @@ walls:
     metadata: {note: "external: only the inner face is scanned; axis on the inner face (fitted per 0.4 m bin, both ends), thickness unknown. West facade of the north block (WC, entrance, utility); front and back doors in it."}
   - guid: "x-west-s"
     storey: 0
-    axis: [[-9.486, 1.828], [-9.435, -2.133]]
+    axis: [[-9.386, 2.139], [-9.446, -1.828]]
     z_base: 0.00
     height: 3.11
     top: [[0.0, 3.109], [3.982, 2.348]]  # follows the mono pitch
@@ -206,7 +218,7 @@ walls:
   # 9 cm jog at x=-7.55 (where the stair opening starts).
   - guid: "i-split-w"
     storey: 0
-    axis: [[-9.579, 1.871], [-7.037, 1.995]]
+    axis: [[-9.436, 2.166], [-6.891, 2.219]]
     z_base: 0.00
     height: 3.09
     thickness: -1.00
@@ -216,7 +228,7 @@ walls:
     metadata: {note: "The split-level wall between the WC (north, floor 0.75) and the living room (south, floor 0), full height 0 -> 3.09. Faces seen from the two sides are INVERTED (north face at y~1.95-2.07, south face at y~2.30-2.12, up to 0.38 m apart the wrong way): pose drift between the scan of the north and south blocks. Axis is the mean of the two faces; thickness unknown."}
   - guid: "i-split-e"
     storey: 0
-    axis: [[-6.907, 2.014], [1.513, 2.166]]
+    axis: [[-6.865, 2.168], [1.566, 2.190]]
     z_base: 0.00
     height: 3.09
     thickness: -1.00
@@ -226,7 +238,7 @@ walls:
     metadata: {note: "Split-level wall between the hall / bedroom 2 (north, floor 0.75) and living room / room S2 / bathroom (south, floor 0). Face positions disagree along the wall (thickness +4 cm at the west end, -18 cm at the east end): drift. Axis = mean of the fitted faces; thickness unknown. Holds the stair opening and the balustrade opening over the living room."}
   - guid: "i-s1"
     storey: 0
-    axis: [[-3.226, -1.909], [-3.311, 2.043]]
+    axis: [[-3.375, -1.765], [-3.297, 2.150]]
     z_base: 0.00
     height: 3.09
     top: [[0.0, 2.369], [3.926, 3.093]]  # follows the mono pitch
@@ -237,7 +249,7 @@ walls:
     metadata: {note: "Living room | room S2. Faces inconsistent (-12 / +11 cm, a 0.2 m deep object west of it at y<0.8 pulls the west-face fit); thickness unknown. south block: its top follows the mono-pitch ceiling (top: the plane of the room beside it; height is its highest point)"}
   - guid: "i-s2"
     storey: 0
-    axis: [[-0.250, -1.893], [-0.368, 2.036]]
+    axis: [[-0.444, -1.795], [-0.486, 2.128]]
     z_base: 0.00
     height: 3.08
     top: [[0.0, 2.370], [3.931, 3.075]]  # follows the mono pitch
@@ -248,7 +260,7 @@ walls:
     metadata: {note: "Room S2 | bathroom; thickness 0.12 = mean of 0.17 (south end) and 0.07 (north end) face separations. south block: its top follows the mono-pitch ceiling (top: the plane of the room beside it; height is its highest point)"}
   - guid: "i-s3"
     storey: 0
-    axis: [[1.744, -1.879], [1.706, 2.037]]
+    axis: [[1.551, -1.879], [1.576, 2.050]]
     z_base: 0.00
     height: 2.99
     top: [[0.0, 2.353], [3.888, 2.990]]  # follows the mono pitch
@@ -259,7 +271,7 @@ walls:
     metadata: {note: "Bathroom | wing bedroom; 0.33 m thick (0.28 south end, 0.39 north end) - probably the old external wall before the wing was added. south block: its top follows the mono-pitch ceiling (top: the plane of the room beside it; height is its highest point)"}
   - guid: "i-s4"
     storey: 0
-    axis: [[5.965, -1.640], [5.696, 2.229]]
+    axis: [[5.869, -1.760], [5.832, 2.114]]
     z_base: 0.00
     height: 2.91
     top: [[0.0, 2.378], [3.852, 2.908]]  # follows the mono pitch
@@ -270,7 +282,7 @@ walls:
     metadata: {note: "Wing bedroom | back entry. The east face is rotated ~6 deg against the west face (separation 0.18 m at the south end, 0.41 m at the north end): the back entry was scanned with a yaw drift. Axis ON THE WEST (bedroom) FACE, which is straight and well supported; thickness unknown. south block: its top follows the mono-pitch ceiling (top: the plane of the room beside it; height is its highest point)"}
   - guid: "i-n-w1"
     storey: 0
-    axis: [[-9.635, 3.398], [-7.182, 3.458]]
+    axis: [[-9.413, 3.672], [-6.954, 3.697]]
     z_base: 0.75
     height: 2.34
     thickness: 0.22
@@ -280,7 +292,7 @@ walls:
     metadata: {note: "WC | entrance, 0.22 m (0.20/0.23 at the ends)."}
   - guid: "i-n1"
     storey: 0
-    axis: [[-7.169, 2.163], [-7.153, 5.105]]
+    axis: [[-6.893, 2.377], [-6.906, 5.331]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -290,7 +302,7 @@ walls:
     metadata: {note: "WC + entrance | hall. Faces inverted at the south end (-17 cm) and +5 cm at the north end: drift; thickness unknown."}
   - guid: "i-n-w2"
     storey: 0
-    axis: [[-9.618, 5.176], [-7.236, 5.117]]
+    axis: [[-9.356, 5.458], [-6.979, 5.344]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -300,7 +312,7 @@ walls:
     metadata: {note: "Entrance | utility room. Faces inconsistent (-11 / -3 cm): drift; thickness unknown. A closet (short wall at x=-8.84, y 5.15..5.67) in the utility room's south-west corner is not modelled."}
   - guid: "i-n2"
     storey: 0
-    axis: [[-6.089, 5.065], [-6.126, 7.663]]
+    axis: [[-5.833, 5.264], [-5.825, 7.865]]
     z_base: 0.75
     height: 2.34
     thickness: 0.08
@@ -310,7 +322,7 @@ walls:
     metadata: {note: "Utility room | kitchen, 0.08 m."}
   - guid: "i-n-mid-w"
     storey: 0
-    axis: [[-6.091, 5.096], [-5.387, 5.053]]
+    axis: [[-5.835, 5.295], [-5.135, 5.242]]
     z_base: 0.75
     height: 2.34
     thickness: -1.00
@@ -320,7 +332,7 @@ walls:
     metadata: {note: "0.7 m wall stub at the west end of the kitchen/hall boundary, seen from the hall only; the rest of that line (x -5.7..-2.75) is OPEN in the scan (kitchen open to the hall)."}
   - guid: "i-n3"
     storey: 0
-    axis: [[-2.320, 2.275], [-2.460, 7.702]]
+    axis: [[-2.100, 2.330], [-2.166, 7.825]]
     z_base: 0.75
     height: 2.34
     thickness: 0.12
@@ -330,7 +342,7 @@ walls:
     metadata: {note: "Hall + kitchen | bedrooms 1 and 2, 0.12 m."}
   - guid: "i-n-e"
     storey: 0
-    axis: [[-2.425, 4.942], [1.167, 4.945]]
+    axis: [[-2.174, 5.029], [1.423, 5.040]]
     z_base: 0.75
     height: 2.34
     thickness: 0.07
@@ -345,11 +357,11 @@ spaces:
     name: "Living room"
     kind: room
     polygon:
-      outer: [[-9.436, -2.156], [-3.242, -1.920], [-3.425, 2.116], [-6.930, 1.917], [-6.927, 1.827], [-9.488, 1.611]]
+      outer: [[-9.448, -1.851], [-3.346, -1.794], [-3.279, 2.165], [-6.821, 2.147], [-6.819, 2.058], [-9.393, 1.922]]
     z_floor: 0.00
     z_ceiling: 3.09
     ceiling_planes:  # mono pitch, measured (see the header)
-      - {at: [-9.379, -2.191, 2.333], slope: [-0.0096, 0.1907]}
+      - {at: [-9.442, -1.831, 2.332], slope: [-0.0009, 0.1909]}
     source: manual
     locked: true
     metadata: {identified_by: "Largest room, two south windows + patio door, stair down from the hall (frames 121-137). Name from size/position: no furniture left in the house. south block: sloped (mono-pitch) ceiling from ~2.38 at the south facade to ~3.0 at the split wall; its ceiling plane is measured from the raw cloud (see the header), z_ceiling 3.09 caps it"}
@@ -358,11 +370,11 @@ spaces:
     name: "Room S2 (parquet)"
     kind: room
     polygon:
-      outer: [[-3.139, -1.976], [-0.306, -1.901], [-0.457, 2.001], [-3.172, 1.964]]
+      outer: [[-3.333, -1.815], [-0.499, -1.779], [-0.584, 2.119], [-3.291, 2.128]]
     z_floor: 0.00
     z_ceiling: 3.09
     ceiling_planes:  # mono pitch, measured (see the header)
-      - {at: [-9.237, -2.173, 2.368], slope: [-0.0042, 0.1781]}
+      - {at: [-9.436, -1.850, 2.364], slope: [0.0001, 0.1781]}
     source: manual
     locked: true
     confidence: 0.5
@@ -372,11 +384,11 @@ spaces:
     name: "Bathroom"
     kind: room
     polygon:
-      outer: [[-0.194, -1.869], [1.561, -1.849], [1.560, 2.050], [-0.280, 2.056]]
+      outer: [[-0.389, -1.795], [1.362, -1.816], [1.441, 2.079], [-0.388, 2.121]]
     z_floor: 0.00
     z_ceiling: 3.09
     ceiling_planes:  # mono pitch, measured (see the header)
-      - {at: [-9.249, -2.031, 2.341], slope: [-0.0018, 0.1808]}
+      - {at: [-9.449, -1.751, 2.340], slope: [0.0023, 0.1808]}
     source: manual
     locked: true
     metadata: {identified_by: "Built-in bathtub at the north end, tiled walls, ceiling extract (frames 168-183). south block: sloped (mono-pitch) ceiling from ~2.38 at the south facade to ~3.0 at the split wall; its ceiling plane is measured from the raw cloud (see the header), z_ceiling 3.09 caps it"}
@@ -385,11 +397,11 @@ spaces:
     name: "Bedroom (wing)"
     kind: room
     polygon:
-      outer: [[1.932, -1.774], [5.912, -1.711], [5.720, 2.205], [1.858, 2.029]]
+      outer: [[1.747, -1.805], [5.714, -1.827], [5.629, 2.084], [1.765, 2.025]]
     z_floor: 0.00
     z_ceiling: 3.09
     ceiling_planes:  # mono pitch, measured (see the header)
-      - {at: [-9.228, -2.194, 2.323], slope: [-0.0036, 0.1473]}
+      - {at: [-9.452, -1.801, 2.321], slope: [0.0015, 0.1473]}
     source: manual
     locked: true
     metadata: {identified_by: "Built-in wardrobes along the north wall, patio door + two windows (frames 186-214). south block: sloped (mono-pitch) ceiling from ~2.38 at the south facade to ~3.0 at the split wall; its ceiling plane is measured from the raw cloud (see the header), z_ceiling 3.09 caps it"}
@@ -398,11 +410,11 @@ spaces:
     name: "Back entry / utility (wing)"
     kind: room
     polygon:
-      outer: [[6.019, -1.630], [8.067, -1.542], [8.014, 2.377], [5.677, 2.412]]
+      outer: [[5.828, -1.761], [7.880, -1.721], [7.943, 2.197], [5.606, 2.284]]
     z_floor: 0.00
     z_ceiling: 3.09
     ceiling_planes:  # mono pitch, measured (see the header)
-      - {at: [-9.054, -2.954, 2.358], slope: [-0.0098, 0.1275]}
+      - {at: [-9.282, -2.633, 2.354], slope: [-0.0060, 0.1277]}
     source: manual
     locked: true
     confidence: 0.6
@@ -414,7 +426,7 @@ spaces:
     name: "WC / bathroom 2"
     kind: room
     polygon:
-      outer: [[-9.631, 2.132], [-7.169, 2.163], [-7.155, 3.349], [-9.634, 3.287]]
+      outer: [[-9.438, 2.412], [-6.981, 2.380], [-6.930, 3.566], [-9.414, 3.567]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
@@ -425,7 +437,7 @@ spaces:
     name: "Entrance hall"
     kind: room
     polygon:
-      outer: [[-9.629, 3.510], [-7.157, 3.566], [-7.153, 5.117], [-9.618, 5.176]]
+      outer: [[-9.406, 3.789], [-6.927, 3.784], [-6.896, 5.343], [-9.356, 5.458]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
@@ -436,7 +448,7 @@ spaces:
     name: "Utility room (bryggers)"
     kind: room
     polygon:
-      outer: [[-9.618, 5.176], [-7.153, 5.117], [-6.131, 5.099], [-6.166, 7.647], [-9.675, 7.583]]
+      outer: [[-9.356, 5.458], [-6.896, 5.343], [-5.874, 5.298], [-5.865, 7.850], [-9.367, 7.864]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
@@ -448,7 +460,7 @@ spaces:
     name: "Kitchen"
     kind: room
     polygon:
-      outer: [[-6.049, 5.092], [-2.466, 4.895], [-2.444, 7.708], [-6.086, 7.645]]
+      outer: [[-5.793, 5.291], [-2.214, 4.985], [-2.126, 7.831], [-5.785, 7.847]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
@@ -459,7 +471,7 @@ spaces:
     name: "Hall"
     kind: corridor
     polygon:
-      outer: [[-7.166, 2.255], [-7.152, 5.130], [-6.049, 5.092], [-2.466, 4.895], [-2.360, 2.206]]
+      outer: [[-6.974, 2.472], [-6.895, 5.356], [-5.793, 5.291], [-2.214, 4.985], [-2.162, 2.262]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
@@ -470,7 +482,7 @@ spaces:
     name: "Bedroom 2"
     kind: room
     polygon:
-      outer: [[-2.241, 2.200], [-2.331, 4.910], [1.172, 4.910], [1.302, 2.296]]
+      outer: [[-2.039, 2.254], [-2.083, 4.992], [1.428, 5.005], [1.504, 2.307]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
@@ -481,7 +493,7 @@ spaces:
     name: "Bedroom 1"
     kind: room
     polygon:
-      outer: [[-2.328, 4.979], [-2.327, 7.646], [1.136, 7.758], [1.175, 4.980]]
+      outer: [[-2.080, 5.061], [-2.018, 7.775], [1.427, 7.852], [1.431, 5.075]]
     z_floor: 0.75
     z_ceiling: 3.09
     source: manual
