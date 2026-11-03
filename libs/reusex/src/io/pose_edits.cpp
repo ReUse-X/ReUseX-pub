@@ -5,6 +5,7 @@
 #include "io/pose_edits.hpp"
 
 #include "core/pose_graph.hpp"
+#include "core/working_pose_edits.hpp"
 #include "yaml_json.hpp"
 
 #include <fmt/format.h>
@@ -540,6 +541,12 @@ core::PoseEdits read_pose_edits(const std::filesystem::path &path,
     throw std::runtime_error(fmt::format("{}: {}", path.string(), e.what()));
   }
   check_pose_edits_project(edits, expected_project_guid);
+  return edits;
+}
+
+core::PoseEdits stored_pose_edits(const ProjectDB &db) {
+  core::PoseEdits edits = pose_edits_from_json(core::working_pose_edits(db));
+  check_pose_edits_project(edits, db.project_guid());
   return edits;
 }
 

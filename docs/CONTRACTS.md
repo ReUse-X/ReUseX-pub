@@ -216,7 +216,11 @@ only: `core/pose_blocks.hpp`, `core/pose_repair.hpp`,
   and the working edits; restoring one writes them back byte-identically,
   except that frames (and their edges) imported after the version was taken
   are left alone. A live state that is no version yet is recorded first
-  (`baseline` / `external`), so a restore never loses it.
+  (`baseline` / `external`), so a restore never loses it. A version's
+  `frames` / `edges` blobs store only what differs from its parent (a full
+  keyframe every 16 links, reusex-md4a), so its state is
+  `core::pose_version_state()`, never one row's blobs alone; versions are
+  never deleted, since a later delta needs its base.
 
 ### `graph_init` (`rux graph init`)
 
@@ -261,6 +265,13 @@ factor per active `pose_graph_edges` row, writes poses to
 `sensor_frames.transform` and residual/deviation/seed-disagreement back to
 every edge. Repeatable; never adds, removes or re-statuses edges (`rux
 register`: joint pairwise registration, writes poses only).
+
+`optimize` (the job stage and `rux optimize` without `--edits`) solves with
+the project's working pose edits, project setting `pose_edits.working`
+(`io::stored_pose_edits`; the editor's detach cuts and holds, reusex-fkqd);
+`--edits FILE` replaces them for that run. A detached part that no loop,
+relative edit or hold ties back fails the solve naming the `detach-<a>-<b>`
+cut; it is never bridged from the initial poses.
 
 | | |
 |---|---|

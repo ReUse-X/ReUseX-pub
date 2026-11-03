@@ -9,6 +9,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <reusex/core/ProjectDB.hpp>
+#include <reusex/core/pose_edits.hpp>
+#include <reusex/core/working_pose_edits.hpp>
 #include <reusex/pipeline/optimize_stage.hpp>
 
 #include "../../support/pose_fixture.hpp"
@@ -233,4 +235,66 @@ TEST_CASE("OptimizeStage_InvalidInput_RecordsPipelineLogEntry",
   CHECK_FALSE(log.front().error_msg.empty());
   const auto params = nlohmann::json::parse(log.front().parameters);
   CHECK(params.at("job_id") == "job-optimize-9");
+}
+
+namespace {
+
+/// Six frames looking at one wall 1.5 m away, 0.1 m apart along x (enough
+/// surfels for the solve; see tests/unit/slam/test_optimize_stored_graph.cpp).
+void make_wall_chain(const std::filesystem::path &path) {
+  reusex::ProjectDB db(path);
+  for (int k = 0; k < 6; ++k)
+    db.save_sensor_frame(k, make_color(64, 48), make_depth(64, 48, 1.5),
+                         cv::Mat(), translation_pose(0.1 * k, 0, 0),
+                         make_intrinsics(64.0, 64.0, 32.0, 24.0, 64, 48),
+                         static_cast<double>(k));
+}
+
+StageResult run_optimize_job(const std::filesystem::path &project) {
+  StageContext ctx;
+  ctx.project = project;
+  ctx.stage = JobStage::optimize;
+  ctx.parameters = R"({"min_observations":2})";
+  return stage_executor_with_optimize()(ctx);
+}
+
+} // namespace
+
+// reusex-fkqd: the editor stores its cuts and holds as the working pose-edits
+// document (core/working_pose_edits.hpp). The optimize job must solve with
+// it: a detach cut that nothing else ties back is the documented error
+// ("warn while a detached block has no loop holding it"), not a solve that
+// bridges the cut from the initial poses.
+TEST_CASE("OptimizeStage_StoredDetachCut_WithoutAHold_Refuses",
+          "[pipeline][optimize_stage][pose_edits]") {
+  TempPath project("test_optimize_stage_detach");
+  make_wall_chain(project.path);
+  {
+    reusex::ProjectDB db(project.path);
+    reusex::core::put_working_pose_edit(
+        db, reusex::core::reject_odometry_edit(2, 3, "session 2"));
+  }
+  const StageResult r = run_optimize_job(project.path);
+  INFO(r.message);
+  CHECK_FALSE(r.ok);
+  CHECK(r.message.find("detach-2-3") != std::string::npos);
+}
+
+TEST_CASE("OptimizeStage_StoredDetachCutAndHold_SolvesWithBoth",
+          "[pipeline][optimize_stage][pose_edits]") {
+  TempPath project("test_optimize_stage_detach_hold");
+  make_wall_chain(project.path);
+  {
+    reusex::ProjectDB db(project.path);
+    reusex::core::put_working_pose_edit(
+        db, reusex::core::reject_odometry_edit(2, 3, "session 2"));
+    reusex::core::put_working_pose_edit(
+        db, reusex::core::hold_edit("hold-3-5", 3, 5, reusex::core::Dof::all,
+                                    0.01, 0.1, "block transform"));
+  }
+  const StageResult r = run_optimize_job(project.path);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  CHECK(r.message.find("2 pose edits") != std::string::npos);
+  CHECK(r.message.find("1 stored edge rejected") != std::string::npos);
 }
