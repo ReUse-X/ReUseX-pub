@@ -421,7 +421,11 @@ bool inside_space(const core::SpaceRecord &s, const Vec2 &p) {
 struct WallBox {
   const core::WallRecord *wall = nullptr;
   Vec2 p0, d;
+  /// s0..s1 is the envelope along the axis; each end may be cut on a slant
+  /// (a mitred corner, a stem abutting a slanted wall), so its position on
+  /// the lo face and on the hi face is kept apart (reusex-6x9g).
   double len = 0.0, s0 = 0.0, s1 = 0.0, lo = 0.0, hi = 0.0, z0 = 0.0, z1 = 0.0;
+  double s0_lo = 0.0, s0_hi = 0.0, s1_lo = 0.0, s1_hi = 0.0;
   bool valid = false;
   /// Sloped top (s, z), capped at z1 (reusex-546); empty = flat at z1.
   std::vector<Vec2> top;
@@ -453,9 +457,228 @@ struct WallBox {
   }
   /// The footprint, counter-clockwise.
   Ring footprint() const {
-    return {at(s0, lo), at(s1, lo), at(s1, hi), at(s0, hi)};
+    return {at(s0_lo, lo), at(s1_lo, lo), at(s1_hi, hi), at(s0_hi, hi)};
+  }
+  /// What the slabs take from a wall: its box with each joined end reaching
+  /// the far face of the wall it meets (a union of the mitred footprints
+  /// can pinch at a corner's tip, which leaves a slab open; these boxes
+  /// cover the same corners without that).
+  double slab_s0 = 0.0, slab_s1 = 0.0;
+  Ring slab_footprint() const {
+    return {at(slab_s0, lo), at(slab_s1, lo), at(slab_s1, hi), at(slab_s0, hi)};
+  }
+  /// Set the start (@p start) or the end of the wall: at @p s_lo on the lo
+  /// face, @p s_hi on the hi face; the envelope follows.
+  void set_end(bool start, double s_lo, double s_hi) {
+    if (start) {
+      s0_lo = s_lo;
+      s0_hi = s_hi;
+      s0 = std::min(s_lo, s_hi);
+    } else {
+      s1_lo = s_lo;
+      s1_hi = s_hi;
+      s1 = std::max(s_lo, s_hi);
+    }
   }
 };
+
+/// Where the face of @p b at offset @p t meets the line through @p q along
+/// @p u, as s along @p b; nullopt when they are (nearly) parallel.
+std::optional<double> face_meets(const WallBox &b, double t, const Vec2 &q,
+                                 const Vec2 &u) {
+  const double c = b.d.x() * u.y() - b.d.y() * u.x();
+  if (std::abs(c) < 1e-9)
+    return std::nullopt;
+  const Vec2 r = q - b.at(0.0, t);
+  return (r.x() * u.y() - r.y() * u.x()) / c;
+}
+
+/// A wall end's place as {s on the lo face, s on the hi face}.
+using EndCut = std::pair<double, double>;
+
+/// The far end of @p b from its end @p start (the other end's axis point).
+Vec2 far_end(const WallBox &b, bool start) {
+  return start ? b.at(b.len, 0.0) : b.p0;
+}
+
+/// Which side of @p b's axis @p p is on: +1 left (the hi side), -1 right.
+double side_of(const WallBox &b, const Vec2 &p) {
+  const Vec2 n(-b.d.y(), b.d.x());
+  return n.dot(p - b.p0) >= 0.0 ? 1.0 : -1.0;
+}
+
+/// The mitre of a corner between the end @p a_start of @p A and the end
+/// @p b_start of @p B: both walls end on the line through the point where
+/// their outer faces meet and the point where their inner ones meet, so they
+/// share it and neither a gap nor an overlap is left, whatever the angle and
+/// the thicknesses. nullopt for (nearly) parallel walls.
+std::optional<std::pair<EndCut, EndCut>> mitre(const WallBox &A, bool a_start,
+                                               const WallBox &B, bool b_start) {
+  const double sin_ab = std::abs(A.d.x() * B.d.y() - A.d.y() * B.d.x());
+  if (sin_ab < std::sin(10.0 * M_PI / 180.0))
+    return std::nullopt;
+  // The face of each wall toward the other's body, and the one away from it.
+  const double b_side = side_of(A, far_end(B, b_start));
+  const double a_side = side_of(B, far_end(A, a_start));
+  const double a_toward = b_side > 0 ? A.hi : A.lo;
+  const double a_away = b_side > 0 ? A.lo : A.hi;
+  const double b_toward = a_side > 0 ? B.hi : B.lo;
+  const double b_away = a_side > 0 ? B.lo : B.hi;
+  const auto a_out = face_meets(A, a_away, B.at(0.0, b_away), B.d);
+  const auto a_in = face_meets(A, a_toward, B.at(0.0, b_toward), B.d);
+  const auto b_out = face_meets(B, b_away, A.at(0.0, a_away), A.d);
+  const auto b_in = face_meets(B, b_toward, A.at(0.0, a_toward), A.d);
+  if (!a_out || !a_in || !b_out || !b_in)
+    return std::nullopt;
+  const auto cut = [](double t_away, double lo, double s_out, double s_in) {
+    return t_away == lo ? EndCut{s_out, s_in} : EndCut{s_in, s_out};
+  };
+  return std::pair{cut(a_away, A.lo, *a_out, *a_in),
+                   cut(b_away, B.lo, *b_out, *b_in)};
+}
+
+/// A butt corner between walls of unlike thickness: the thicker @p T runs
+/// through to the far face of the thinner @p U (the face away from T's
+/// body), and U abuts T's near face (abut()). The end of T is cut along
+/// that face of U.
+std::optional<EndCut> run_through(const WallBox &T, bool t_start,
+                                  const WallBox &U) {
+  const double t_side = side_of(U, far_end(T, t_start));
+  const double away = t_side > 0 ? U.lo : U.hi;
+  const auto s_lo = face_meets(T, T.lo, U.at(0.0, away), U.d);
+  const auto s_hi = face_meets(T, T.hi, U.at(0.0, away), U.d);
+  if (!s_lo || !s_hi)
+    return std::nullopt;
+  return EndCut{*s_lo, *s_hi};
+}
+
+/// The end @p a_start of the stem @p A of a tee cut on the face of the
+/// through wall @p B that is toward it: the stem abuts that face.
+std::optional<EndCut> abut(const WallBox &A, bool a_start, const WallBox &B) {
+  const double a_side = side_of(B, far_end(A, a_start));
+  const double near = a_side > 0 ? B.hi : B.lo;
+  const auto s_lo = face_meets(A, A.lo, B.at(0.0, near), B.d);
+  const auto s_hi = face_meets(A, A.hi, B.at(0.0, near), B.d);
+  if (!s_lo || !s_hi)
+    return std::nullopt;
+  return EndCut{*s_lo, *s_hi};
+}
+
+/// Cut the joined wall ends (reusex-6x9g): a corner is mitred (walls about
+/// as thick) or butt-jointed (the thicker runs through to the thinner's far
+/// face, the thinner abuts it), the stem of a tee abuts the through wall's
+/// near face, a crossing and a collinear join
+/// leave both walls as they are. An end with several joins takes the one
+/// that reaches furthest, so no gap opens. A cut that is degenerate (nearly
+/// parallel walls), would move the end further than a few thicknesses, or
+/// would turn the wall inside out falls back to extending the end square
+/// by the other wall's reach.
+void join_wall_ends(std::vector<WallBox> &boxes,
+                    const std::unordered_map<std::string, std::size_t> &by_guid,
+                    const std::vector<core::WallJoinRecord> &joins) {
+  // A corner whose walls differ in thickness by more than this factor is a
+  // butt joint, else a mitre.
+  constexpr double butt_ratio = 1.25;
+  // Proposed cuts per (box, end); the end keeps the furthest-reaching one.
+  std::map<std::pair<std::size_t, bool>, EndCut> cuts;
+  const auto reach = [](const WallBox &w) {
+    return std::max(std::abs(w.lo), std::abs(w.hi));
+  };
+  const auto sane = [&](std::size_t i, bool start, const EndCut &c) {
+    const WallBox &w = boxes[i];
+    const double limit = std::max(0.5, 4.0 * (w.hi - w.lo) + 4.0 * reach(w));
+    const double here = start ? 0.0 : w.len;
+    return std::isfinite(c.first) && std::isfinite(c.second) &&
+           std::abs(c.first - here) <= limit &&
+           std::abs(c.second - here) <= limit &&
+           (start ? std::max(c.first, c.second) < w.len - 1e-3
+                  : std::min(c.first, c.second) > 1e-3);
+  };
+  const auto propose = [&](std::size_t i, bool start, EndCut c) {
+    const WallBox &w = boxes[i];
+    // Moved outward = positive.
+    const auto out = [&](const EndCut &e) {
+      return start ? -0.5 * (e.first + e.second)
+                   : 0.5 * (e.first + e.second) - w.len;
+    };
+    auto [it, fresh] = cuts.try_emplace({i, start}, c);
+    if (!fresh && out(c) > out(it->second))
+      it->second = c;
+  };
+  const auto square = [&](std::size_t i, bool start, double r) {
+    const WallBox &w = boxes[i];
+    const double s = start ? -r : w.len + r;
+    if (sane(i, start, {s, s}))
+      propose(i, start, {s, s});
+  };
+  for (const auto &j : joins) {
+    if (j.kind != "corner" && j.kind != "tee")
+      continue;
+    const auto a = by_guid.find(j.wall_a), b = by_guid.find(j.wall_b);
+    if (a == by_guid.end() || b == by_guid.end() || a->second == b->second)
+      continue;
+    // The slabs' boxes: the end reaches the other wall's far face.
+    const auto slab_reach = [&](WallBox &w, const std::string &at, double r) {
+      if (at == "start")
+        w.slab_s0 = std::min(w.slab_s0, -r);
+      else if (at == "end")
+        w.slab_s1 = std::max(w.slab_s1, w.len + r);
+    };
+    slab_reach(boxes[a->second], j.at_a, reach(boxes[b->second]));
+    slab_reach(boxes[b->second], j.at_b, reach(boxes[a->second]));
+    const bool a_end = j.at_a == "start" || j.at_a == "end";
+    const bool b_end = j.at_b == "start" || j.at_b == "end";
+    const std::size_t ia = a->second, ib = b->second;
+    const WallBox &A = boxes[ia], &B = boxes[ib];
+    if (a_end && b_end) {
+      // A corner (or a tee recorded end to end): mitred when the walls are
+      // about as thick, else a butt joint -- the thicker runs through to
+      // the thinner's far face and the thinner abuts it -- so a thin wall
+      // does not end in a long sliver along a thick one.
+      const bool as = j.at_a == "start", bs = j.at_b == "start";
+      const double ta = A.hi - A.lo, tb = B.hi - B.lo;
+      std::optional<std::pair<EndCut, EndCut>> m;
+      const double sin_ab = std::abs(A.d.x() * B.d.y() - A.d.y() * B.d.x());
+      if (std::max(ta, tb) > butt_ratio * std::min(ta, tb) &&
+          sin_ab >= std::sin(10.0 * M_PI / 180.0)) {
+        const bool a_thick = ta > tb;
+        const auto through =
+            a_thick ? run_through(A, as, B) : run_through(B, bs, A);
+        const auto abutting = a_thick ? abut(B, bs, A) : abut(A, as, B);
+        if (through && abutting)
+          m = a_thick ? std::pair{*through, *abutting}
+                      : std::pair{*abutting, *through};
+      } else {
+        m = mitre(A, as, B, bs);
+      }
+      if (m && sane(ia, as, m->first) && sane(ib, bs, m->second)) {
+        propose(ia, as, m->first);
+        propose(ib, bs, m->second);
+      } else {
+        // Nearly parallel: a corner that goes on straight (each wall leaves
+        // the joint the way the other came in) already meets square at the
+        // joint; one folded back reaches over the other's thickness.
+        const bool straight = (as ? -A.d : A.d).dot(bs ? -B.d : B.d) < 0.0;
+        if (!straight) {
+          square(ia, as, reach(B));
+          square(ib, bs, reach(A));
+        }
+      }
+    } else if (a_end != b_end) {
+      // A tee: the end abuts the through wall's near face.
+      const std::size_t is = a_end ? ia : ib, it = a_end ? ib : ia;
+      const bool ss = (a_end ? j.at_a : j.at_b) == "start";
+      const auto c = abut(boxes[is], ss, boxes[it]);
+      if (c && sane(is, ss, *c))
+        propose(is, ss, *c);
+      else
+        square(is, ss, reach(boxes[it]));
+    }
+    // Both on the path: a crossing, the walls go on through each other.
+  }
+  for (const auto &[key, c] : cuts)
+    boxes[key.first].set_end(key.second, c.first, c.second);
+}
 
 std::vector<WallBox> wall_boxes(const core::SolidModel &model,
                                 const SolidsOptions &opts,
@@ -475,8 +698,10 @@ std::vector<WallBox> wall_boxes(const core::SolidModel &model,
       continue;
     }
     b.d = (p1 - b.p0) / b.len;
-    b.s0 = 0.0;
-    b.s1 = b.len;
+    b.set_end(true, 0.0, 0.0);
+    b.set_end(false, b.len, b.len);
+    b.slab_s0 = 0.0;
+    b.slab_s1 = b.len;
     b.z0 = w.z_base;
     b.z1 = w.z_base + w.height;
     for (const auto &q : w.top)
@@ -511,28 +736,8 @@ std::vector<WallBox> wall_boxes(const core::SolidModel &model,
     b.valid = true;
     by_guid.emplace(w.guid, i);
   }
-  if (opts.extend_at_joins) {
-    // Reach the far face of the wall met at a corner or a tee.
-    const auto reach = [&](const WallBox &other) {
-      return std::max(std::abs(other.lo), std::abs(other.hi));
-    };
-    for (const auto &j : model.wall_joins) {
-      if (j.kind != "corner" && j.kind != "tee")
-        continue;
-      const auto a = by_guid.find(j.wall_a), b = by_guid.find(j.wall_b);
-      if (a == by_guid.end() || b == by_guid.end())
-        continue;
-      WallBox &A = boxes[a->second], &B = boxes[b->second];
-      const auto extend = [&](WallBox &w, const std::string &at, double r) {
-        if (at == "start")
-          w.s0 = std::min(w.s0, -r);
-        else if (at == "end")
-          w.s1 = std::max(w.s1, w.len + r);
-      };
-      extend(A, j.at_a, reach(B));
-      extend(B, j.at_b, reach(A));
-    }
-  }
+  if (opts.extend_at_joins)
+    join_wall_ends(boxes, by_guid, model.wall_joins);
   return boxes;
 }
 
@@ -598,6 +803,46 @@ std::optional<Mesh> wall_mesh(const WallBox &b) {
     const Vec2 xy = b.p0 + b.d * p.x() - n * p.z();
     m->point(v) = K::Point_3(xy.x(), xy.y(), p.y());
   }
+  // A slanted end (a mitre, reusex-6x9g): the elevation was extruded over
+  // the envelope; cut it by the vertical plane through the end on its two
+  // faces, keeping the wall's side (exactly; the envelope stays if the clip
+  // fails).
+  EMesh e;
+  bool cut = false;
+  for (const bool start : {true, false}) {
+    const double s_lo = start ? b.s0_lo : b.s1_lo;
+    const double s_hi = start ? b.s0_hi : b.s1_hi;
+    if (std::abs(s_lo - s_hi) < 1e-9)
+      continue;
+    const Vec2 p_lo = b.at(s_lo, b.lo), p_hi = b.at(s_hi, b.hi);
+    const Vec2 along = p_hi - p_lo;
+    Vec2 out(along.y(), -along.x());
+    if (out.dot(start ? -b.d : b.d) < 0.0)
+      out = -out;
+    if (!cut)
+      e = to_exact(*m);
+    cut = true;
+    const EK::Plane_3 plane(EK::FT(out.x()), EK::FT(out.y()), EK::FT(0),
+                            -(EK::FT(out.x()) * EK::FT(p_lo.x()) +
+                              EK::FT(out.y()) * EK::FT(p_lo.y())));
+    try {
+      PMP::clip(e, plane, CGAL::parameters::clip_volume(true));
+    } catch (const std::exception &ex) {
+      debug("solids: cutting the joined end of wall {} threw: {}", b.wall->guid,
+            ex.what());
+      return m;
+    }
+  }
+  if (cut) {
+    if (e.number_of_faces() == 0 || !CGAL::is_closed(e)) {
+      debug("solids: cutting the joined ends of wall {} left no closed "
+            "solid; its ends are kept square",
+            b.wall->guid);
+      return m;
+    }
+    PMP::triangulate_faces(e);
+    return to_inexact(e);
+  }
   return m;
 }
 
@@ -612,7 +857,8 @@ ElementSolid build_wall(const WallBox &b,
   e.source_guid = w.guid;
   e.storey = w.storey;
   e.predefined = "STANDARD";
-  e.profile.outer = {{b.s0, b.lo}, {b.s1, b.lo}, {b.s1, b.hi}, {b.s0, b.hi}};
+  e.profile.outer = {
+      {b.s0_lo, b.lo}, {b.s1_lo, b.lo}, {b.s1_hi, b.hi}, {b.s0_hi, b.hi}};
   e.profile.depth = b.z1 - b.z0;
   e.profile.placement = row_major(T * local_frame(b.p0, b.z0, b.d));
 
@@ -1548,16 +1794,16 @@ SolidsResult build_solids(const core::SolidModel &model_in,
     std::vector<Ring> wall_rings;
     for (const auto &b : boxes)
       if (b.valid && b.wall->storey == st.idx) {
-        wall_rings.push_back(b.footprint());
-        floor_rings[fl.of(b.z0)].push_back(b.footprint());
+        wall_rings.push_back(b.slab_footprint());
+        floor_rings[fl.of(b.z0)].push_back(b.slab_footprint());
         const auto g =
             b.slope_space >= 0
                 ? sloped_group.find(static_cast<std::size_t>(b.slope_space))
                 : sloped_group.end();
         if (g != sloped_group.end())
-          roof_rings[g->second].push_back(b.footprint());
+          roof_rings[g->second].push_back(b.slab_footprint());
         else
-          roof_rings[cl.of(b.z1)].push_back(b.footprint());
+          roof_rings[cl.of(b.z1)].push_back(b.slab_footprint());
       }
     std::vector<std::vector<Piece>> floors, roofs;
     if (any_space) {
@@ -1645,8 +1891,11 @@ SolidsResult build_solids(const core::SolidModel &model_in,
 
   for (const auto *v : {&result.walls, &result.slabs, &result.spaces})
     for (const auto &e : *v)
-      if (!e.closed)
+      if (!e.closed) {
         ++result.not_closed;
+        debug("solids: {} {} (storey {}) is not closed", to_string(e.type),
+              e.source_guid, e.storey);
+      }
   return result;
 }
 

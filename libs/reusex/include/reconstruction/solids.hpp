@@ -11,7 +11,16 @@
 //
 //  - a wall is a box in its wall frame (axis, thickness, z_base, height)
 //    minus a box per opening (CGAL corefinement, exact predicates), so a door
-//    leaves a gap and a window a hole;
+//    leaves a gap and a window a hole; its ends are cut by its joins
+//    (reusex-6x9g): at a corner of two walls about as thick (within 25 %)
+//    both are mitred on the line through where their outer faces meet and
+//    where their inner ones meet, else the thicker runs through to the
+//    thinner's outer face and the thinner abuts it (a butt joint); the stem
+//    of a tee abuts the through wall's near face, and walls crossing or
+//    meeting collinear go on as they are -- so joined walls neither leave a
+//    gap nor overlap, at any angle and for any two thicknesses. The
+//    footprint stays a quadrilateral (a slanted end keeps its place on each
+//    face apart);
 //  - a slab is a storey's floor polygon (the union of its spaces and wall
 //    footprints, else the hull of its walls) extruded down from the floor by
 //    the gap to the storey below (else a default thickness), plus a roof
@@ -79,7 +88,9 @@ std::string_view to_string(SolidType type);
 /// An extruded area solid (IfcExtrudedAreaSolid): a profile in the local XY
 /// plane swept along local +Z by @ref depth, placed by @ref placement.
 struct ExtrusionProfile {
-  /// Outer ring, counter-clockwise, open (first point not repeated) [m].
+  /// Outer ring, counter-clockwise, open (first point not repeated) [m]. A
+  /// wall's is a quadrilateral {s0 on lo, s1 on lo, s1 on hi, s0 on hi} in
+  /// its (along, across) frame; a joined end may be slanted.
   std::vector<core::PlanPoint> outer;
   /// Holes, clockwise, open [m].
   std::vector<std::vector<core::PlanPoint>> holes;
@@ -132,8 +143,12 @@ struct SolidsOptions {
   /// the seen face): the box grows away from the space it faces, or about
   /// the axis when no space is on either side [m].
   double unknown_wall_thickness_m = 0.10;
-  /// Extend a wall end that meets another wall (corner, tee) by half that
-  /// wall's thickness, so the boxes meet at the corner.
+  /// Cut the wall ends at their joins (core::SolidModel::wall_joins): mitre
+  /// a corner (butt-joint it when one wall is over 1.25x the other's
+  /// thickness), abut a tee's stem on the through wall's near face. A join
+  /// whose cut is degenerate (nearly parallel walls) extends the end square
+  /// by the other wall's reach instead. Off: every wall ends at its axis
+  /// endpoints.
   bool extend_at_joins = true;
   /// An opening box reaches this far past both faces of its wall, and past
   /// the wall's bottom / top when it touches them, so the cut goes through
