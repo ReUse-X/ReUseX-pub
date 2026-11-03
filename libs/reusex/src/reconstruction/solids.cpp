@@ -4,6 +4,7 @@
 
 #include "reusex/reconstruction/solids.hpp"
 
+#include "reusex/core/guid.hpp"
 #include "reusex/core/logging.hpp"
 #include "reusex/core/sloped_ceiling.hpp"
 #include "reusex/geometry/transform_utils.hpp"
@@ -31,6 +32,7 @@
 
 #include <Eigen/Geometry>
 
+#include <fmt/format.h>
 #include <fmt/ranges.h>
 
 #include <algorithm>
@@ -1194,8 +1196,79 @@ bool add_dormers(Mesh &m, const core::SpaceRecord &space,
   return true;
 }
 
-SolidsResult build_solids(const core::SolidModel &model,
+namespace {
+
+/// Namespace of the eave walls' GUIDs (any fixed UUID: the name carries the
+/// space GUID).
+constexpr const char *kEaveNamespace = "b4c1f3a2-6d0e-5f7a-9c8b-2e1d0a3f4b5c";
+
+/// @p model with a knee wall for every eave with no wall (core::Eave,
+/// reusex-wyi0): a one-sided wall whose axis (its seen face) is the eave,
+/// from the space's floor up to the space's own slope along it (its top
+/// profile; locked, so the rooms beside it do not re-derive it);
+/// build_solids() grows it away from the space. Its GUID is deterministic:
+/// the space's and the eave's index. nullopt when there are none.
+std::optional<core::SolidModel> with_eave_walls(const core::SolidModel &model) {
+  std::vector<core::WallRecord> added;
+  for (const auto &s : model.spaces) {
+    const auto edges = core::roof_edges(s);
+    for (std::size_t k = 0; k < edges.eaves.size(); ++k) {
+      const auto &e = edges.eaves[k];
+      core::WallRecord w;
+      w.guid = core::deterministic_guid(kEaveNamespace,
+                                        fmt::format("eave/{}/{}", s.guid, k));
+      w.storey = s.storey;
+      w.x0 = e.a[0];
+      w.y0 = e.a[1];
+      w.x1 = e.b[0];
+      w.y1 = e.b[1];
+      // From the floor slab (the storey's floor level; the space's own
+      // measured floor sits a few cm off it) to the space's top.
+      w.z_base = s.z_floor;
+      for (const auto &st : model.storeys)
+        if (st.idx == s.storey && std::isfinite(st.z_floor))
+          w.z_base = std::min(w.z_base, st.z_floor);
+      w.height = s.z_ceiling - w.z_base;
+      w.thickness = -1.0;
+      w.assumed = true;
+      w.is_external = true;
+      w.source = "detected";
+      // Its top: the slope of its own space along it, every 0.25 m; kept as
+      // drawn (locked), so a flat room beside it cannot raise it.
+      w.locked = true;
+      w.metadata = R"({"inferred":"eave"})";
+      const double len = std::hypot(w.x1 - w.x0, w.y1 - w.y0);
+      const int n = std::max(1, static_cast<int>(std::ceil(len / 0.25)));
+      bool ok = len > 1e-6 && std::isfinite(w.height) && w.height > 0.0;
+      for (int i = 0; ok && i <= n; ++i) {
+        const double t = static_cast<double>(i) / n;
+        const double z = core::ceiling_at(s, w.x0 + t * (w.x1 - w.x0),
+                                          w.y0 + t * (w.y1 - w.y0));
+        ok = std::isfinite(z) && z > w.z_base + 0.05;
+        w.top.push_back({t * len, z});
+      }
+      if (ok)
+        added.push_back(std::move(w));
+    }
+  }
+  if (added.empty())
+    return std::nullopt;
+  core::SolidModel m = model;
+  for (auto &w : added)
+    m.walls.push_back(std::move(w));
+  return m;
+}
+
+} // namespace
+
+SolidsResult build_solids(const core::SolidModel &model_in,
                           const SolidsOptions &opts) {
+  // Eaves with no wall get one (reusex-wyi0).
+  const auto eaves = with_eave_walls(model_in);
+  const core::SolidModel &model = eaves ? *eaves : model_in;
+  if (eaves)
+    debug("solids: {} knee wall(s) drawn at eaves with no wall",
+          eaves->walls.size() - model_in.walls.size());
   SolidsResult result;
   const Frames frames = make_frames(model);
 

@@ -51,13 +51,24 @@ struct Dormer {
   std::vector<PlanPoint> outline; ///< {axis s0, axis s1, inner s1, inner s0}
 };
 
+/// An eave with no wall (reusex-wyi0), level frame: a facade stretch
+/// [a, b] where the space's slope comes down to its outline and no wall
+/// was detected (a knee wall seen too little, or hidden). build_solids()
+/// draws a knee wall there, its inner face on the stretch, its top on the
+/// slope.
+struct Eave {
+  PlanPoint a{0.0, 0.0}, b{0.0, 0.0};
+};
+
 /// What a sloped ceiling does at the facade (reusex-ow8p): the walls under
-/// its slope (their top follows it) and its dormers.
+/// its slope (their top follows it), its dormers, and its eaves with no
+/// wall (reusex-wyi0).
 struct RoofEdges {
   std::vector<std::string> knee_walls;
   std::vector<Dormer> dormers;
+  std::vector<Eave> eaves;
   [[nodiscard]] bool empty() const {
-    return knee_walls.empty() && dormers.empty();
+    return knee_walls.empty() && dormers.empty() && eaves.empty();
   }
 };
 

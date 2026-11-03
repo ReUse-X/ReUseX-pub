@@ -59,6 +59,13 @@ RoofEdges roof_edges(const SpaceRecord &space) {
         if (x.outline.size() >= 3 && x.s1 > x.s0)
           out.dormers.push_back(std::move(x));
       }
+    if (r.contains("eaves"))
+      for (const auto &e : r.at("eaves")) {
+        Eave x;
+        x.a = {number(e.at(0), "an eave x0"), number(e.at(1), "an eave y0")};
+        x.b = {number(e.at(2), "an eave x1"), number(e.at(3), "an eave y1")};
+        out.eaves.push_back(x);
+      }
   } catch (const std::exception &) {
     return {};
   }
@@ -98,6 +105,12 @@ std::string with_roof_edges(const std::string &metadata,
                        {"outline", outline}});
   }
   j["roof"] = {{"knee_walls", edges.knee_walls}, {"dormers", dormers}};
+  if (!edges.eaves.empty()) {
+    json eaves = json::array();
+    for (const auto &e : edges.eaves)
+      eaves.push_back({e.a[0], e.a[1], e.b[0], e.b[1]});
+    j["roof"]["eaves"] = eaves;
+  }
   return j.dump();
 }
 

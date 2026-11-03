@@ -1249,10 +1249,13 @@ StageResult run_walls(ProjectDB &db, const json &params, int log_id) {
   if (o.plan.plan_regularise)
     info("walls: plan regularised: {} shared line(s) ({} across storeys), {} "
          "wall(s) moved (max {:.3f} m, rms {:.3f} m), {} turned onto the "
-         "grid at {:.2f} deg (max {:.2f} deg), {} joined end(s) re-solved",
+         "grid at {:.2f} deg (max {:.2f} deg), {} joined end(s) re-solved; "
+         "{} continuous line(s), {} double wall(s) merged, {} stub(s) cut, "
+         "{} unseen fragment(s) dropped",
          reg.lines, reg.stacked_lines, reg.walls_moved, reg.max_shift_m,
          reg.rms_shift_m, reg.walls_turned, reg.grid_angle_deg,
-         reg.max_turn_deg, reg.ends_rejoined);
+         reg.max_turn_deg, reg.ends_rejoined, reg.continuous_lines,
+         reg.walls_merged, reg.walls_trimmed, reg.walls_dropped);
   else
     info("walls: plan regularisation off; walls stay on their measured axes");
 

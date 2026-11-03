@@ -9,6 +9,10 @@
 #include "reusex/geometry/level_frame.hpp"
 #include "reusex/segmentation/spaces.hpp"
 
+#include <CGAL/Boolean_set_operations_2.h>
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Polygon_2.h>
+#include <CGAL/Polygon_with_holes_2.h>
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <fmt/format.h>
@@ -20,10 +24,12 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -121,10 +127,26 @@ struct Candidate {
 // ── Eaves (reusex-ow8p) ─────────────────────────────────────────────────────
 
 constexpr double kNeighbourGap = 0.6; ///< spaces this close are neighbours [m]
-constexpr double kCutMin = 0.1;       ///< a plane cuts a cell this far down [m]
-constexpr int kMinCutCells = 10;      ///< ... in at least this many cells
-constexpr double kAgree = 0.15;       ///< an observation this close agrees [m]
-constexpr double kMaxContra = 0.2;    ///< share of cut cells seen above
+/// Eaves with no wall (reusex-wyi0): the outline's vertices within this of
+/// its lowest contour line make the eave [m] ...
+constexpr double kEaveBand = 0.3;
+/// ... at least this long [m] ...
+constexpr double kEaveMinLength = 0.75;
+/// ... unless a wall along it lies within this of it (plus its half
+/// thickness) over half its length [m].
+constexpr double kEaveWallReach = 0.5;
+/// ... and only knee-high: an outline the slope meets higher than this
+/// above the floor is not at a knee wall (a bay, a gable end) [m].
+constexpr double kEaveMaxKnee = 1.2;
+/// ... merging stretches of one line this far apart [m].
+constexpr double kEaveMergeGap = 2.0;
+/// A dormer bay no space holds is grown this far past its inner line into
+/// the space it opens into (reusex-f2lv) [m].
+constexpr double kBayReach = 0.3;
+constexpr double kCutMin = 0.1;    ///< a plane cuts a cell this far down [m]
+constexpr int kMinCutCells = 10;   ///< ... in at least this many cells
+constexpr double kAgree = 0.15;    ///< an observation this close agrees [m]
+constexpr double kMaxContra = 0.2; ///< share of cut cells seen above
 constexpr double kMaxContraGain = 0.35;  ///< ... when it fits much better
 constexpr double kEavesReach = 2.5;      ///< facade to its sloped space [m]
 constexpr double kAlongSin = 0.342;      ///< sin 20 deg: along the contours
@@ -213,6 +235,366 @@ struct Buckets {
 };
 
 } // namespace
+
+// ── Roof regularisation (reusex-p3gm) ───────────────────────────────────────
+
+namespace {
+
+/// The value at half the total weight of @p v (value, weight); the lower
+/// one on a tie, so the result is one of the values.
+double weighted_median(std::vector<std::pair<double, double>> v) {
+  std::sort(v.begin(), v.end());
+  double total = 0.0;
+  for (const auto &x : v)
+    total += x.second;
+  double acc = 0.0;
+  for (const auto &x : v) {
+    acc += x.second;
+    if (acc >= 0.5 * total - 1e-12)
+      return x.first;
+  }
+  return v.back().first;
+}
+
+/// The area and area centroid of ring @p r (vertex mean when degenerate).
+std::pair<double, Eigen::Vector2d>
+ring_area_centroid(const std::vector<core::PlanPoint> &r) {
+  double a2 = 0.0, cx = 0.0, cy = 0.0;
+  for (std::size_t i = 0; i < r.size(); ++i) {
+    const auto &p = r[i], &q = r[(i + 1) % r.size()];
+    const double c = p[0] * q[1] - q[0] * p[1];
+    a2 += c;
+    cx += (p[0] + q[0]) * c;
+    cy += (p[1] + q[1]) * c;
+  }
+  if (std::abs(a2) < 1e-12) {
+    Eigen::Vector2d m = Eigen::Vector2d::Zero();
+    for (const auto &p : r)
+      m += Eigen::Vector2d(p[0], p[1]);
+    return {0.0,
+            r.empty() ? m : Eigen::Vector2d(m / static_cast<double>(r.size()))};
+  }
+  return {std::abs(0.5 * a2),
+          Eigen::Vector2d(cx / (3.0 * a2), cy / (3.0 * a2))};
+}
+
+} // namespace
+
+namespace {
+
+using EK = CGAL::Exact_predicates_exact_constructions_kernel;
+using EPolygon = CGAL::Polygon_2<EK>;
+using EPolygonWH = CGAL::Polygon_with_holes_2<EK>;
+
+EPolygon to_epolygon(const std::vector<core::PlanPoint> &r) {
+  EPolygon p;
+  for (const auto &v : r)
+    p.push_back(EK::Point_2(v[0], v[1]));
+  if (p.size() >= 3 && p.is_clockwise_oriented())
+    p.reverse_orientation();
+  return p;
+}
+
+std::vector<core::PlanPoint> to_ring(const EPolygon &p) {
+  std::vector<core::PlanPoint> r;
+  for (auto it = p.vertices_begin(); it != p.vertices_end(); ++it)
+    r.push_back({CGAL::to_double(it->x()), CGAL::to_double(it->y())});
+  return r;
+}
+
+double ring_area(const std::vector<core::PlanPoint> &r) {
+  double a2 = 0.0;
+  for (std::size_t i = 0; i < r.size(); ++i) {
+    const auto &p = r[i], &q = r[(i + 1) % r.size()];
+    a2 += p[0] * q[1] - q[0] * p[1];
+  }
+  return 0.5 * std::abs(a2);
+}
+
+/// @p poly as an exact polygon with holes, or nullopt when a ring is not
+/// simple.
+std::optional<EPolygonWH> to_epwh(const core::SpacePolygon &poly) {
+  const EPolygon outer = to_epolygon(poly.outer);
+  if (outer.size() < 3 || !outer.is_simple())
+    return std::nullopt;
+  EPolygonWH out(outer);
+  for (const auto &h : poly.holes) {
+    EPolygon hp = to_epolygon(h);
+    if (hp.size() < 3 || !hp.is_simple())
+      return std::nullopt;
+    hp.reverse_orientation();
+    out.add_hole(hp);
+  }
+  return out;
+}
+
+/// @p poly joined with @p bay, or false (nothing done) when the join is not
+/// one polygon or a ring is not simple.
+bool join_into(core::SpacePolygon &poly, const EPolygonWH &b) {
+  const EPolygon outer = to_epolygon(poly.outer);
+  if (outer.size() < 3 || !outer.is_simple())
+    return false;
+  EPolygonWH space(outer);
+  for (const auto &h : poly.holes) {
+    EPolygon hp = to_epolygon(h);
+    if (hp.size() < 3 || !hp.is_simple())
+      return false;
+    hp.reverse_orientation();
+    space.add_hole(hp);
+  }
+  EPolygonWH joined;
+  if (!CGAL::join(space, b, joined) || joined.is_unbounded())
+    return false;
+  poly.outer = to_ring(joined.outer_boundary());
+  poly.holes.clear();
+  for (auto h = joined.holes_begin(); h != joined.holes_end(); ++h) {
+    auto ring = to_ring(*h);
+    std::reverse(ring.begin(), ring.end());
+    poly.holes.push_back(ring);
+  }
+  return true;
+}
+
+} // namespace
+
+RoofRegulariseStats regularise_roof(std::vector<core::SpaceRecord> &spaces,
+                                    const std::vector<std::size_t> &which,
+                                    const SpacesOptions &o) {
+  if (!(o.roof_azimuth_deg >= 0.0 && o.roof_azimuth_deg < 45.0) ||
+      !(o.roof_pitch_round_deg >= 0.0) || !(o.roof_pitch_tol_deg >= 0.0) ||
+      !(o.roof_merge_m >= 0.0) || !(o.roof_cap_merge_m >= 0.0) ||
+      !(o.roof_cap_raise_m >= 0.0))
+    throw std::invalid_argument(
+        "regularise_roof: an option is out of range (roof_azimuth_deg in "
+        "[0, 45), the others >= 0)");
+  RoofRegulariseStats st;
+  if (!o.roof_regularise)
+    return st;
+  constexpr double kDeg = std::numbers::pi / 180.0;
+
+  // The distinct planes, each with the area and centroid of its spaces.
+  struct Plane {
+    core::CeilingPlane p;
+    double w = 0.0;
+    Eigen::Vector2d c = Eigen::Vector2d::Zero();
+    double az = 0.0, pitch = 0.0; ///< regularised [deg]
+    double d = 0.0;               ///< eaves line on the shared top
+    std::size_t group = 0;
+  };
+  std::vector<Plane> planes;
+  std::vector<std::pair<double, double>> caps; // z_ceiling, area
+  std::vector<std::size_t> sloped;             // into spaces
+  std::vector<double> areas;                   // of sloped
+  for (const auto si : which) {
+    const auto &s = spaces[si];
+    if (s.ceiling_planes.empty() || s.polygon.outer.size() < 3)
+      continue;
+    auto [area, c] = ring_area_centroid(s.polygon.outer);
+    if (s.area > 0.0)
+      area = s.area;
+    area = std::max(area, 1e-6);
+    caps.emplace_back(s.z_ceiling, area);
+    sloped.push_back(si);
+    areas.push_back(area);
+    for (const auto &p : s.ceiling_planes) {
+      auto it = std::find_if(planes.begin(), planes.end(), [&](const Plane &x) {
+        return same_plane(x.p, p);
+      });
+      if (it == planes.end()) {
+        planes.push_back({p});
+        it = planes.end() - 1;
+      }
+      it->w += area;
+      it->c += area * c;
+    }
+  }
+  if (planes.empty())
+    return st;
+  st.planes_in = static_cast<int>(planes.size());
+  for (auto &x : planes)
+    x.c /= x.w;
+
+  // The storey's pitch and top.
+  std::vector<std::pair<double, double>> pitches;
+  for (auto &x : planes) {
+    x.pitch = std::atan(std::hypot(x.p.slope[0], x.p.slope[1])) / kDeg;
+    x.az = std::atan2(x.p.slope[1], x.p.slope[0]) / kDeg;
+    pitches.emplace_back(x.pitch, x.w);
+  }
+  double pitch = weighted_median(pitches);
+  if (o.roof_pitch_round_deg > 0.0)
+    pitch = std::round(pitch / o.roof_pitch_round_deg) * o.roof_pitch_round_deg;
+  pitch = std::clamp(pitch, 1.0, core::kMaxCeilingSlopeDeg);
+  st.pitch_deg = pitch;
+  // The reference height the eaves lines are measured at (planes of one
+  // pitch keep their spacing at any height): the storey's median top.
+  const double top = weighted_median(caps);
+  st.top_z = top;
+
+  // Directions onto the heaviest plane's grid; pitches onto the storey's.
+  std::size_t heaviest = 0;
+  for (std::size_t k = 1; k < planes.size(); ++k)
+    if (planes[k].w > planes[heaviest].w + 1e-9)
+      heaviest = k;
+  const double phi0 = planes[heaviest].az;
+  for (auto &x : planes) {
+    const double r = x.az - phi0;
+    const double k = std::round(r / 90.0);
+    if (std::abs(r - 90.0 * k) <= o.roof_azimuth_deg)
+      x.az = phi0 + 90.0 * k;
+    // One direction, one value: (-180, 180].
+    x.az = std::remainder(x.az, 360.0);
+    if (x.az <= -180.0)
+      x.az += 360.0;
+    if (std::abs(x.pitch - pitch) <= o.roof_pitch_tol_deg)
+      x.pitch = pitch;
+    // Same height over its spaces' centroid, now on the new direction and
+    // pitch: where it reaches the top.
+    const Eigen::Vector2d u(std::cos(x.az * kDeg), std::sin(x.az * kDeg));
+    const double t = std::tan(x.pitch * kDeg);
+    const double zc = x.p.z_at(x.c.x(), x.c.y());
+    x.d = u.dot(x.c) + (top - zc) / t;
+  }
+
+  // Sides (one direction, one pitch); within a side, planes whose eaves
+  // lines follow each other within roof_merge_m are one.
+  std::vector<std::size_t> order(planes.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  std::stable_sort(
+      order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        const auto &x = planes[a], &y = planes[b];
+        return std::tie(x.az, x.pitch, x.d) < std::tie(y.az, y.pitch, y.d);
+      });
+  std::vector<core::CeilingPlane> merged;
+  std::size_t i = 0;
+  while (i < order.size()) {
+    std::size_t j = i + 1;
+    const auto &first = planes[order[i]];
+    while (j < order.size()) {
+      const auto &prev = planes[order[j - 1]], &cur = planes[order[j]];
+      if (std::abs(cur.az - first.az) > 1e-9 ||
+          std::abs(cur.pitch - first.pitch) > 1e-9)
+        break;
+      if (cur.d - prev.d > o.roof_merge_m)
+        break;
+      ++j;
+    }
+    double sw = 0.0, sd = 0.0;
+    for (std::size_t k = i; k < j; ++k) {
+      sw += planes[order[k]].w;
+      sd += planes[order[k]].w * planes[order[k]].d;
+    }
+    const double d = sd / sw;
+    const Eigen::Vector2d u(std::cos(first.az * kDeg),
+                            std::sin(first.az * kDeg));
+    const double t = std::tan(first.pitch * kDeg);
+    core::CeilingPlane p;
+    p.at = {u.x() * d, u.y() * d, top};
+    p.slope = {t * u.x(), t * u.y()};
+    for (std::size_t k = i; k < j; ++k)
+      planes[order[k]].group = merged.size();
+    merged.push_back(p);
+    i = j;
+  }
+  st.planes_out = static_cast<int>(merged.size());
+  {
+    std::set<std::pair<long long, long long>> sides;
+    for (const auto &x : planes)
+      sides.emplace(std::llround(x.az * 1e6), std::llround(x.pitch * 1e6));
+    st.sides = static_cast<int>(sides.size());
+  }
+
+  // One roof: sloped spaces that share a merged plane or stand side by side
+  // (within kNeighbourGap); each roof gets one flat top, the area-weighted
+  // median of its spaces' tops, for those within roof_cap_merge_m of it.
+  const auto group_of = [&](const core::CeilingPlane &p) {
+    const auto it =
+        std::find_if(planes.begin(), planes.end(),
+                     [&](const Plane &x) { return same_plane(x.p, p); });
+    return it->group;
+  };
+  std::vector<std::size_t> roof(sloped.size());
+  std::iota(roof.begin(), roof.end(), std::size_t{0});
+  const auto find = [&](std::size_t a) {
+    while (roof[a] != a)
+      a = roof[a] = roof[roof[a]];
+    return a;
+  };
+  for (std::size_t a = 0; a < sloped.size(); ++a)
+    for (std::size_t b = a + 1; b < sloped.size(); ++b) {
+      const auto &sa = spaces[sloped[a]], &sb = spaces[sloped[b]];
+      bool shared = false;
+      for (const auto &p : sa.ceiling_planes)
+        for (const auto &q : sb.ceiling_planes)
+          shared |= group_of(p) == group_of(q);
+      if (shared ||
+          ring_gap(sa.polygon.outer, sb.polygon.outer) <= kNeighbourGap)
+        roof[find(a)] = find(b);
+    }
+  std::map<std::size_t, std::vector<std::pair<double, double>>> roof_caps;
+  for (std::size_t a = 0; a < sloped.size(); ++a)
+    roof_caps[find(a)].emplace_back(spaces[sloped[a]].z_ceiling, areas[a]);
+  std::map<std::size_t, double> roof_top;
+  for (const auto &[r, v] : roof_caps)
+    roof_top[r] = weighted_median(v);
+
+  // Each space onto the merged planes and its roof's top, unless that would
+  // bring its ceiling down to its floor.
+  for (std::size_t a = 0; a < sloped.size(); ++a) {
+    const auto si = sloped[a];
+    auto &s = spaces[si];
+    const double my_top = roof_top[find(a)];
+    auto trial = s;
+    trial.ceiling_planes.clear();
+    for (const auto &p : s.ceiling_planes) {
+      const auto &q = merged[group_of(p)];
+      if (std::none_of(trial.ceiling_planes.begin(), trial.ceiling_planes.end(),
+                       [&](const auto &x) { return same_plane(x, q); }))
+        trial.ceiling_planes.push_back(q);
+    }
+    // A top above the roof's comes down to it (a peak, a kink); one below
+    // it is raised only a little: a lowered ceiling (a corridor's) is seen.
+    if ((s.z_ceiling >= my_top && s.z_ceiling - my_top <= o.roof_cap_merge_m) ||
+        (s.z_ceiling < my_top && my_top - s.z_ceiling <= o.roof_cap_raise_m))
+      trial.z_ceiling = my_top;
+    if (std::any_of(s.polygon.outer.begin(), s.polygon.outer.end(),
+                    [&](const auto &v) {
+                      return core::ceiling_at(trial, v[0], v[1]) <
+                             s.z_floor + kMinHeadroom;
+                    })) {
+      debug("spaces: space {}: the regularised roof would meet its floor at a "
+            "polygon vertex; it keeps its fitted ceiling",
+            s.guid);
+      ++st.reverted;
+      continue;
+    }
+    const bool same =
+        trial.z_ceiling == s.z_ceiling &&
+        trial.ceiling_planes.size() == s.ceiling_planes.size() &&
+        std::equal(trial.ceiling_planes.begin(), trial.ceiling_planes.end(),
+                   s.ceiling_planes.begin(), [](const auto &a, const auto &b) {
+                     return same_plane(a, b);
+                   });
+    if (same)
+      continue;
+    nlohmann::json fit = nlohmann::json::object();
+    try {
+      if (!s.metadata.empty()) {
+        const auto j = nlohmann::json::parse(s.metadata);
+        if (j.is_object() && j.contains("ceiling_fit") &&
+            j.at("ceiling_fit").is_object())
+          fit = j.at("ceiling_fit");
+      }
+    } catch (const std::exception &) {
+    }
+    fit["fitted"] = {{"planes", core::encode_ceiling_planes(s.ceiling_planes)},
+                     {"z_ceiling", s.z_ceiling}};
+    trial.metadata = with_fit(s.metadata, fit);
+    s = std::move(trial);
+    ++st.spaces;
+  }
+  return st;
+}
 
 SlopedCeilingStats fit_sloped_ceilings(
     std::vector<core::SpaceRecord> &spaces,
@@ -656,6 +1038,25 @@ SlopedCeilingStats fit_sloped_ceilings(
       revolume(si, {});
     }
 
+    // (1b) The roof as few planes (reusex-p3gm): one top per roof, one
+    // plane per side, one pitch. After the slopes are carried on (that
+    // checks the fitted planes against what is seen), before the facades
+    // are measured against them.
+    if (o.roof_regularise) {
+      const auto rr = regularise_roof(spaces, mine, o);
+      for (const auto si : mine)
+        if (!spaces[si].ceiling_planes.empty())
+          revolume(si, {});
+      stats.roof_planes_fitted += rr.planes_in;
+      stats.roof_planes += rr.planes_out;
+      if (rr.planes_in > 0)
+        info("spaces: storey {}: roof regularised: {} fitted plane(s) -> {} "
+             "({} side(s)) at {:.1f} deg, top {:.2f} m; {} space(s) changed, "
+             "{} kept as fitted (the floor would be hit)",
+             st.idx, rr.planes_in, rr.planes_out, rr.sides, rr.pitch_deg,
+             rr.top_z, rr.spaces, rr.reverted);
+    }
+
     // (2) The facades under each slope, measured: knee walls and dormers.
     if (walls == nullptr)
       continue;
@@ -892,13 +1293,246 @@ SlopedCeilingStats fit_sloped_ceilings(
       if (!edges.dormers.empty())
         revolume(si, edges.dormers);
     }
+
+    // (3) Eaves with no wall (reusex-wyi0): where a slope comes down to the
+    // space's outline at a facade (no space outside), knee-high, with no
+    // wall along it and no dormer bay behind it -- a knee wall seen too
+    // little to be a wall, or hidden -- record the stretch; build_solids()
+    // draws a knee wall there, its top on the slope. The stretch: the
+    // outline's lowest contour line, over the vertices within kEaveBand of
+    // it.
+    std::vector<core::Dormer> storey_dormers;
+    for (const auto si : mine)
+      for (auto &d : core::roof_edges(spaces[si]).dormers)
+        storey_dormers.push_back(std::move(d));
+    for (const auto si : mine) {
+      auto &s = spaces[si];
+      auto edges = core::roof_edges(s);
+      const std::size_t before = edges.eaves.size();
+      for (const auto &p : s.ceiling_planes) {
+        const Eigen::Vector2d g(p.slope[0], p.slope[1]);
+        if (!(g.norm() >
+              std::tan(o.ceiling_min_tilt_deg * std::numbers::pi / 180.0)))
+          continue;
+        {
+          const Eigen::Vector2d u = g.normalized(); // uphill
+          const Eigen::Vector2d c(-u.y(), u.x());   // along the contour
+          double umin = std::numeric_limits<double>::infinity();
+          for (const auto &v : s.polygon.outer)
+            umin = std::min(umin, u.x() * v[0] + u.y() * v[1]);
+          // The outline's edges along the contour within kEaveBand of its
+          // lowest point, merged where they follow each other on one line
+          // within kEaveMergeGap (the outline recedes from the facade over
+          // furniture, a raster step): each stretch at its edges'
+          // length-weighted line.
+          struct Stretch {
+            double t0, t1, uw, w;
+          };
+          std::vector<Stretch> runs;
+          const auto &ring = s.polygon.outer;
+          for (std::size_t e = 0; e < ring.size(); ++e) {
+            const Eigen::Vector2d v0(ring[e][0], ring[e][1]);
+            const auto &n1 = ring[(e + 1) % ring.size()];
+            const Eigen::Vector2d v1(n1[0], n1[1]);
+            const double len = (v1 - v0).norm();
+            if (!(len > 1e-6) || u.dot(v0) > umin + kEaveBand ||
+                u.dot(v1) > umin + kEaveBand ||
+                std::abs((v1 - v0).dot(u)) > kAlongSin * len)
+              continue;
+            runs.push_back({std::min(c.dot(v0), c.dot(v1)),
+                            std::max(c.dot(v0), c.dot(v1)),
+                            0.5 * u.dot(v0 + v1) * len, len});
+          }
+          std::sort(runs.begin(), runs.end(),
+                    [](const Stretch &a, const Stretch &b) {
+                      return std::tie(a.t0, a.t1) < std::tie(b.t0, b.t1);
+                    });
+          std::vector<Stretch> stretches;
+          for (const auto &r : runs)
+            if (!stretches.empty() &&
+                r.t0 <= stretches.back().t1 + kEaveMergeGap &&
+                std::abs(r.uw / r.w - stretches.back().uw /
+                                          stretches.back().w) <= kEaveBand) {
+              auto &b = stretches.back();
+              b.t1 = std::max(b.t1, r.t1);
+              b.uw += r.uw;
+              b.w += r.w;
+            } else {
+              stretches.push_back(r);
+            }
+          for (const auto &st_run : stretches) {
+            const double t0 = st_run.t0, t1 = st_run.t1;
+            const double uline = st_run.uw / st_run.w;
+            const Eigen::Vector2d ea = u * uline + c * t0,
+                                  eb = u * uline + c * t1;
+            const Eigen::Vector2d emid = 0.5 * (ea + eb);
+            const Eigen::Vector2d probe = emid + u * 0.05;
+            const double knee = core::ceiling_at(s, probe.x(), probe.y());
+            bool eave = t1 - t0 >= kEaveMinLength && knee < s.z_ceiling - 0.3 &&
+                        knee > s.z_floor + kMinHeadroom &&
+                        knee <= s.z_floor + kEaveMaxKnee &&
+                        std::abs(p.z_at(probe.x(), probe.y()) - knee) < 1e-6;
+            // Not where a dormer bay opens off the space.
+            for (const auto &d : storey_dormers)
+              if (eave &&
+                  ring_dist(d.outline, {emid.x(), emid.y()}) <= kEaveWallReach)
+                eave = false;
+            // A facade: no space of the storey just outside it.
+            for (const double f : {0.2, 0.5, 0.8}) {
+              const Eigen::Vector2d q = ea + (eb - ea) * f - u * 0.3;
+              if (eave && std::any_of(mine.begin(), mine.end(), [&](auto k) {
+                    return in_space(spaces[k], q.x(), q.y());
+                  }))
+                eave = false;
+            }
+            // No wall along it (a knee wall, the facade, a partition).
+            if (eave)
+              for (const auto &w : *walls) {
+                if (w.storey != st.idx)
+                  continue;
+                const Eigen::Vector2d p0(w.x0, w.y0), p1(w.x1, w.y1);
+                const double len = (p1 - p0).norm();
+                if (!(len > 1e-6))
+                  continue;
+                const Eigen::Vector2d d = (p1 - p0) / len;
+                if (std::abs(d.dot(u)) > kAlongSin)
+                  continue;
+                const double half = w.thickness > 0.0 ? 0.5 * w.thickness : 0.0;
+                const double off = u.dot(0.5 * (p0 + p1)) - uline;
+                const double w0 = std::min(c.dot(p0), c.dot(p1)),
+                             w1 = std::max(c.dot(p0), c.dot(p1));
+                const double ov = std::min(t1, w1) - std::max(t0, w0);
+                if (std::abs(off) <= kEaveWallReach + half &&
+                    ov >= 0.5 * (t1 - t0)) {
+                  eave = false;
+                  break;
+                }
+              }
+            if (eave) {
+              edges.eaves.push_back({{ea.x(), ea.y()}, {eb.x(), eb.y()}});
+              ++stats.eaves;
+              debug("spaces: space {}: an eave with no wall, ({:.2f}, {:.2f}) "
+                    "-> ({:.2f}, {:.2f}), {:.2f} m above the floor",
+                    s.guid, ea.x(), ea.y(), eb.x(), eb.y(), knee - s.z_floor);
+            }
+          }
+        }
+      }
+      if (edges.eaves.size() != before)
+        s.metadata = core::with_roof_edges(s.metadata, edges);
+    }
+
+    // (4) Dormer bays outside every space (reusex-f2lv): a bay (its
+    // dormer's outline, from the facade wall's inner face in) whose centre
+    // no space of the storey holds joins the space whose slope it rises
+    // through, so it has a floor and a volume. Its volume: the bay's added
+    // area up to the dormer's ceiling.
+    for (const auto si : mine) {
+      auto &s = spaces[si];
+      for (const auto &d : core::roof_edges(spaces[si]).dormers) {
+        if (d.outline.size() != 4)
+          continue;
+        Eigen::Vector2d centre = Eigen::Vector2d::Zero();
+        for (const auto &v : d.outline)
+          centre += Eigen::Vector2d(v[0], v[1]) / 4.0;
+        if (std::any_of(mine.begin(), mine.end(), [&](std::size_t k) {
+              return in_space(spaces[k], centre.x(), centre.y());
+            }))
+          continue;
+        // From the wall's inner face: the axis corners move half its
+        // thickness inward (toward the inner corners).
+        auto bay = d.outline;
+        double half = 0.0;
+        for (const auto &w : *walls)
+          if (w.guid == d.wall && w.thickness > 0.0)
+            half = 0.5 * w.thickness;
+        for (int k = 0; k < 2; ++k) {
+          const auto &in = d.outline[static_cast<std::size_t>(3 - k)];
+          auto &ax = bay[static_cast<std::size_t>(k)];
+          const Eigen::Vector2d dir(in[0] - ax[0], in[1] - ax[1]);
+          const double n = dir.norm();
+          if (n > half + 0.05) {
+            ax[0] += dir.x() / n * half;
+            ax[1] += dir.y() / n * half;
+          }
+        }
+        // The bay opens into the space just past its inner line (the one
+        // the dormer was found from when none is there); grown kBayReach
+        // into it, so the two overlap, but never into another space.
+        const Eigen::Vector2d a0(bay[0][0], bay[0][1]),
+            a1(bay[1][0], bay[1][1]);
+        const Eigen::Vector2d i1(bay[2][0], bay[2][1]),
+            i0(bay[3][0], bay[3][1]);
+        Eigen::Vector2d dir = 0.5 * ((i0 - a0) + (i1 - a1));
+        if (!(dir.norm() > 1e-6))
+          continue;
+        dir.normalize();
+        const Eigen::Vector2d past = 0.5 * (i0 + i1) + dir * (0.5 * kBayReach);
+        std::size_t target = si;
+        for (const auto k : mine)
+          if (in_space(spaces[k], past.x(), past.y()))
+            target = k;
+        auto grown = bay;
+        for (const int k : {2, 3}) {
+          grown[static_cast<std::size_t>(k)][0] += dir.x() * kBayReach;
+          grown[static_cast<std::size_t>(k)][1] += dir.y() * kBayReach;
+        }
+        std::optional<EPolygonWH> g;
+        if (const EPolygon gp = to_epolygon(grown); gp.is_simple())
+          g = EPolygonWH(gp);
+        const EK::Point_2 c_e(centre.x(), centre.y());
+        for (const auto k : mine) {
+          if (!g || k == target ||
+              ring_gap(spaces[k].polygon.outer, grown) > kBayReach)
+            continue;
+          const auto other = to_epwh(spaces[k].polygon);
+          if (!other)
+            continue;
+          std::vector<EPolygonWH> parts;
+          CGAL::difference(*g, *other, std::back_inserter(parts));
+          g.reset();
+          for (auto &part : parts)
+            if (part.outer_boundary().bounded_side(c_e) ==
+                CGAL::ON_BOUNDED_SIDE)
+              g = std::move(part);
+        }
+        auto &t = spaces[target];
+        const double area_before = ring_area(t.polygon.outer);
+        auto poly = t.polygon;
+        if (!g || !join_into(poly, *g)) {
+          debug("spaces: space {}: its dormer bay on wall {} could not be "
+                "joined to space {} (not one polygon)",
+                s.guid, d.wall, t.guid);
+          continue;
+        }
+        const double added = ring_area(poly.outer) - area_before;
+        if (!(added > 0.0))
+          continue;
+        t.polygon = std::move(poly);
+        if (t.area > 0.0)
+          t.area += added;
+        t.perimeter = 0.0;
+        for (std::size_t i = 0; i < t.polygon.outer.size(); ++i) {
+          const auto &p0 = t.polygon.outer[i];
+          const auto &p1 = t.polygon.outer[(i + 1) % t.polygon.outer.size()];
+          t.perimeter += std::hypot(p1[0] - p0[0], p1[1] - p0[1]);
+        }
+        if (t.volume > 0.0)
+          t.volume += added * std::max(0.0, d.z - t.z_floor);
+        ++stats.dormer_bays;
+        debug("spaces: space {}: took in the dormer bay on wall {} ({:.2f} "
+              "m^2), which no space held",
+              t.guid, d.wall, added);
+      }
+    }
   }
   if (stats.spaces_sloped > 0)
     info("spaces: sloped ceilings: {} space(s) took {} plane(s) of {} tilted "
          "ceiling candidate(s), {} carried on from a neighbour; {} knee "
-         "wall(s), {} dormer(s)",
+         "wall(s), {} dormer(s) ({} bay(s) taken into their space), {} "
+         "eave(s) with no wall",
          stats.spaces_sloped, stats.planes, stats.candidates, stats.extended,
-         stats.knee_walls, stats.dormers);
+         stats.knee_walls, stats.dormers, stats.dormer_bays, stats.eaves);
   return stats;
 }
 
