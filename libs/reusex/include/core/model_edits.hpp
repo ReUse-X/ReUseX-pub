@@ -198,10 +198,15 @@ SpaceRecord space_from_json(const nlohmann::json &j);
 ///   {"op": "<kind>.delete", "guid": g}                   (remove)
 ///   {"op": "<kind>.revert", "guid": g}                   (revert)
 ///   {"op": "ceiling.set", "guid": <space>, "planes": [{at, slope}, ...]}
+///   {"op": "wall.split", "guid": g, "s": metres, "new_guid"?: g2}
+///   {"op": "wall.merge", "guids": [a, b]}     (b is removed)
+///   {"op": "wall.join", "guids": [a, b]}      (extend / trim to a corner)
 ///   {"op": "storey.update", "guid": g, "set": {...}}
 /// with <kind> = wall | opening | space | storey. "joins" (wall) and
 /// "boundaries" (space) may ride along on create / update. An update of a
-/// row created earlier in the same list patches that one.
+/// row created earlier in the same list patches that one. split / merge /
+/// join expand into puts of the walls and of their re-measured openings
+/// (core/wall_edit_ops.hpp), reading openings and joins as stored.
 /// @throws std::invalid_argument for an unknown op, a missing guid, an
 ///         update of an unknown row or a bad record.
 std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,

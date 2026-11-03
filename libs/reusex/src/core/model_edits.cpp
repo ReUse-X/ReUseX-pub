@@ -6,6 +6,7 @@
 
 #include "core/guid.hpp"
 #include "core/logging.hpp"
+#include "core/wall_edit_ops.hpp"
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -1027,6 +1028,83 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
     return put;
   };
 
+  // wall.split / wall.merge / wall.join (core/wall_edit_ops.hpp): the
+  // records they make, as puts (and the merged-away wall as a remove).
+  const auto wall_now = [&](const std::string &g) {
+    return wall_from_json(current(ModelElementKind::wall, g));
+  };
+  const auto joins_now = [&]() { return db.wall_joins(); };
+  const auto put_wall = [&](const WallRecord &w,
+                            const std::vector<WallJoinRecord> &all) {
+    std::vector<WallJoinRecord> mine;
+    for (const auto &j : all)
+      if (j.wall_a == w.guid || j.wall_b == w.guid)
+        mine.push_back(j);
+    pending[w.guid] = model_record_json(w);
+    out.push_back(ModelEditOp::put(w, std::move(mine)));
+  };
+  const auto put_openings = [&](const std::vector<OpeningRecord> &os) {
+    for (const auto &o : os) {
+      // Only the ones that moved: an untouched opening stays unedited.
+      if (model_record_json(o) == current(ModelElementKind::opening, o.guid))
+        continue;
+      pending[o.guid] = model_record_json(o);
+      out.push_back(ModelEditOp::put(o));
+    }
+  };
+  const auto two_guids = [&](const json &op, const std::string &name) {
+    if (!op.contains("guids") || !op.at("guids").is_array() ||
+        op.at("guids").size() != 2)
+      throw std::invalid_argument("model edit ops: " + name +
+                                  " needs \"guids\": [a, b]");
+    return std::make_pair(op.at("guids")[0].get<std::string>(),
+                          op.at("guids")[1].get<std::string>());
+  };
+  const auto expand_wall_topology = [&](const std::string &verb,
+                                        const json &op) {
+    const std::string name = "wall." + verb;
+    if (verb == "split") {
+      if (!op.contains("guid") || !op.contains("s"))
+        throw std::invalid_argument("model edit ops: wall.split needs "
+                                    "\"guid\" and \"s\"");
+      const WallRecord w = wall_now(op.at("guid").get<std::string>());
+      const auto r =
+          split_wall(w, op.at("s").get<double>(), db.openings(), joins_now(),
+                     db.walls(), op.value("new_guid", std::string()));
+      put_wall(r.a, r.joins);
+      put_wall(r.b, r.joins);
+      put_openings(r.openings);
+    } else if (verb == "merge") {
+      const auto [ga, gb] = two_guids(op, name);
+      const auto r =
+          merge_walls(wall_now(ga), wall_now(gb), db.openings(), joins_now());
+      put_wall(r.wall, r.joins);
+      pending.erase(r.removed);
+      out.push_back(ModelEditOp::remove(ModelElementKind::wall, r.removed));
+      put_openings(r.openings);
+    } else {
+      const auto [ga, gb] = two_guids(op, name);
+      const auto r = join_walls(wall_now(ga), wall_now(gb), db.openings());
+      std::vector<WallJoinRecord> all;
+      for (const auto &j : joins_now())
+        if (!((j.wall_a == ga && j.wall_b == gb) ||
+              (j.wall_a == gb && j.wall_b == ga)))
+          all.push_back(j);
+      all.push_back(r.join);
+      // A tee's host wall does not move: only the wall that does is put
+      // (it carries the new join), so the host is not marked edited.
+      const bool a_moved =
+          model_record_json(r.a) != model_record_json(wall_now(ga));
+      const bool b_moved =
+          model_record_json(r.b) != model_record_json(wall_now(gb));
+      if (a_moved || !b_moved)
+        put_wall(r.a, all);
+      if (b_moved)
+        put_wall(r.b, all);
+      put_openings(r.openings);
+    }
+  };
+
   for (const auto &op : ops) {
     if (!op.is_object() || !op.contains("op") || !op.at("op").is_string())
       throw std::invalid_argument(
@@ -1050,6 +1128,11 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
         rec["ceiling_planes"] = op.value("planes", json::array());
         pending[g] = rec;
         out.push_back(make_put(ModelElementKind::space, rec, op));
+        continue;
+      }
+      if (head == "wall" &&
+          (verb == "split" || verb == "merge" || verb == "join")) {
+        expand_wall_topology(verb, op);
         continue;
       }
       const ModelElementKind kind = parse_model_element_kind(head);

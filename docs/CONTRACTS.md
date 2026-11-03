@@ -1102,6 +1102,20 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
 - **Revision**: every write to the four tables (whole-run writers, deletes,
   imports, each batch / undo / redo once) raises `model.revision`. A new
   batch drops the undone edits (the redo branch).
+- **Geometry helpers** make the records a batch writes; they write
+  nothing themselves. `core/wall_edit_ops.hpp`: `split_wall` (part a keeps
+  the guid, openings and joins go to the part they sit on, a collinear join
+  between the parts), `merge_walls` (length-weighted axis refit, the second
+  wall removed, openings re-hosted and re-measured), `join_walls` (extend /
+  trim both to the axes' intersection, a tee when it lies more than 0.5 m
+  inside one wall); wire ops `wall.split` / `wall.merge` / `wall.join`.
+  `segmentation/model_edit_geometry.hpp`: `rebuild_spaces_from_walls` (a
+  storey's spaces from its walls alone, names / guids / heights / ceiling
+  planes carried by overlap, boundaries on the wall faces; a stored space
+  the walls do not close is kept unless the caller asks to remove it;
+  preview, then `rebuild_spaces_ops()`), `fit_ceiling_plane` (least squares over the
+  cloud's points in a plan region and height band, trimmed to 5 cm; the
+  client sends the plane back as `ceiling.set`).
 
 ### Editor write: segment resource (web GUI, POST /frames/{id}/segment/resource)
 

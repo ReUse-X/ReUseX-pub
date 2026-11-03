@@ -784,7 +784,10 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   (project setting `model.revision`, raised by every solid-model write).
   The rules (manual + locked + `metadata.edited` / `edited_from`, revert,
   undo / redo, ruxd's wire ops, the identity candidates that keep edits
-  across a re-run) live in `core/model_edits.hpp`
+  across a re-run) live in `core/model_edits.hpp`; the editor's geometry
+  helpers in `core/wall_edit_ops.hpp` (split / merge / join walls) and
+  `segmentation/model_edit_geometry.hpp` (rebuild a storey's spaces from
+  its walls, fit a ceiling plane to cloud points)
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)
