@@ -770,7 +770,11 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   repair step, `add_pose_version` / `pose_versions()` /
   `pose_version_snapshot()`; undo / redo / restore / diff in
   `core/pose_versions.hpp`, current version in project setting
-  `pose_versions.current`). `posed_frames()` reads every posed frame's
+  `pose_versions.current`). A version's blobs hold only what differs from
+  its parent, with a full keyframe every 16 links (reusex-md4a, no schema
+  change; v40's full "RXF1" / "RXE1" blobs are still read): read a
+  version's state with `core::pose_version_state()`, never by unpacking
+  `pose_version_snapshot()` alone. `posed_frames()` reads every posed frame's
   poses, scan and stamp in one query
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves

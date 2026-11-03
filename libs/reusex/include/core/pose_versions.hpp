@@ -66,10 +66,38 @@ PoseState capture_pose_state(const ProjectDB &db);
 /// inside a ProjectDB::Transaction.
 void restore_pose_state(ProjectDB &db, const PoseState &state);
 
-/// Deterministic binary packing; equal states pack to equal bytes.
+/// Every this many links a version is stored in full (a keyframe); the
+/// versions in between store only what differs from their parent
+/// (reusex-md4a), so a restore reads at most this many snapshots.
+inline constexpr int kPoseVersionKeyframeInterval = 16;
+
+/// Deterministic binary packing of a full keyframe; equal states pack to
+/// equal bytes.
+///
+/// Storage (reusex-md4a): "RXF2" / "RXE2" blobs hold a base version id (0 for
+/// a keyframe), varint ids, poses as 12 doubles when their bottom row is
+/// exactly (0, 0, 0, 1), information matrices as their diagonal or upper
+/// triangle when bitwise diagonal / symmetric, and an edge's strings through
+/// a per-blob table. A delta lists the frames whose transform or initial
+/// pose changed, the edges that changed (a metrics-only record when only
+/// residual, weight, seed disagreement or deviation did) and the frames /
+/// edges removed. v40's fixed-width "RXF1" / "RXE1" snapshots are still read.
+/// Versions are never deleted: a delta's base must stay (a future pruning
+/// has to re-base the children first).
 ProjectDB::PoseVersionSnapshot pack_pose_state(const PoseState &state);
-/// @throws std::runtime_error for a blob this build cannot read.
+/// Unpack a full snapshot (a keyframe or a v40 one).
+/// @throws std::runtime_error for a blob this build cannot read, or a delta
+///         (it needs its base: use pose_version_state()).
 PoseState unpack_pose_state(const ProjectDB::PoseVersionSnapshot &snapshot);
+
+/// The state version @p id holds, its delta chain applied.
+/// @throws std::invalid_argument for an unknown id; std::runtime_error for
+///         an unreadable blob.
+PoseState pose_version_state(const ProjectDB &db, int64_t id);
+
+/// Whether version @p id is stored in full.
+/// @throws std::invalid_argument for an unknown id.
+bool pose_version_is_keyframe(const ProjectDB &db, int64_t id);
 
 /// The current version, or nullopt when none is recorded.
 std::optional<int64_t> current_pose_version(const ProjectDB &db);
