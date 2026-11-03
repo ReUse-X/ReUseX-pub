@@ -10,13 +10,15 @@
 //
 // LAYERING: reusex_pipeline does not link reusex_slam (GTSAM, #464), so this
 // header is deliberately HEADER-ONLY and compiled into its consumers, which
-// must link both modules (the `reusex` umbrella does). It is the same
+// must link both modules (the `reusex` umbrella does), and reusex_io for the
+// stored pose edits. It is the same
 // arrangement as geometry/component_persistence.hpp. Including it from
 // reusex_pipeline itself, or from ruxd_api_lib, would be a link error.
 
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/logging.hpp>
 #include <reusex/core/validate.hpp>
+#include <reusex/io/pose_edits.hpp>
 #include <reusex/pipeline/stages.hpp>
 #include <reusex/slam/PlaneGraphOptimizer.hpp>
 #include <reusex/slam/discover_parameters.hpp>
@@ -70,9 +72,32 @@ check_optimize_stage_inputs(const ProjectDB &db, core::PipelineStage stage) {
                      fmt::join(errors, "; "));
 }
 
+/// The part of an optimize summary that reports the pose edits the solve
+/// used ("" without edits).
+inline std::string optimize_edits_summary(const core::PoseEdits &edits,
+                                          const geometry::PlaneGraphResult &r) {
+  if (edits.edits.empty())
+    return {};
+  return fmt::format(
+      "; {} pose edit{} from the working document: {} factor{}, {} stored "
+      "edge{} rejected{}",
+      edits.edits.size(), edits.edits.size() == 1 ? "" : "s", r.edit_factors,
+      r.edit_factors == 1 ? "" : "s", r.edges_rejected_by_edits,
+      r.edges_rejected_by_edits == 1 ? "" : "s",
+      r.edits_skipped.empty()
+          ? std::string()
+          : fmt::format(", not lowered: {}", fmt::join(r.edits_skipped, ", ")));
+}
+
 /// Run `optimize` on an open project: the library defaults (which the
 /// `rux optimize` flags mirror) plus the job's parameters through
 /// geometry::apply_optimize_parameters(), the reader `rux optimize` uses too.
+///
+/// The solve uses the project's working pose edits (io::stored_pose_edits:
+/// the editor's detach cuts and holds, reusex-fkqd), as `rux optimize`
+/// without --edits does. A detached part that no loop, relative edit or hold
+/// ties back makes the solve fail naming the cut; it is never bridged from
+/// the initial poses.
 inline StageResult run_optimize_stage(ProjectDB &db, const StageContext &ctx) {
   geometry::PlaneGraphOptions options;
   bool dry_run = false;
@@ -82,14 +107,27 @@ inline StageResult run_optimize_stage(ProjectDB &db, const StageContext &ctx) {
     return StageResult::invalid(e.what());
   }
 
+  core::PoseEdits edits;
   try {
-    auto result = geometry::optimize_sensor_poses(db, options, dry_run);
+    edits = io::stored_pose_edits(db);
+  } catch (const std::exception &e) {
+    return StageResult::invalid(fmt::format("stored pose edits: {}", e.what()));
+  }
+  if (!edits.edits.empty())
+    info("optimize: {} pose edits from the working document",
+         edits.edits.size());
 
-    if (result.landmarks == 0 && result.loop_edges == 0)
+  try {
+    auto result = geometry::optimize_sensor_poses(
+        db, options, dry_run, edits.edits.empty() ? nullptr : &edits);
+    const std::string edit_summary = optimize_edits_summary(edits, result);
+
+    if (result.landmarks == 0 && result.loop_edges == 0 &&
+        result.edit_factors == 0)
       return StageResult::success(
           fmt::format("no plane landmarks reached min_observations={} and no "
-                      "loop edges present; poses left unchanged",
-                      options.min_landmark_observations));
+                      "loop edges present; poses left unchanged{}",
+                      options.min_landmark_observations, edit_summary));
 
     if (!result.converged)
       return StageResult::failure(
@@ -99,15 +137,15 @@ inline StageResult run_optimize_stage(ProjectDB &db, const StageContext &ctx) {
     if (dry_run)
       return StageResult::success(
           fmt::format("dry run: {} frames, {} landmarks, {:.4f} -> {:.4f} "
-                      "error, max shift {:.4f} m (poses not written)",
+                      "error, max shift {:.4f} m (poses not written){}",
                       result.frames, result.landmarks, result.initial_error,
-                      result.final_error, result.max_pose_shift));
+                      result.final_error, result.max_pose_shift, edit_summary));
 
     return StageResult::success(
         fmt::format("{} frames, {} landmarks, {:.4f} -> {:.4f} error, max "
-                    "shift {:.4f} m",
+                    "shift {:.4f} m{}",
                     result.frames, result.landmarks, result.initial_error,
-                    result.final_error, result.max_pose_shift),
+                    result.final_error, result.max_pose_shift, edit_summary),
         // `sensor_frames` holds the optimized poses; `pose_graph_edges` the
         // per-edge metrics (and the odometry, when this run initialised it).
         {{"table", "sensor_frames", static_cast<int64_t>(result.frames)},

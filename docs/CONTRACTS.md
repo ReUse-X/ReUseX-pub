@@ -266,6 +266,13 @@ factor per active `pose_graph_edges` row, writes poses to
 every edge. Repeatable; never adds, removes or re-statuses edges (`rux
 register`: joint pairwise registration, writes poses only).
 
+`optimize` (the job stage and `rux optimize` without `--edits`) solves with
+the project's working pose edits, project setting `pose_edits.working`
+(`io::stored_pose_edits`; the editor's detach cuts and holds, reusex-fkqd);
+`--edits FILE` replaces them for that run. A detached part that no loop,
+relative edit or hold ties back fails the solve naming the `detach-<a>-<b>`
+cut; it is never bridged from the initial poses.
+
 | | |
 |---|---|
 | Consumes | `sensor_frames` |
