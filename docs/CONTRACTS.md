@@ -769,11 +769,13 @@ under a slope, outside it, are measured against it from the cloud, and
 the space's `metadata.roof` lists its knee walls (top at the slope) and
 dormers (`core::RoofEdges`: wall, stretch, flat ceiling height, plan), and,
 reusex-wyi0, its eaves with no wall (`roof.eaves`, `[x0, y0, x1, y1]`
-each): where a slope comes down to the outline at a facade, at most 1.2 m
-above the floor, with no wall along it within 0.5 m and no dormer bay behind
-it; `solids` draws a knee wall there (a one-sided detected wall on the
-stretch, grown away from the space, top on the slope, GUID from the space's
-and the eave's index, metadata `{"inferred": "eave"}`; not a `walls` row)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
+each): the outline's edges along a slope's lowest contour line (within
+0.3 m), merged along one line across gaps up to 2 m, at a facade, at most
+1.2 m above the floor, with no wall along them within 0.5 m and no dormer
+bay behind; `solids` draws a knee wall on each (a one-sided wall on the
+stretch, grown away from the space, from the storey floor up to the space's
+own slope along it, GUID from the space's and the eave's index, metadata
+`{"inferred": "eave"}`; not a `walls` row)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
 `rooms` label it was made from), `confidence` (the share of its area that
 comes from wall-bounded faces, the rest is raster) and `metadata` (that share
 and the furniture holes). A boundary names its space by row (it goes with

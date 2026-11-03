@@ -625,4 +625,30 @@ TEST_CASE("SlopedCeilings_Eaves_NoWallAtTheFacadeIsAnEave",
   CHECK_THAT(std::abs(e.b[0] - e.a[0]), WithinAbs(8.0, 1e-6));
   // The strip's eave has its wall.
   CHECK(core::roof_edges(spaces[1]).eaves.empty());
+
+  // An outline that recedes from the eave for more than kEaveMergeGap
+  // (2 m; a wide bay of furniture): two eaves, each on the outline, none
+  // across the gap. A shorter recess is bridged: one wall, simpler.
+  auto notched = spaces;
+  notched[0] = poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5);
+  notched[0].polygon.outer = {{0, 1},     {8, 1},   {8, 6}, {5.5, 6},
+                              {5.5, 5.6}, {2, 5.6}, {2, 6}, {0, 6}};
+  notched[1] = poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5);
+  geometry::fit_sloped_ceilings(notched, {storey()}, sc.cloud, sc.normals,
+                                sc.labels, labels, label_storeys, {}, &walls);
+  const auto n_edges = core::roof_edges(notched[0]);
+  REQUIRE(n_edges.eaves.size() == 2);
+  for (const auto &x : n_edges.eaves) {
+    CHECK_THAT(x.a[1], WithinAbs(6.0, 1e-6));
+    const double lo = std::min(x.a[0], x.b[0]), hi = std::max(x.a[0], x.b[0]);
+    CHECK((hi <= 2.0 + 1e-6 || lo >= 5.5 - 1e-6));
+  }
+  auto recess = spaces;
+  recess[0] = poly_room("room", 0.0, 8.0, 1.0, 6.0, 2.5);
+  recess[0].polygon.outer = {{0, 1},   {8, 1},   {8, 6}, {4, 6},
+                             {4, 5.6}, {3, 5.6}, {3, 6}, {0, 6}};
+  recess[1] = poly_room("strip", 0.0, 8.0, 0.0, 1.0, 2.5);
+  geometry::fit_sloped_ceilings(recess, {storey()}, sc.cloud, sc.normals,
+                                sc.labels, labels, label_storeys, {}, &walls);
+  REQUIRE(core::roof_edges(recess[0]).eaves.size() == 1);
 }

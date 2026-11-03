@@ -384,10 +384,12 @@ RoofRegulariseStats regularise_roof(std::vector<core::SpaceRecord> &spaces,
 /// reaches that height) or a cheek wall at either end, is a dormer (its
 /// ceiling height: the median of those ceiling points, else of the wall's
 /// tops); a wall whose other stretches stay at the knee line is a knee
-/// wall. Where a plane comes down to the space's outline (its lowest
-/// contour line over the vertices within 0.3 m of it, at least 0.75 m long)
-/// at a facade with no wall along it within 0.5 m, that stretch is an eave
-/// with no wall (reusex-wyi0), drawn as a knee wall by build_solids(). All
+/// wall. Where a plane comes down to the space's outline (its edges along
+/// the lowest contour line, within 0.3 m of it, merged along one line across
+/// gaps up to 2 m, at least 0.75 m long) at a facade, at most 1.2 m above
+/// the floor, with no wall along it within 0.5 m and no dormer bay behind
+/// it, that stretch is an eave with no wall (reusex-wyi0), drawn as a knee
+/// wall by build_solids(). All
 /// go into the space's metadata as core::RoofEdges ("roof").
 /// @throws std::invalid_argument when cloud, normals and labels sizes differ
 ///         or ceiling_labels and ceiling_storeys do.

@@ -134,6 +134,8 @@ constexpr double kEaveWallReach = 0.5;
 /// ... and only knee-high: an outline the slope meets higher than this
 /// above the floor is not at a knee wall (a bay, a gable end) [m].
 constexpr double kEaveMaxKnee = 1.2;
+/// ... merging stretches of one line this far apart [m].
+constexpr double kEaveMergeGap = 2.0;
 constexpr double kCutMin = 0.1;    ///< a plane cuts a cell this far down [m]
 constexpr int kMinCutCells = 10;   ///< ... in at least this many cells
 constexpr double kAgree = 0.15;    ///< an observation this close agrees [m]
@@ -1234,62 +1236,101 @@ SlopedCeilingStats fit_sloped_ceilings(
           double umin = std::numeric_limits<double>::infinity();
           for (const auto &v : s.polygon.outer)
             umin = std::min(umin, u.x() * v[0] + u.y() * v[1]);
-          double t0 = std::numeric_limits<double>::infinity(), t1 = -t0;
-          for (const auto &v : s.polygon.outer)
-            if (u.x() * v[0] + u.y() * v[1] <= umin + kEaveBand) {
-              t0 = std::min(t0, c.x() * v[0] + c.y() * v[1]);
-              t1 = std::max(t1, c.x() * v[0] + c.y() * v[1]);
-            }
-          const Eigen::Vector2d ea = u * umin + c * t0, eb = u * umin + c * t1;
-          const Eigen::Vector2d emid = 0.5 * (ea + eb);
-          const Eigen::Vector2d probe = emid + u * 0.05;
-          const double knee = core::ceiling_at(s, probe.x(), probe.y());
-          bool eave = t1 - t0 >= kEaveMinLength && knee < s.z_ceiling - 0.3 &&
-                      knee > s.z_floor + kMinHeadroom &&
-                      knee <= s.z_floor + kEaveMaxKnee &&
-                      std::abs(p.z_at(probe.x(), probe.y()) - knee) < 1e-6;
-          // Not where a dormer bay opens off the space.
-          for (const auto &d : storey_dormers)
-            if (eave &&
-                ring_dist(d.outline, {emid.x(), emid.y()}) <= kEaveWallReach)
-              eave = false;
-          // A facade: no space of the storey just outside it.
-          for (const double f : {0.2, 0.5, 0.8}) {
-            const Eigen::Vector2d q = ea + (eb - ea) * f - u * 0.3;
-            if (eave && std::any_of(mine.begin(), mine.end(), [&](auto k) {
-                  return in_space(spaces[k], q.x(), q.y());
-                }))
-              eave = false;
+          // The outline's edges along the contour within kEaveBand of its
+          // lowest point, merged where they follow each other on one line
+          // within kEaveMergeGap (the outline recedes from the facade over
+          // furniture, a raster step): each stretch at its edges'
+          // length-weighted line.
+          struct Stretch {
+            double t0, t1, uw, w;
+          };
+          std::vector<Stretch> runs;
+          const auto &ring = s.polygon.outer;
+          for (std::size_t e = 0; e < ring.size(); ++e) {
+            const Eigen::Vector2d v0(ring[e][0], ring[e][1]);
+            const auto &n1 = ring[(e + 1) % ring.size()];
+            const Eigen::Vector2d v1(n1[0], n1[1]);
+            const double len = (v1 - v0).norm();
+            if (!(len > 1e-6) || u.dot(v0) > umin + kEaveBand ||
+                u.dot(v1) > umin + kEaveBand ||
+                std::abs((v1 - v0).dot(u)) > kAlongSin * len)
+              continue;
+            runs.push_back({std::min(c.dot(v0), c.dot(v1)),
+                            std::max(c.dot(v0), c.dot(v1)),
+                            0.5 * u.dot(v0 + v1) * len, len});
           }
-          // No wall along it (a knee wall, the facade, a partition).
-          if (eave)
-            for (const auto &w : *walls) {
-              if (w.storey != st.idx)
-                continue;
-              const Eigen::Vector2d p0(w.x0, w.y0), p1(w.x1, w.y1);
-              const double len = (p1 - p0).norm();
-              if (!(len > 1e-6))
-                continue;
-              const Eigen::Vector2d d = (p1 - p0) / len;
-              if (std::abs(d.dot(u)) > kAlongSin)
-                continue;
-              const double half = w.thickness > 0.0 ? 0.5 * w.thickness : 0.0;
-              const double off = u.dot(0.5 * (p0 + p1)) - umin;
-              const double w0 = std::min(c.dot(p0), c.dot(p1)),
-                           w1 = std::max(c.dot(p0), c.dot(p1));
-              const double ov = std::min(t1, w1) - std::max(t0, w0);
-              if (std::abs(off) <= kEaveWallReach + half &&
-                  ov >= 0.5 * (t1 - t0)) {
-                eave = false;
-                break;
-              }
+          std::sort(runs.begin(), runs.end(),
+                    [](const Stretch &a, const Stretch &b) {
+                      return std::tie(a.t0, a.t1) < std::tie(b.t0, b.t1);
+                    });
+          std::vector<Stretch> stretches;
+          for (const auto &r : runs)
+            if (!stretches.empty() &&
+                r.t0 <= stretches.back().t1 + kEaveMergeGap &&
+                std::abs(r.uw / r.w - stretches.back().uw /
+                                          stretches.back().w) <= kEaveBand) {
+              auto &b = stretches.back();
+              b.t1 = std::max(b.t1, r.t1);
+              b.uw += r.uw;
+              b.w += r.w;
+            } else {
+              stretches.push_back(r);
             }
-          if (eave) {
-            edges.eaves.push_back({{ea.x(), ea.y()}, {eb.x(), eb.y()}});
-            ++stats.eaves;
-            debug("spaces: space {}: an eave with no wall, ({:.2f}, {:.2f}) "
-                  "-> ({:.2f}, {:.2f}), {:.2f} m above the floor",
-                  s.guid, ea.x(), ea.y(), eb.x(), eb.y(), knee - s.z_floor);
+          for (const auto &st_run : stretches) {
+            const double t0 = st_run.t0, t1 = st_run.t1;
+            const double uline = st_run.uw / st_run.w;
+            const Eigen::Vector2d ea = u * uline + c * t0,
+                                  eb = u * uline + c * t1;
+            const Eigen::Vector2d emid = 0.5 * (ea + eb);
+            const Eigen::Vector2d probe = emid + u * 0.05;
+            const double knee = core::ceiling_at(s, probe.x(), probe.y());
+            bool eave = t1 - t0 >= kEaveMinLength && knee < s.z_ceiling - 0.3 &&
+                        knee > s.z_floor + kMinHeadroom &&
+                        knee <= s.z_floor + kEaveMaxKnee &&
+                        std::abs(p.z_at(probe.x(), probe.y()) - knee) < 1e-6;
+            // Not where a dormer bay opens off the space.
+            for (const auto &d : storey_dormers)
+              if (eave &&
+                  ring_dist(d.outline, {emid.x(), emid.y()}) <= kEaveWallReach)
+                eave = false;
+            // A facade: no space of the storey just outside it.
+            for (const double f : {0.2, 0.5, 0.8}) {
+              const Eigen::Vector2d q = ea + (eb - ea) * f - u * 0.3;
+              if (eave && std::any_of(mine.begin(), mine.end(), [&](auto k) {
+                    return in_space(spaces[k], q.x(), q.y());
+                  }))
+                eave = false;
+            }
+            // No wall along it (a knee wall, the facade, a partition).
+            if (eave)
+              for (const auto &w : *walls) {
+                if (w.storey != st.idx)
+                  continue;
+                const Eigen::Vector2d p0(w.x0, w.y0), p1(w.x1, w.y1);
+                const double len = (p1 - p0).norm();
+                if (!(len > 1e-6))
+                  continue;
+                const Eigen::Vector2d d = (p1 - p0) / len;
+                if (std::abs(d.dot(u)) > kAlongSin)
+                  continue;
+                const double half = w.thickness > 0.0 ? 0.5 * w.thickness : 0.0;
+                const double off = u.dot(0.5 * (p0 + p1)) - uline;
+                const double w0 = std::min(c.dot(p0), c.dot(p1)),
+                             w1 = std::max(c.dot(p0), c.dot(p1));
+                const double ov = std::min(t1, w1) - std::max(t0, w0);
+                if (std::abs(off) <= kEaveWallReach + half &&
+                    ov >= 0.5 * (t1 - t0)) {
+                  eave = false;
+                  break;
+                }
+              }
+            if (eave) {
+              edges.eaves.push_back({{ea.x(), ea.y()}, {eb.x(), eb.y()}});
+              ++stats.eaves;
+              debug("spaces: space {}: an eave with no wall, ({:.2f}, {:.2f}) "
+                    "-> ({:.2f}, {:.2f}), {:.2f} m above the floor",
+                    s.guid, ea.x(), ea.y(), eb.x(), eb.y(), knee - s.z_floor);
+            }
           }
         }
       }
