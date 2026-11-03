@@ -4,6 +4,7 @@
 
 #include "reusex/reconstruction/solids.hpp"
 
+#include "reusex/core/guid.hpp"
 #include "reusex/core/logging.hpp"
 #include "reusex/core/sloped_ceiling.hpp"
 #include "reusex/geometry/transform_utils.hpp"
@@ -31,6 +32,7 @@
 
 #include <Eigen/Geometry>
 
+#include <fmt/format.h>
 #include <fmt/ranges.h>
 
 #include <algorithm>
@@ -1194,8 +1196,61 @@ bool add_dormers(Mesh &m, const core::SpaceRecord &space,
   return true;
 }
 
-SolidsResult build_solids(const core::SolidModel &model,
+namespace {
+
+/// Namespace of the eave walls' GUIDs (any fixed UUID: the name carries the
+/// space GUID).
+constexpr const char *kEaveNamespace = "b4c1f3a2-6d0e-5f7a-9c8b-2e1d0a3f4b5c";
+
+/// @p model with a knee wall for every eave with no wall (core::Eave,
+/// reusex-wyi0): a detected, one-sided wall whose axis (its seen face) is
+/// the eave, from the space's floor to its top; build_solids() then grows it
+/// away from the space and stops it at the slope, as any wall beside a
+/// sloped space. Its GUID is deterministic: the space's and the eave's
+/// index. nullopt when there are none.
+std::optional<core::SolidModel> with_eave_walls(const core::SolidModel &model) {
+  std::vector<core::WallRecord> added;
+  for (const auto &s : model.spaces) {
+    const auto edges = core::roof_edges(s);
+    for (std::size_t k = 0; k < edges.eaves.size(); ++k) {
+      const auto &e = edges.eaves[k];
+      core::WallRecord w;
+      w.guid = core::deterministic_guid(kEaveNamespace,
+                                        fmt::format("eave/{}/{}", s.guid, k));
+      w.storey = s.storey;
+      w.x0 = e.a[0];
+      w.y0 = e.a[1];
+      w.x1 = e.b[0];
+      w.y1 = e.b[1];
+      w.z_base = s.z_floor;
+      w.height = s.z_ceiling - s.z_floor;
+      w.thickness = -1.0;
+      w.assumed = true;
+      w.is_external = true;
+      w.source = "detected";
+      w.metadata = R"({"inferred":"eave"})";
+      if (std::isfinite(w.height) && w.height > 0.0)
+        added.push_back(std::move(w));
+    }
+  }
+  if (added.empty())
+    return std::nullopt;
+  core::SolidModel m = model;
+  for (auto &w : added)
+    m.walls.push_back(std::move(w));
+  return m;
+}
+
+} // namespace
+
+SolidsResult build_solids(const core::SolidModel &model_in,
                           const SolidsOptions &opts) {
+  // Eaves with no wall get one (reusex-wyi0).
+  const auto eaves = with_eave_walls(model_in);
+  const core::SolidModel &model = eaves ? *eaves : model_in;
+  if (eaves)
+    debug("solids: {} knee wall(s) drawn at eaves with no wall",
+          eaves->walls.size() - model_in.walls.size());
   SolidsResult result;
   const Frames frames = make_frames(model);
 

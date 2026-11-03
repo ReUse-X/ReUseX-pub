@@ -303,6 +303,7 @@ struct SlopedCeilingStats {
   int extended = 0;           ///< planes carried into a neighbouring space
   int knee_walls = 0;         ///< facade walls found under a slope
   int dormers = 0;            ///< dormers found
+  int eaves = 0;              ///< eaves with no wall (reusex-wyi0)
   int roof_planes_fitted = 0; ///< distinct planes before regularise_roof()
   int roof_planes = 0;        ///< ... and after
 };
@@ -383,7 +384,11 @@ RoofRegulariseStats regularise_roof(std::vector<core::SpaceRecord> &spaces,
 /// reaches that height) or a cheek wall at either end, is a dormer (its
 /// ceiling height: the median of those ceiling points, else of the wall's
 /// tops); a wall whose other stretches stay at the knee line is a knee
-/// wall. Both go into the space's metadata as core::RoofEdges ("roof").
+/// wall. Where a plane comes down to the space's outline (its lowest
+/// contour line over the vertices within 0.3 m of it, at least 0.75 m long)
+/// at a facade with no wall along it within 0.5 m, that stretch is an eave
+/// with no wall (reusex-wyi0), drawn as a knee wall by build_solids(). All
+/// go into the space's metadata as core::RoofEdges ("roof").
 /// @throws std::invalid_argument when cloud, normals and labels sizes differ
 ///         or ceiling_labels and ceiling_storeys do.
 SlopedCeilingStats fit_sloped_ceilings(

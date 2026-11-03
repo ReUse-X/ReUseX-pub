@@ -123,10 +123,21 @@ struct Candidate {
 // ── Eaves (reusex-ow8p) ─────────────────────────────────────────────────────
 
 constexpr double kNeighbourGap = 0.6; ///< spaces this close are neighbours [m]
-constexpr double kCutMin = 0.1;       ///< a plane cuts a cell this far down [m]
-constexpr int kMinCutCells = 10;      ///< ... in at least this many cells
-constexpr double kAgree = 0.15;       ///< an observation this close agrees [m]
-constexpr double kMaxContra = 0.2;    ///< share of cut cells seen above
+/// Eaves with no wall (reusex-wyi0): the outline's vertices within this of
+/// its lowest contour line make the eave [m] ...
+constexpr double kEaveBand = 0.3;
+/// ... at least this long [m] ...
+constexpr double kEaveMinLength = 0.75;
+/// ... unless a wall along it lies within this of it (plus its half
+/// thickness) over half its length [m].
+constexpr double kEaveWallReach = 0.5;
+/// ... and only knee-high: an outline the slope meets higher than this
+/// above the floor is not at a knee wall (a bay, a gable end) [m].
+constexpr double kEaveMaxKnee = 1.2;
+constexpr double kCutMin = 0.1;    ///< a plane cuts a cell this far down [m]
+constexpr int kMinCutCells = 10;   ///< ... in at least this many cells
+constexpr double kAgree = 0.15;    ///< an observation this close agrees [m]
+constexpr double kMaxContra = 0.2; ///< share of cut cells seen above
 constexpr double kMaxContraGain = 0.35;  ///< ... when it fits much better
 constexpr double kEavesReach = 2.5;      ///< facade to its sloped space [m]
 constexpr double kAlongSin = 0.342;      ///< sin 20 deg: along the contours
@@ -1196,13 +1207,102 @@ SlopedCeilingStats fit_sloped_ceilings(
       if (!edges.dormers.empty())
         revolume(si, edges.dormers);
     }
+
+    // (3) Eaves with no wall (reusex-wyi0): where a slope comes down to the
+    // space's outline at a facade (no space outside), knee-high, with no
+    // wall along it and no dormer bay behind it -- a knee wall seen too
+    // little to be a wall, or hidden -- record the stretch; build_solids()
+    // draws a knee wall there, its top on the slope. The stretch: the
+    // outline's lowest contour line, over the vertices within kEaveBand of
+    // it.
+    std::vector<core::Dormer> storey_dormers;
+    for (const auto si : mine)
+      for (auto &d : core::roof_edges(spaces[si]).dormers)
+        storey_dormers.push_back(std::move(d));
+    for (const auto si : mine) {
+      auto &s = spaces[si];
+      auto edges = core::roof_edges(s);
+      const std::size_t before = edges.eaves.size();
+      for (const auto &p : s.ceiling_planes) {
+        const Eigen::Vector2d g(p.slope[0], p.slope[1]);
+        if (!(g.norm() >
+              std::tan(o.ceiling_min_tilt_deg * std::numbers::pi / 180.0)))
+          continue;
+        {
+          const Eigen::Vector2d u = g.normalized(); // uphill
+          const Eigen::Vector2d c(-u.y(), u.x());   // along the contour
+          double umin = std::numeric_limits<double>::infinity();
+          for (const auto &v : s.polygon.outer)
+            umin = std::min(umin, u.x() * v[0] + u.y() * v[1]);
+          double t0 = std::numeric_limits<double>::infinity(), t1 = -t0;
+          for (const auto &v : s.polygon.outer)
+            if (u.x() * v[0] + u.y() * v[1] <= umin + kEaveBand) {
+              t0 = std::min(t0, c.x() * v[0] + c.y() * v[1]);
+              t1 = std::max(t1, c.x() * v[0] + c.y() * v[1]);
+            }
+          const Eigen::Vector2d ea = u * umin + c * t0, eb = u * umin + c * t1;
+          const Eigen::Vector2d emid = 0.5 * (ea + eb);
+          const Eigen::Vector2d probe = emid + u * 0.05;
+          const double knee = core::ceiling_at(s, probe.x(), probe.y());
+          bool eave = t1 - t0 >= kEaveMinLength && knee < s.z_ceiling - 0.3 &&
+                      knee > s.z_floor + kMinHeadroom &&
+                      knee <= s.z_floor + kEaveMaxKnee &&
+                      std::abs(p.z_at(probe.x(), probe.y()) - knee) < 1e-6;
+          // Not where a dormer bay opens off the space.
+          for (const auto &d : storey_dormers)
+            if (eave &&
+                ring_dist(d.outline, {emid.x(), emid.y()}) <= kEaveWallReach)
+              eave = false;
+          // A facade: no space of the storey just outside it.
+          for (const double f : {0.2, 0.5, 0.8}) {
+            const Eigen::Vector2d q = ea + (eb - ea) * f - u * 0.3;
+            if (eave && std::any_of(mine.begin(), mine.end(), [&](auto k) {
+                  return in_space(spaces[k], q.x(), q.y());
+                }))
+              eave = false;
+          }
+          // No wall along it (a knee wall, the facade, a partition).
+          if (eave)
+            for (const auto &w : *walls) {
+              if (w.storey != st.idx)
+                continue;
+              const Eigen::Vector2d p0(w.x0, w.y0), p1(w.x1, w.y1);
+              const double len = (p1 - p0).norm();
+              if (!(len > 1e-6))
+                continue;
+              const Eigen::Vector2d d = (p1 - p0) / len;
+              if (std::abs(d.dot(u)) > kAlongSin)
+                continue;
+              const double half = w.thickness > 0.0 ? 0.5 * w.thickness : 0.0;
+              const double off = u.dot(0.5 * (p0 + p1)) - umin;
+              const double w0 = std::min(c.dot(p0), c.dot(p1)),
+                           w1 = std::max(c.dot(p0), c.dot(p1));
+              const double ov = std::min(t1, w1) - std::max(t0, w0);
+              if (std::abs(off) <= kEaveWallReach + half &&
+                  ov >= 0.5 * (t1 - t0)) {
+                eave = false;
+                break;
+              }
+            }
+          if (eave) {
+            edges.eaves.push_back({{ea.x(), ea.y()}, {eb.x(), eb.y()}});
+            ++stats.eaves;
+            debug("spaces: space {}: an eave with no wall, ({:.2f}, {:.2f}) "
+                  "-> ({:.2f}, {:.2f}), {:.2f} m above the floor",
+                  s.guid, ea.x(), ea.y(), eb.x(), eb.y(), knee - s.z_floor);
+          }
+        }
+      }
+      if (edges.eaves.size() != before)
+        s.metadata = core::with_roof_edges(s.metadata, edges);
+    }
   }
   if (stats.spaces_sloped > 0)
     info("spaces: sloped ceilings: {} space(s) took {} plane(s) of {} tilted "
          "ceiling candidate(s), {} carried on from a neighbour; {} knee "
-         "wall(s), {} dormer(s)",
+         "wall(s), {} dormer(s), {} eave(s) with no wall",
          stats.spaces_sloped, stats.planes, stats.candidates, stats.extended,
-         stats.knee_walls, stats.dormers);
+         stats.knee_walls, stats.dormers, stats.eaves);
   return stats;
 }
 

@@ -768,3 +768,33 @@ TEST_CASE("Solids_Eaves_DormerRaisesTheRoomItIsIn",
   CHECK_FALSE(inside_any(roofs, 4.0, 0.5, 1.15));
   CHECK(inside_any(roofs, 1.0, 0.5, 1.15));
 }
+
+TEST_CASE("Solids_Eaves_KneeWallAtAnEaveWithNoWall",
+          "[reconstruction][solids][sloped][eaves]") {
+  // reusex-wyi0: the attic without its north facade wall; the spaces stage
+  // recorded the eave there. A knee wall is drawn on it, outside the room,
+  // its top on the slope (0.55 m at y = 6).
+  auto m = eaves_attic(true);
+  m.walls = {m.walls.front()}; // w-s only
+  auto edges = core::roof_edges(m.spaces[0]);
+  edges.knee_walls = {"w-s"};
+  edges.dormers.clear();
+  edges.eaves = {{{8.0, 6.0}, {0.0, 6.0}}};
+  m.spaces[0].metadata = core::with_roof_edges("", edges);
+  SolidsOptions o;
+  o.extend_at_joins = false;
+  const auto r = build_solids(m, o);
+  REQUIRE(r.walls.size() == 2);
+  const ElementSolid *knee = nullptr;
+  for (const auto &w : r.walls)
+    if (w.source_guid != "w-s")
+      knee = &w;
+  REQUIRE(knee != nullptr);
+  CHECK(knee->closed);
+  // Outside the room (it grows away from it), up to the slope.
+  CHECK(side(*knee, 4.0, 6.05, 0.45) == CGAL::ON_BOUNDED_SIDE);
+  CHECK(side(*knee, 4.0, 6.05, 0.75) == CGAL::ON_UNBOUNDED_SIDE);
+  CHECK(side(*knee, 4.0, 5.95, 0.30) == CGAL::ON_UNBOUNDED_SIDE);
+  // Deterministic: the same GUID on a re-run.
+  CHECK(build_solids(m, o).walls[1].source_guid == knee->source_guid);
+}
