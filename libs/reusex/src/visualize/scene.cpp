@@ -758,12 +758,41 @@ class PlanBuilder {
                                 ids[static_cast<std::size_t>((i + 1) % n)]};
       outline.lines->InsertNextCell(2, seg);
     }
-    if (fill != nullptr) {
-      std::vector<vtkIdType> fids;
-      for (const auto &p : pts)
-        fids.push_back(add(*fill, p));
-      fill->polys->InsertNextCell(n, fids.data());
+    if (fill != nullptr)
+      this->fill(*fill, pts);
+  }
+
+  /// @p pts filled as triangles. A polygon cell is drawn as a fan from its
+  /// first vertex, so a concave ring (an L-shaped room, a room with a closet
+  /// cut out) would paint wedges outside itself: the ring is ear-cut. A ring
+  /// the ear-cut rejects (self-intersecting) is kept as one polygon cell.
+  /// @return false for such a ring.
+  bool fill(PlanGeometry &g, const std::vector<Eigen::Vector3d> &pts) {
+    const auto n = static_cast<vtkIdType>(pts.size());
+    vtkNew<vtkPolygon> polygon;
+    polygon->GetPointIds()->SetNumberOfIds(n);
+    polygon->GetPoints()->SetNumberOfPoints(n);
+    for (vtkIdType k = 0; k < n; ++k) {
+      polygon->GetPointIds()->SetId(k, k);
+      polygon->GetPoints()->SetPoint(k,
+                                     pts[static_cast<std::size_t>(k)].data());
     }
+    std::vector<vtkIdType> ids;
+    for (const auto &p : pts)
+      ids.push_back(add(g, p));
+    vtkNew<vtkIdList> tris;
+    if (polygon->TriangulateLocalIds(0, tris) && tris->GetNumberOfIds() >= 3) {
+      for (vtkIdType t = 0; t + 2 < tris->GetNumberOfIds(); t += 3) {
+        const vtkIdType tri[3] = {
+            ids[static_cast<std::size_t>(tris->GetId(t))],
+            ids[static_cast<std::size_t>(tris->GetId(t + 1))],
+            ids[static_cast<std::size_t>(tris->GetId(t + 2))]};
+        g.polys->InsertNextCell(3, tri);
+      }
+      return true;
+    }
+    g.polys->InsertNextCell(n, ids.data());
+    return false;
   }
 
   void segment(PlanGeometry &g, const Eigen::Vector3d &a,
@@ -1201,37 +1230,8 @@ add_spaces_layer(vtkRenderer *renderer, const ProjectDB &db,
     // The fill: the outer ring ear-cut into triangles (a space is rarely
     // convex, and a polygon cell is drawn as a fan). Holes are outlined,
     // not cut out of the fill, as in the plan overlay.
-    {
-      vtkNew<vtkPolygon> polygon;
-      polygon->GetPointIds()->SetNumberOfIds(
-          static_cast<vtkIdType>(outer.size()));
-      polygon->GetPoints()->SetNumberOfPoints(
-          static_cast<vtkIdType>(outer.size()));
-      for (std::size_t k = 0; k < outer.size(); ++k) {
-        polygon->GetPointIds()->SetId(static_cast<vtkIdType>(k),
-                                      static_cast<vtkIdType>(k));
-        polygon->GetPoints()->SetPoint(static_cast<vtkIdType>(k),
-                                       outer[k].data());
-      }
-      vtkNew<vtkIdList> tris;
-      std::vector<vtkIdType> ids;
-      for (const auto &p : outer)
-        ids.push_back(b.add(geo[0], p));
-      if (polygon->TriangulateLocalIds(0, tris) &&
-          tris->GetNumberOfIds() >= 3) {
-        for (vtkIdType t = 0; t + 2 < tris->GetNumberOfIds(); t += 3) {
-          const vtkIdType tri[3] = {
-              ids[static_cast<std::size_t>(tris->GetId(t))],
-              ids[static_cast<std::size_t>(tris->GetId(t + 1))],
-              ids[static_cast<std::size_t>(tris->GetId(t + 2))]};
-          geo[0].polys->InsertNextCell(3, tri);
-        }
-      } else {
-        ++untriangulated; // drawn as one polygon cell
-        geo[0].polys->InsertNextCell(static_cast<vtkIdType>(ids.size()),
-                                     ids.data());
-      }
-    }
+    if (!b.fill(geo[0], outer))
+      ++untriangulated; // drawn as one polygon cell
     const auto c = core::space_polygon_centroid(s.polygon);
     // Upright in a view turned by SceneOptions::frame_yaw_deg (the
     // project's view yaw), as the drift layers' labels.
