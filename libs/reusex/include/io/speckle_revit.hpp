@@ -7,6 +7,7 @@
 #include "reusex/core/solid_model.hpp"
 #include "reusex/io/imported_mesh.hpp"
 #include "reusex/io/solid_model_json.hpp"
+#include "reusex/io/speckle_bundle_options.hpp"
 #include "reusex/io/speckle_reader.hpp"
 
 #include <nlohmann/json.hpp>
@@ -200,6 +201,11 @@ struct SpeckleRevitImportOptions {
   /// Configures every curl handle of the server reads
   /// (SpeckleReader::set_curl_setup). Empty = none.
   CurlSetup curl_setup;
+  /// Bounds of a bundle-only version's read and projection
+  /// (`io/speckle_bundle.hpp`); their `cancel` is replaced by
+  /// `cancel_token`.
+  BundleReadOptions bundle_read;
+  BundleProjectionOptions bundle_projection;
 };
 
 struct SpeckleRevitImportResult {

@@ -279,6 +279,20 @@ else()
     message(STATUS "web-ifc not found: IFC import support disabled")
 endif()
 
+# DuckDB (libduckdb, MIT; nixpkgs `duckdb`): reads the Parquet tables of a
+# Speckle bundle-only version (reusex-fo1t). OPTIONAL: without it
+# REUSEX_HAVE_DUCKDB stays OFF and such versions are refused with
+# io::speckle::BundleVersionUnsupported. Linked PRIVATE into reusex_io; its
+# include stays inside src/io/speckle_bundle_duckdb.cpp.
+find_package(DuckDB CONFIG QUIET)
+if(DuckDB_FOUND AND TARGET duckdb)
+    set(REUSEX_HAVE_DUCKDB ON)
+    message(STATUS "DuckDB ${DuckDB_VERSION} found: Speckle bundle support enabled")
+else()
+    set(REUSEX_HAVE_DUCKDB OFF)
+    message(STATUS "DuckDB not found: Speckle bundle-only versions are refused")
+endif()
+
 # EXIF metadata reading (for 360 panoramic image import)
 find_package(exiv2 REQUIRED CONFIG)
 

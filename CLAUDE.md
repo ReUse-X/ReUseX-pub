@@ -841,7 +841,18 @@ External-format adapters only — project state itself lives in `core/ProjectDB`
 - `speckle_reader.hpp`: Speckle receive, read-only by construction
   (`SpeckleReader`: GraphQL queries + HTTP GETs only). Project / model /
   version lookup, the whole object tree in one GET (`ObjectTree`), and
-  `ObjectTree::resolve` (references, `@`-detached keys, DataChunk joins)
+  `ObjectTree::resolve` (references, `@`-detached keys, DataChunk joins);
+  bundle-only versions (`referencedObject` `bundle.<p>.<m>.<v>`): the
+  `/api/v2/.../artifacts` listing and token-less presigned downloads
+  (`list_bundle_artifacts`, `download_bundle`, URL policy
+  `is_allowed_artifact_url`)
+- `speckle_bundle.hpp`: reads a bundle-only version (reusex-fo1t): SGEO
+  mesh decoder, `read_bundle_directory` (Parquet via DuckDB, needs
+  `REUSEX_HAVE_DUCKDB`; the only `duckdb.h` include is
+  `src/io/speckle_bundle_duckdb.cpp`), `project_bundle_to_revit_tree`
+  (bundle tables -> the Revit connector's object tree, so `import_revit`
+  reads both), `fetch_bundle_tree`; without DuckDB such versions are
+  refused with `BundleVersionUnsupported`
 - `speckle_revit.hpp`: Revit model (Speckle v3 Revit connector) -> solid
   model + per-category meshes (`import_revit`, pure), and the entry point
   `import_speckle_revit` (fetch, map, store as imported) of the job stage
@@ -1099,6 +1110,13 @@ Anything not found there is not a dependency.
   `cache/` include dirs. It logs through spdlog's *default* logger (rux's), so
   `src/io/ifc.cpp` wraps every web-ifc call in a `WebIfcLog::Scope` that
   swaps in a `[web-ifc]` logger at >= warn and counts its errors
+- DuckDB (libduckdb, MIT, nixpkgs `duckdb`) - reads the Parquet tables of
+  Speckle bundle-only versions. **Optional**: found -> `REUSEX_HAVE_DUCKDB`
+  (capability flag), linked PRIVATE into `reusex_io`, include confined to
+  `src/io/speckle_bundle_duckdb.cpp`; the in-memory database runs with
+  extension autoload / install off and external access limited to the
+  bundle's temporary directory. Adds ~255 MiB (the `duckdb.lib` output,
+  substitutable from cache.nixos.org) to the runtime closure
 - OpenCV (`core`, `imgproc`, `highgui`) - image processing
 - VTK (`CommonCore`, `CommonDataModel`, `CommonExecutionModel`, `RenderingCore`,
   `RenderingOpenGL2`, `RenderingFreeType` for the plan overlay's labels) - the rendering backend behind `reusex_visualize`'s

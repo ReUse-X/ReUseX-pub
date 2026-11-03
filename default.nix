@@ -70,6 +70,7 @@
   onnxruntime,
   exiv2,
   web-ifc,
+  duckdb,
   openmvs,
   nanoflann,
   libjxl,
@@ -249,6 +250,9 @@ in
         # web-ifc — native C++ IFC (STEP) parser + geometry engine, for
         # `rux import ifc` (pkgs/web-ifc). MPL-2.0. Optional in CMake.
         web-ifc
+        # DuckDB (libduckdb, MIT) — reads the Parquet tables of Speckle
+        # bundle-only versions (reusex-fo1t). Optional in CMake.
+        duckdb
 
         # OpenMVS — library-linked Multi-View Stereo for `rux create dense`.
         # AGPL-3.0-or-later; combined work is therefore AGPL.

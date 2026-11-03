@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
@@ -187,9 +188,10 @@ bool is_valid_speckle_id(std::string_view id);
 /// Such a version's data lives in a set of Parquet files served by
 /// `GET /api/v2/projects/{p}/models/{m}/versions/{v}/artifacts` (presigned
 /// storage URLs) and has no legacy object graph: `/objects/...` answers 404
-/// `BUNDLE_REFERENCE_NOT_FOUND`. ReUseX cannot read that format yet
-/// (reusex-fo1t); the reader recognises the reference and throws
-/// `BundleVersionUnsupported` instead of sending it anywhere.
+/// `BUNDLE_REFERENCE_NOT_FOUND`. A build with DuckDB reads it through
+/// `fetch_bundle_tree` (`io/speckle_bundle.hpp`, reusex-fo1t); one without
+/// refuses it with `BundleVersionUnsupported`. A bundle reference is never
+/// sent to `/objects`.
 struct BundleReference {
   std::string project;
   std::string model;
@@ -205,7 +207,8 @@ std::optional<BundleReference> parse_bundle_reference(std::string_view ref);
 /// bundle, never an object, so it must not go to the `/objects` endpoints.
 bool is_bundle_reference(std::string_view ref);
 
-/// Thrown for a bundle-only version (see `BundleReference`). The message
+/// Thrown for a bundle-only version (see `BundleReference`) by a build
+/// without DuckDB (`has_bundle_support()` false). The message
 /// is stable: it starts with `kBundleUnsupportedMessage` and ends with the
 /// tag `kBundleUnsupportedTag`, which a front end may match on.
 class BundleVersionUnsupported : public std::runtime_error {
@@ -226,6 +229,40 @@ inline constexpr std::string_view kBundleUnsupportedMessage =
 /// message.
 inline constexpr std::string_view kBundleUnsupportedTag =
     "[speckle-bundle-unsupported]";
+
+/// One file of a bundle, as the artifacts listing names it.
+struct BundleFile {
+  std::string name; ///< bare file name, e.g. "<v>.eav.eav.parquet"
+  std::string url;  ///< presigned storage URL (a credential: never log it)
+};
+
+/// True for a name the listing may address a file by: 1..200 characters of
+/// [A-Za-z0-9._-], not starting with '.' (so never "..", a path or a
+/// separator). Stricter than the SDKs' `is_bare_file_name`: the name is
+/// also used inside a DuckDB query.
+bool is_bundle_file_name(std::string_view name);
+
+/// Whether a presigned artifact URL may be fetched, given the Speckle
+/// server it came from. Allowed: `https://` (or `http://` when the server
+/// itself is plain-http localhost and the URL host is that same host), no
+/// userinfo, and a host that is the server's own host or a subdomain of it,
+/// or an object-storage host: `*.digitaloceanspaces.com` (app.speckle.systems),
+/// `*.amazonaws.com`, `*.r2.cloudflarestorage.com`,
+/// `storage.googleapis.com`, `*.blob.core.windows.net`.
+bool is_allowed_artifact_url(const std::string &url,
+                             const std::string &server_url);
+
+/// The files of an artifacts listing (`{"files": [{"name", "url"}, ...]}`)
+/// that a receive needs: `*.parquet` files, `*.viewer.*` skipped.
+/// @throws std::runtime_error for a malformed listing, an invalid name
+///         (`is_bundle_file_name`), a URL `is_allowed_artifact_url` refuses,
+///         a duplicate name or more than 1000 files.
+std::vector<BundleFile> parse_artifact_listing(const nlohmann::json &listing,
+                                               const std::string &server_url);
+
+/// A URL without its query and fragment, for messages (a presigned URL's
+/// query is its signature).
+std::string url_without_query(std::string_view url);
 
 /// True when `document` holds only GraphQL `query` operations (and
 /// fragments): no `mutation` or `subscription` anywhere (outside strings and
@@ -315,17 +352,41 @@ class SpeckleReader {
   /// Download a root object and its whole closure in one GET
   /// (`/objects/{project}/{object_id}`), streamed into memory.
   /// @throws BundleVersionUnsupported for a bundle reference
-  ///         (`is_bundle_reference`), before any request.
+  ///         (`is_bundle_reference`) in a build without DuckDB, else
+  ///         std::invalid_argument (read it with `fetch_bundle_tree`);
+  ///         both before any request.
   [[nodiscard]] ObjectTree
   fetch_object_tree(const std::string &project,
                     const std::string &object_id) const;
 
   /// Download just one object (`/objects/{project}/{object_id}/single`),
   /// unresolved.
-  /// @throws BundleVersionUnsupported for a bundle reference, before any
-  ///         request.
+  /// @throws BundleVersionUnsupported for a bundle reference
+  ///         (`is_bundle_reference`) in a build without DuckDB, else
+  ///         std::invalid_argument (read it with `fetch_bundle_tree`);
+  ///         both before any request.
   [[nodiscard]] nlohmann::json fetch_object(const std::string &project,
                                             const std::string &object_id) const;
+
+  /// The files of a bundle-only version: `GET {server}/api/v2/projects/
+  /// {p}/models/{m}/versions/{v}/artifacts` (with the token), parsed by
+  /// `parse_artifact_listing`. The ids come from a validated
+  /// `BundleReference`.
+  /// @throws std::runtime_error (HTTP 404: the version has no bundle).
+  [[nodiscard]] std::vector<BundleFile>
+  list_bundle_artifacts(const BundleReference &reference) const;
+
+  /// Download every file `list_bundle_artifacts` names into @p dir (an
+  /// existing directory, normally private and empty), each from its
+  /// presigned URL with a plain GET **without** the token, through the
+  /// same connect filter, curl setup, timeout and cancel token as every
+  /// other request. All files together are bounded by
+  /// `max_download_bytes()`. Returns the bytes written; @p files (optional)
+  /// receives the paths.
+  std::size_t
+  download_bundle(const BundleReference &reference,
+                  const std::filesystem::path &dir,
+                  std::vector<std::filesystem::path> *files = nullptr) const;
 
     private:
   [[nodiscard]] nlohmann::json graphql_query(const std::string &query,

@@ -429,6 +429,16 @@ if(REUSEX_HAVE_WEB_IFC)
     target_compile_definitions(reusex_io PUBLIC REUSEX_HAVE_WEB_IFC)
 endif()
 
+# DuckDB: reads Speckle bundle Parquet tables (Dependencies.cmake, optional).
+# PRIVATE, like web-ifc: no public header exposes a DuckDB type, and only
+# src/io/speckle_bundle_duckdb.cpp includes duckdb.h. REUSEX_HAVE_DUCKDB
+# (PUBLIC) is a capability flag only ("reusex_io reads bundle-only Speckle
+# versions"), not a promise that DuckDB headers are includable.
+if(REUSEX_HAVE_DUCKDB)
+    target_link_libraries(reusex_io PRIVATE duckdb)
+    target_compile_definitions(reusex_io PUBLIC REUSEX_HAVE_DUCKDB)
+endif()
+
 reusex_add_module(reusex_vision ${REUSEX_VISION_SOURCES})
 target_link_libraries(reusex_vision PUBLIC reusex_core)
 # opencv_imgcodecs backs the VLM client's cv::imencode(.jpg) of instance crops
@@ -630,5 +640,6 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set(ENABLED_ML_BACKENDS ${ENABLED_ML_BACKENDS} PARENT_SCOPE)
     set(REUSEX_HAVE_GSPLAT ${REUSEX_HAVE_GSPLAT} PARENT_SCOPE)
     set(REUSEX_HAVE_WEB_IFC ${REUSEX_HAVE_WEB_IFC} PARENT_SCOPE)
+    set(REUSEX_HAVE_DUCKDB ${REUSEX_HAVE_DUCKDB} PARENT_SCOPE)
     set(REUSEX_PACKAGE_TARGETS ${REUSEX_PACKAGE_TARGETS} PARENT_SCOPE)
 endif()

@@ -11,7 +11,8 @@
 # reconstruction, slam, gsplat_common, pipeline, the umbrella ReUseX::reusex,
 # plus ReUseX::visualize and ReUseX::gsplat when this build had them
 # (ReUseX_HAVE_VISUALIZE / ReUseX_HAVE_GSPLAT). ReUseX_HAVE_WEB_IFC says
-# whether reusex_io was built with IFC support (web-ifc).
+# whether reusex_io was built with IFC support (web-ifc), ReUseX_HAVE_DUCKDB
+# whether it reads Speckle bundle-only versions (DuckDB).
 #
 # The modules are static libraries, so their PRIVATE dependencies travel as
 # $<LINK_ONLY:...> entries and must resolve in the consumer as well. The lookups
@@ -27,6 +28,7 @@ set(ReUseX_MIP_SOLVER         "@REUSEX_PKG_MIP_SOLVER@")
 set(ReUseX_HAVE_GSPLAT        @REUSEX_PKG_HAVE_GSPLAT@)
 set(ReUseX_HAVE_VISUALIZE     @REUSEX_PKG_HAVE_VISUALIZE@)
 set(ReUseX_HAVE_WEB_IFC       @REUSEX_PKG_HAVE_WEB_IFC@)
+set(ReUseX_HAVE_DUCKDB        @REUSEX_PKG_HAVE_DUCKDB@)
 foreach(_reusex_backend TensorRT LibTorch ONNX OpenVINO)
     if(_reusex_backend IN_LIST ReUseX_ML_BACKENDS)
         set(ReUseX_HAVE_${_reusex_backend} ON)
@@ -121,6 +123,10 @@ find_dependency(yaml-cpp CONFIG)
 # reusex_io: web-ifc (IFC import), when this build found it.
 if(ReUseX_HAVE_WEB_IFC)
     find_dependency(web-ifc CONFIG)
+endif()
+# reusex_io: DuckDB (Speckle bundle Parquet tables), when this build found it.
+if(ReUseX_HAVE_DUCKDB)
+    find_dependency(DuckDB CONFIG)
 endif()
 find_dependency(Boost CONFIG COMPONENTS iostreams program_options serialization)
 find_dependency(jsoncpp)
