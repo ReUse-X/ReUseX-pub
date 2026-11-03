@@ -296,6 +296,17 @@ void attic_ceiling(Scene &sc, double x0, double x1, double y0, double y1,
     }
 }
 
+/// Whether (x, y) lies inside @p s's outer ring (even-odd).
+bool geometry_test_inside(const core::SpaceRecord &s, double x, double y) {
+  bool in = false;
+  const auto &r = s.polygon.outer;
+  for (std::size_t i = 0, j = r.size() - 1; i < r.size(); j = i++)
+    if ((r[i][1] > y) != (r[j][1] > y) &&
+        x < (r[j][0] - r[i][0]) * (y - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0])
+      in = !in;
+  return in;
+}
+
 core::SpaceRecord poly_room(const std::string &guid, double x0, double x1,
                             double y0, double y1, double z_ceiling) {
   return room(guid, x0, x1, y0, y1, z_ceiling);
@@ -651,4 +662,52 @@ TEST_CASE("SlopedCeilings_Eaves_NoWallAtTheFacadeIsAnEave",
   geometry::fit_sloped_ceilings(recess, {storey()}, sc.cloud, sc.normals,
                                 sc.labels, labels, label_storeys, {}, &walls);
   REQUIRE(core::roof_edges(recess[0]).eaves.size() == 1);
+}
+
+TEST_CASE("SlopedCeilings_Eaves_DormerBayOutsideEverySpaceJoinsIt",
+          "[segmentation][spaces][sloped][eaves]") {
+  // reusex-f2lv: the dormer attic of DormerRisesThroughTheSlope, but the
+  // room's outline stops short of the bay (x 3..5, y 0..1), as on
+  // Sygehusgrunden's storey 3, where the dormer ceilings sit under the
+  // band-rooms' ceiling height. The bay joins the room: floor and volume.
+  constexpr double zd = 1.6, depth = zd - 0.55;
+  const auto in_dormer = [&](double x, double y) {
+    return x > 3.0 && x < 5.0 && y < depth;
+  };
+  Scene sc;
+  attic_ceiling(sc, 0.0, 8.0, 0.0, 6.0, in_dormer);
+  sc.ceiling(
+      3.0, 5.0, 0.0, depth, [&](double, double) { return zd; },
+      [](double, double) { return 4u; },
+      [](double, double) { return Eigen::Vector3d(0, 0, -1); });
+  for (const double xc : {3.0, 5.0})
+    for (double y = 0.025; y < depth; y += 0.05)
+      for (double z = 0.55 + y; z < zd; z += 0.05)
+        sc.add(xc, y, z, {xc < 4.0 ? 1.0 : -1.0, 0, 0}, 0);
+  sc.floor(0.1, 7.9, 0.1, 5.9);
+  wall_along_x(
+      sc, 0.0, 8.0, 0.0,
+      [](double x) { return x > 3.0 && x < 5.0 ? zd : 0.55; }, 1.0);
+  wall_along_x(sc, 0.0, 8.0, 6.0, [](double) { return 0.55; }, -1.0);
+
+  auto room = poly_room("room", 0.0, 8.0, 0.0, 6.0, 2.5);
+  room.polygon.outer = {{0, 0}, {3, 0}, {3, 1}, {5, 1},
+                        {5, 0}, {8, 0}, {8, 6}, {0, 6}};
+  room.area = 48.0 - 2.0;
+  std::vector<core::SpaceRecord> spaces = {room};
+  const std::vector<core::WallRecord> walls = {facade("w-s", 0, 0, 8, 0),
+                                               facade("w-n", 8, 6, 0, 6)};
+  const std::vector<int> labels = {1, 2, 3, 4};
+  const std::vector<int> label_storeys(labels.size(), 0);
+  const auto stats = geometry::fit_sloped_ceilings(
+      spaces, {storey()}, sc.cloud, sc.normals, sc.labels, labels,
+      label_storeys, {}, &walls);
+  REQUIRE(stats.dormers == 1);
+  CHECK(stats.dormer_bays == 1);
+  const auto &r = spaces[0];
+  // The bay's middle is the room's now, from the wall's inner face in.
+  CHECK(geometry_test_inside(r, 4.0, 0.5));
+  CHECK_FALSE(geometry_test_inside(r, 4.0, 0.05));
+  CHECK_THAT(r.area, WithinAbs(46.0 + 2.0 * 0.85, 0.15));
+  CHECK(r.volume > 0.0);
 }

@@ -775,7 +775,12 @@ each): the outline's edges along a slope's lowest contour line (within
 bay behind; `solids` draws a knee wall on each (a one-sided wall on the
 stretch, grown away from the space, from the storey floor up to the space's
 own slope along it, GUID from the space's and the eave's index, metadata
-`{"inferred": "eave"}`; not a `walls` row)), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
+`{"inferred": "eave"}`; not a `walls` row);
+a dormer bay that no space holds (reusex-f2lv) joins the space it opens
+into (the one just past its inner line, else the space it was found from):
+the bay from the dormer wall's inner face, grown 0.3 m into that space and
+clipped by every other space, is unioned into its polygon, and its `area`,
+`perimeter` and `volume` (the bay up to the dormer ceiling) grow with it), `area`, `perimeter`, `volume`, `compactness`, `room_label` (the
 `rooms` label it was made from), `confidence` (the share of its area that
 comes from wall-bounded faces, the rest is raster) and `metadata` (that share
 and the furniture holes). A boundary names its space by row (it goes with
