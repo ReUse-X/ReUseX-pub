@@ -131,7 +131,7 @@ TEST_CASE("MigrationV40_V39Project_GetsBlocksAndVersions",
     CHECK(core::pose_blocks(ro).size() == 2);
   }
   ProjectDB db(tmp.path);
-  CHECK(db.schema_version() == 40);
+  CHECK(db.schema_version() == ProjectDB::latest_schema_version());
   CHECK(ProjectDB::latest_schema_version() >= 40);
   db.replace_pose_blocks(
       {{0, "a", 1, 40, 1, false}, {0, "b", 41, 70, 2, true}});

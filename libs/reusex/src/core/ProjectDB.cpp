@@ -447,9 +447,11 @@ class ProjectDB::Impl {
   bool hasSlopedColumns = false;
   /// pose_blocks and pose_versions exist (v40).
   bool hasPoseRepairTables = false;
+  /// model_dismissed and model_edits exist (v41).
+  bool hasModelEditTables = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 40;
+  static constexpr int LATEST_SCHEMA_VERSION = 41;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -585,6 +587,8 @@ class ProjectDB::Impl {
                        columnExists("walls", "top_profile");
     hasPoseRepairTables =
         tableExists("pose_blocks") && tableExists("pose_versions");
+    hasModelEditTables =
+        tableExists("model_dismissed") && tableExists("model_edits");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -928,6 +932,10 @@ class ProjectDB::Impl {
 
     if (current < 40) {
       migrateToV40();
+    }
+
+    if (current < 41) {
+      migrateToV41();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -3483,11 +3491,13 @@ class ProjectDB::Impl {
     tally.taken_over += static_cast<size_t>(sqlite3_changes(db));
   }
 
-  size_t saveStoreys(const std::vector<core::StoreyRecord> &storeys, int runId,
-                     ImportTally *imp = nullptr) {
+  size_t saveStoreys(const std::vector<core::StoreyRecord> &storeysIn,
+                     int runId, ImportTally *imp = nullptr) {
     checkWritable();
     if (!hasStoreysTable)
       throw std::runtime_error("save_storeys: project schema predates v30");
+    const auto storeys =
+        withoutDismissed(storeysIn, "storey", imp != nullptr, "save_storeys");
     std::set<std::string> guids;
     std::set<int> idxs;
     for (const auto &r : storeys) {
@@ -3578,8 +3588,11 @@ class ProjectDB::Impl {
         throw std::runtime_error("save_storeys: insert of storey " +
                                  std::to_string(r.idx) +
                                  " failed: " + sqlite3_errmsg(db));
+      if (imp)
+        undismissModelElement(r.guid);
       ++written;
     }
+    bumpModelRevision();
     sp.release();
     return written;
   }
@@ -3595,8 +3608,10 @@ class ProjectDB::Impl {
 
   void deleteStoreys() {
     checkWritable();
-    if (hasStoreysTable)
+    if (hasStoreysTable) {
       execOrThrow("DELETE FROM storeys;");
+      bumpModelRevision();
+    }
   }
 
   void migrateToV31() {
@@ -4016,12 +4031,24 @@ class ProjectDB::Impl {
     return out;
   }
 
-  size_t saveWalls(const std::vector<core::WallRecord> &walls,
-                   const std::vector<core::WallJoinRecord> &joins, int runId,
+  size_t saveWalls(const std::vector<core::WallRecord> &wallsIn,
+                   const std::vector<core::WallJoinRecord> &joinsIn, int runId,
                    ImportTally *imp = nullptr) {
     checkWritable();
     if (!hasWallsTable)
       throw std::runtime_error("save_walls: project schema predates v33");
+    // A dismissed (deleted by hand) wall is not written again, and neither
+    // is a join to it (reusex-yuja); an import brings it back.
+    const auto walls =
+        withoutDismissed(wallsIn, "wall", imp != nullptr, "save_walls");
+    std::vector<core::WallJoinRecord> joins;
+    {
+      const auto gone =
+          imp ? std::set<std::string, std::less<>>{} : dismissedGuids("wall");
+      for (const auto &j : joinsIn)
+        if (!gone.count(j.wall_a) && !gone.count(j.wall_b))
+          joins.push_back(j);
+    }
     std::set<std::string, std::less<>> guids;
     for (const auto &r : walls) {
       if (r.guid.empty())
@@ -4137,6 +4164,8 @@ class ProjectDB::Impl {
       if (sqlite3_step(ins) != SQLITE_DONE)
         throw std::runtime_error("save_walls: insert of wall " + r.guid +
                                  " failed: " + sqlite3_errmsg(db));
+      if (imp)
+        undismissModelElement(r.guid);
       ++written;
     }
 
@@ -4169,6 +4198,7 @@ class ProjectDB::Impl {
                                  " - " + j.wall_b +
                                  " failed: " + sqlite3_errmsg(db));
     }
+    bumpModelRevision();
     sp.release();
     if (skipped > 0)
       reusex::info("save_walls: {} wall(s) are locked; kept the stored rows",
@@ -4189,8 +4219,10 @@ class ProjectDB::Impl {
 
   void deleteWalls() {
     checkWritable();
-    if (hasWallsTable)
+    if (hasWallsTable) {
       execOrThrow("DELETE FROM wall_joins; DELETE FROM walls;");
+      bumpModelRevision();
+    }
   }
 
   void migrateToV34() {
@@ -4291,11 +4323,13 @@ class ProjectDB::Impl {
     return readOpening(s);
   }
 
-  size_t saveOpenings(const std::vector<core::OpeningRecord> &openings,
+  size_t saveOpenings(const std::vector<core::OpeningRecord> &openingsIn,
                       int runId, ImportTally *imp = nullptr) {
     checkWritable();
     if (!hasOpeningsTable)
       throw std::runtime_error("save_openings: project schema predates v34");
+    const auto openings = withoutDismissed(openingsIn, "opening",
+                                           imp != nullptr, "save_openings");
     static const std::set<std::string, std::less<>> kKinds = {"door", "window",
                                                               "opening"};
     static const std::set<std::string, std::less<>> kStates = {"open", "closed",
@@ -4375,8 +4409,11 @@ class ProjectDB::Impl {
       if (sqlite3_step(ins) != SQLITE_DONE)
         throw std::runtime_error("save_openings: insert of opening " + r.guid +
                                  " failed: " + sqlite3_errmsg(db));
+      if (imp)
+        undismissModelElement(r.guid);
       ++written;
     }
+    bumpModelRevision();
     sp.release();
     if (skipped > 0)
       reusex::info(
@@ -4398,8 +4435,10 @@ class ProjectDB::Impl {
 
   void deleteOpenings() {
     checkWritable();
-    if (hasOpeningsTable)
+    if (hasOpeningsTable) {
       execOrThrow("DELETE FROM openings;");
+      bumpModelRevision();
+    }
   }
 
   void migrateToV35() {
@@ -4724,6 +4763,44 @@ class ProjectDB::Impl {
     reusex::info("Migration to schema version 40 complete");
   }
 
+  void migrateToV41() {
+    reusex::info("Migrating database to schema version 41");
+    // Rediger editor, solid-model row edits (reusex-yuja): the tombstones of
+    // deleted detected / imported elements, which the walls / openings /
+    // spaces stages honour (a deleted phantom wall stays deleted), and the
+    // edit log behind undo / redo (core/model_edits.hpp). Plain TEXT guids,
+    // no foreign keys: a tombstone outlives its row by design, and a log
+    // entry names rows a later edit may delete.
+    Savepoint sp(db, "migrate_v41");
+    execOrThrow(R"(
+      CREATE TABLE IF NOT EXISTS model_dismissed (
+        guid         TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL
+          CHECK (kind IN ('storey', 'wall', 'opening', 'space')),
+        record       TEXT NOT NULL DEFAULT '',
+        dismissed_at TEXT NOT NULL
+          DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_model_dismissed_kind
+        ON model_dismissed(kind);
+      CREATE TABLE IF NOT EXISTS model_edits (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        revision   INTEGER NOT NULL,
+        label      TEXT    NOT NULL DEFAULT '',
+        author     TEXT    NOT NULL DEFAULT '',
+        created_at TEXT    NOT NULL
+          DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        changes    TEXT    NOT NULL,
+        undone     INTEGER NOT NULL DEFAULT 0 CHECK (undone IN (0, 1))
+      );
+    )");
+    insertSchemaVersion(41, "Solid-model row edits: model_dismissed "
+                            "(tombstones) and model_edits (undo log)");
+    sp.release();
+    hasModelEditTables = true;
+    reusex::info("Migration to schema version 41 complete");
+  }
+
   // ── Spaces (v35) ─────────────────────────────────────────────────────────
 
   static constexpr const char *kSpaceColumns =
@@ -4941,16 +5018,27 @@ class ProjectDB::Impl {
       if (!updateSpaceRow(spaces[i], blobs[i], -1, false, who))
         throw std::invalid_argument("update_spaces: no space with guid " +
                                     spaces[i].guid);
+    bumpModelRevision();
     sp.release();
     return spaces.size();
   }
 
-  size_t saveSpaces(const std::vector<core::SpaceRecord> &spaces,
-                    const std::vector<core::SpaceBoundaryRecord> &boundaries,
+  size_t saveSpaces(const std::vector<core::SpaceRecord> &spacesIn,
+                    const std::vector<core::SpaceBoundaryRecord> &boundariesIn,
                     int runId, ImportTally *imp = nullptr) {
     checkWritable();
     if (!hasSpacesTable)
       throw std::runtime_error("save_spaces: project schema predates v35");
+    const auto spaces =
+        withoutDismissed(spacesIn, "space", imp != nullptr, "save_spaces");
+    std::vector<core::SpaceBoundaryRecord> boundaries;
+    {
+      const auto gone =
+          imp ? std::set<std::string, std::less<>>{} : dismissedGuids("space");
+      for (const auto &b : boundariesIn)
+        if (!gone.count(b.space))
+          boundaries.push_back(b);
+    }
     std::set<std::string, std::less<>> guids;
     std::vector<std::vector<uint8_t>> blobs;
     blobs.reserve(spaces.size());
@@ -5056,6 +5144,8 @@ class ProjectDB::Impl {
       if (sqlite3_step(ins) != SQLITE_DONE)
         throw std::runtime_error("save_spaces: insert of space " + r.guid +
                                  " failed: " + sqlite3_errmsg(db));
+      if (imp)
+        undismissModelElement(r.guid);
       ++written;
     }
 
@@ -5084,6 +5174,7 @@ class ProjectDB::Impl {
       reusex::warn("save_spaces: deleted {} space boundar(y/ies) whose space "
                    "row no longer exists (written with foreign keys off)",
                    dangling);
+    bumpModelRevision();
     sp.release();
     if (skipped > 0)
       reusex::info("save_spaces: {} space(s) are locked; kept the stored rows",
@@ -5108,8 +5199,573 @@ class ProjectDB::Impl {
 
   void deleteSpaces() {
     checkWritable();
-    if (hasSpacesTable)
+    if (hasSpacesTable) {
       execOrThrow("DELETE FROM space_boundaries; DELETE FROM spaces;");
+      bumpModelRevision();
+    }
+  }
+
+  /// @p records without those whose guid a tombstone of @p kind holds
+  /// (model_dismissed, v41), each logged at info; @p records as they are in
+  /// import mode (@p importing), where an imported element is written back.
+  template <typename Record>
+  std::vector<Record> withoutDismissed(const std::vector<Record> &records,
+                                       std::string_view kind, bool importing,
+                                       const char *who) const {
+    if (importing || !hasModelEditTables)
+      return records;
+    const auto gone = dismissedGuids(kind);
+    if (gone.empty())
+      return records;
+    std::vector<Record> out;
+    out.reserve(records.size());
+    size_t dropped = 0;
+    for (const auto &r : records) {
+      if (gone.count(r.guid)) {
+        ++dropped;
+        continue;
+      }
+      out.push_back(r);
+    }
+    if (dropped > 0)
+      reusex::info("{}: {} {}(s) deleted by hand (model_dismissed) not "
+                   "written",
+                   who, dropped, kind);
+    return out;
+  }
+
+  // ── Solid-model row edits (v41, reusex-yuja) ─────────────────────────────
+
+  /// Run one prepared statement to completion; @returns sqlite3_changes.
+  int stepDone(sqlite3_stmt *s, const std::string &what) {
+    if (sqlite3_step(s) != SQLITE_DONE)
+      throw std::runtime_error(what + ": " + sqlite3_errmsg(db));
+    return sqlite3_changes(db);
+  }
+
+  static void checkSource(const std::string &source, const std::string &where) {
+    if (source != "detected" && source != "manual" && source != "imported")
+      throw std::invalid_argument(where + " has invalid source '" + source +
+                                  "'");
+  }
+
+  void putStoreyRow(const core::StoreyRecord &r) {
+    constexpr const char *who = "put_storey_row";
+    checkWritable();
+    if (!hasStoreysTable)
+      throw std::runtime_error("put_storey_row: project schema predates v30");
+    if (r.guid.empty())
+      throw std::invalid_argument("put_storey_row: storey " +
+                                  std::to_string(r.idx) + " has no guid");
+    checkSource(r.source, std::string(who) + ": storey " + r.guid);
+    {
+      sqlite3_stmt *s = prepare_or_throw(
+          db, "SELECT guid FROM storeys WHERE idx = ? AND guid <> ?;", who);
+      StmtGuard guard(s);
+      sqlite3_bind_int(s, 1, r.idx);
+      bind_text(s, 2, r.guid);
+      if (sqlite3_step(s) == SQLITE_ROW)
+        throw std::invalid_argument("put_storey_row: idx " +
+                                    std::to_string(r.idx) +
+                                    " is held by storey " + column_text(s, 0));
+    }
+    const auto bindCommon = [&](sqlite3_stmt *s) {
+      sqlite3_bind_int(s, 1, r.idx);
+      bind_text(s, 2, r.name);
+      sqlite3_bind_double(s, 3, r.z_floor);
+      sqlite3_bind_double(s, 4, r.z_ceiling);
+      sqlite3_bind_blob(s, 5, r.level_transform.data(),
+                        static_cast<int>(sizeof(double) * 16),
+                        SQLITE_TRANSIENT);
+      bind_text(s, 6, r.source);
+      sqlite3_bind_int(s, 7, r.locked ? 1 : 0);
+      sqlite3_bind_double(s, 8, r.confidence);
+      bind_text(s, 9, r.metadata);
+      bind_text(s, 10, r.guid);
+    };
+    sqlite3_stmt *up = prepare_or_throw(
+        db,
+        "UPDATE storeys SET idx = ?, name = ?, z_floor = ?, z_ceiling = ?, "
+        "level_transform = ?, source = ?, locked = ?, confidence = ?, "
+        "metadata = ? WHERE guid = ?;",
+        who);
+    StmtGuard upGuard(up);
+    bindCommon(up);
+    if (stepDone(up, std::string(who) + ": update of storey " + r.guid) > 0)
+      return;
+    sqlite3_stmt *ins = prepare_or_throw(
+        db,
+        "INSERT INTO storeys (idx, name, z_floor, z_ceiling, level_transform, "
+        "source, locked, confidence, metadata, guid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        who);
+    StmtGuard insGuard(ins);
+    bindCommon(ins);
+    stepDone(ins, std::string(who) + ": insert of storey " + r.guid);
+  }
+
+  void putWallRow(const core::WallRecord &r) {
+    constexpr const char *who = "put_wall_row";
+    checkWritable();
+    if (!hasWallsTable)
+      throw std::runtime_error("put_wall_row: project schema predates v33");
+    if (r.guid.empty())
+      throw std::invalid_argument("put_wall_row: a wall of storey " +
+                                  std::to_string(r.storey) + " has no guid");
+    checkSource(r.source, std::string(who) + ": wall " + r.guid);
+    if (const auto bad = core::check_wall_top(r); !bad.empty())
+      throw std::invalid_argument(std::string(who) + ": wall " + r.guid + ": " +
+                                  bad);
+    const auto bindCommon = [&](sqlite3_stmt *s) {
+      sqlite3_bind_int(s, 1, r.storey);
+      sqlite3_bind_double(s, 2, r.x0);
+      sqlite3_bind_double(s, 3, r.y0);
+      sqlite3_bind_double(s, 4, r.x1);
+      sqlite3_bind_double(s, 5, r.y1);
+      sqlite3_bind_double(s, 6, r.z_base);
+      sqlite3_bind_double(s, 7, r.height);
+      sqlite3_bind_double(s, 8, r.thickness);
+      sqlite3_bind_double(s, 9, r.thickness_ci_lo);
+      sqlite3_bind_double(s, 10, r.thickness_ci_hi);
+      sqlite3_bind_double(s, 11, r.lean_deg);
+      sqlite3_bind_int(s, 12, r.is_external ? 1 : 0);
+      sqlite3_bind_int(s, 13, r.assumed ? 1 : 0);
+      sqlite3_bind_double(s, 14, r.seen_share);
+      sqlite3_bind_int(s, 15, r.face_a_points);
+      sqlite3_bind_int(s, 16, r.face_b_points);
+      sqlite3_bind_double(s, 17, r.co_visibility);
+      sqlite3_bind_int(s, 18, r.axis_family);
+      bind_text(s, 19, r.source);
+      sqlite3_bind_int(s, 20, r.locked ? 1 : 0);
+      sqlite3_bind_double(s, 21, r.confidence);
+      bind_text(s, 22, r.metadata);
+      bind_text(s, 23, core::encode_wall_top(r.top));
+      bind_text(s, 24, r.guid);
+    };
+    sqlite3_stmt *up = prepare_or_throw(
+        db,
+        "UPDATE walls SET storey = ?, x0 = ?, y0 = ?, x1 = ?, y1 = ?, "
+        "z_base = ?, height = ?, thickness = ?, thickness_ci_lo = ?, "
+        "thickness_ci_hi = ?, lean_deg = ?, is_external = ?, assumed = ?, "
+        "seen_share = ?, face_a_points = ?, face_b_points = ?, "
+        "co_visibility = ?, axis_family = ?, source = ?, locked = ?, "
+        "confidence = ?, metadata = ?, top_profile = ? WHERE guid = ?;",
+        who);
+    StmtGuard upGuard(up);
+    bindCommon(up);
+    if (stepDone(up, std::string(who) + ": update of wall " + r.guid) > 0)
+      return;
+    sqlite3_stmt *ins = prepare_or_throw(
+        db,
+        "INSERT INTO walls (storey, x0, y0, x1, y1, z_base, height, "
+        "thickness, thickness_ci_lo, thickness_ci_hi, lean_deg, is_external, "
+        "assumed, seen_share, face_a_points, face_b_points, co_visibility, "
+        "axis_family, source, locked, confidence, metadata, top_profile, "
+        "guid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?, ?);",
+        who);
+    StmtGuard insGuard(ins);
+    bindCommon(ins);
+    stepDone(ins, std::string(who) + ": insert of wall " + r.guid);
+  }
+
+  void putOpeningRow(const core::OpeningRecord &r) {
+    constexpr const char *who = "put_opening_row";
+    checkWritable();
+    if (!hasOpeningsTable)
+      throw std::runtime_error("put_opening_row: project schema predates v34");
+    const auto where = std::string(who) + ": opening " + r.guid;
+    if (r.guid.empty())
+      throw std::invalid_argument(std::string(who) + ": an opening in wall " +
+                                  r.wall + " has no guid");
+    if (r.wall.empty())
+      throw std::invalid_argument(where + " names no host wall");
+    if (r.kind != "door" && r.kind != "window" && r.kind != "opening")
+      throw std::invalid_argument(where + " has invalid kind '" + r.kind + "'");
+    if (r.state != "open" && r.state != "closed" && r.state != "unknown")
+      throw std::invalid_argument(where + " has invalid state '" + r.state +
+                                  "'");
+    checkSource(r.source, where);
+    if (!(r.s_end > r.s_start) || !(r.z_head > r.z_sill))
+      throw std::invalid_argument(where + " is empty");
+    const auto bindCommon = [&](sqlite3_stmt *s) {
+      bind_text(s, 1, r.wall);
+      bind_text(s, 2, r.kind);
+      sqlite3_bind_double(s, 3, r.s_start);
+      sqlite3_bind_double(s, 4, r.s_end);
+      sqlite3_bind_double(s, 5, r.z_sill);
+      sqlite3_bind_double(s, 6, r.z_head);
+      bind_text(s, 7, r.state);
+      sqlite3_bind_int(s, 8, r.is_external ? 1 : 0);
+      bind_text(s, 9, r.source_instance_guid);
+      bind_text(s, 10, r.source);
+      sqlite3_bind_int(s, 11, r.locked ? 1 : 0);
+      sqlite3_bind_double(s, 12, r.confidence);
+      bind_text(s, 13, r.metadata);
+      bind_text(s, 14, r.guid);
+    };
+    sqlite3_stmt *up = prepare_or_throw(
+        db,
+        "UPDATE openings SET wall_guid = ?, kind = ?, s_start = ?, s_end = ?, "
+        "z_sill = ?, z_head = ?, state = ?, is_external = ?, "
+        "source_instance_guid = ?, source = ?, locked = ?, confidence = ?, "
+        "metadata = ? WHERE guid = ?;",
+        who);
+    StmtGuard upGuard(up);
+    bindCommon(up);
+    if (stepDone(up, where + ": update") > 0)
+      return;
+    sqlite3_stmt *ins = prepare_or_throw(
+        db,
+        "INSERT INTO openings (wall_guid, kind, s_start, s_end, z_sill, "
+        "z_head, state, is_external, source_instance_guid, source, locked, "
+        "confidence, metadata, guid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        who);
+    StmtGuard insGuard(ins);
+    bindCommon(ins);
+    stepDone(ins, where + ": insert");
+  }
+
+  void putSpaceRow(const core::SpaceRecord &r) {
+    constexpr const char *who = "put_space_row";
+    checkWritable();
+    if (!hasSpacesTable)
+      throw std::runtime_error("put_space_row: project schema predates v35");
+    const auto blob = checkedSpaceBlob(r, who);
+    if (updateSpaceRow(r, blob, -1, false, who))
+      return;
+    sqlite3_stmt *ins = prepare_or_throw(
+        db,
+        "INSERT INTO spaces (guid, storey, name, kind, polygon, z_floor, "
+        "z_ceiling, area, perimeter, volume, compactness, room_label, source, "
+        "locked, confidence, metadata, ceiling_planes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        who);
+    StmtGuard guard(ins);
+    bind_text(ins, 1, r.guid);
+    sqlite3_bind_int(ins, 2, r.storey);
+    bind_text(ins, 3, r.name);
+    bind_text(ins, 4, r.kind);
+    sqlite3_bind_blob(ins, 5, blob.data(), static_cast<int>(blob.size()),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_double(ins, 6, r.z_floor);
+    sqlite3_bind_double(ins, 7, r.z_ceiling);
+    sqlite3_bind_double(ins, 8, r.area);
+    sqlite3_bind_double(ins, 9, r.perimeter);
+    sqlite3_bind_double(ins, 10, r.volume);
+    sqlite3_bind_double(ins, 11, r.compactness);
+    if (r.room_label >= 0)
+      sqlite3_bind_int(ins, 12, r.room_label);
+    else
+      sqlite3_bind_null(ins, 12);
+    bind_text(ins, 13, r.source);
+    sqlite3_bind_int(ins, 14, r.locked ? 1 : 0);
+    sqlite3_bind_double(ins, 15, r.confidence);
+    bind_text(ins, 16, r.metadata);
+    bind_text(ins, 17, core::encode_ceiling_planes(r.ceiling_planes));
+    stepDone(ins, std::string(who) + ": insert of space " + r.guid);
+  }
+
+  bool removeRow(const char *table, bool present, std::string_view guid,
+                 const char *who) {
+    checkWritable();
+    if (!present)
+      return false;
+    const std::string sql =
+        std::string("DELETE FROM ") + table + " WHERE guid = ?;";
+    sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), who);
+    StmtGuard guard(s);
+    bind_text(s, 1, guid);
+    return stepDone(s, std::string(who) + ": " + std::string(guid)) > 0;
+  }
+
+  void replaceWallJoinsOf(std::string_view wall,
+                          const std::vector<core::WallJoinRecord> &joins) {
+    constexpr const char *who = "replace_wall_joins_of";
+    checkWritable();
+    if (!hasWallsTable)
+      throw std::runtime_error(
+          "replace_wall_joins_of: project schema predates v33");
+    for (const auto &j : joins) {
+      const auto where =
+          std::string(who) + ": join " + j.wall_a + " - " + j.wall_b;
+      if (j.wall_a != wall && j.wall_b != wall)
+        throw std::invalid_argument(where + " does not name wall " +
+                                    std::string(wall));
+      if (j.wall_a == j.wall_b)
+        throw std::invalid_argument(where + " joins a wall to itself");
+      if (j.kind != "corner" && j.kind != "tee" && j.kind != "collinear")
+        throw std::invalid_argument(where + " has invalid kind '" + j.kind +
+                                    "'");
+      for (const auto *end : {&j.at_a, &j.at_b})
+        if (*end != "start" && *end != "end" && *end != "path")
+          throw std::invalid_argument(where + " has an invalid end '" + *end +
+                                      "'");
+    }
+    {
+      sqlite3_stmt *del = prepare_or_throw(
+          db,
+          "DELETE FROM wall_joins WHERE wall_a = (SELECT id FROM walls WHERE "
+          "guid = ?1) OR wall_b = (SELECT id FROM walls WHERE guid = ?1);",
+          who);
+      StmtGuard guard(del);
+      bind_text(del, 1, wall);
+      stepDone(del, std::string(who) + ": " + std::string(wall));
+    }
+    sqlite3_stmt *ins = prepare_or_throw(
+        db,
+        "INSERT OR REPLACE INTO wall_joins (wall_a, wall_b, kind, at_a, at_b) "
+        "SELECT a.id, b.id, ?, ?, ? FROM walls a, walls b "
+        "WHERE a.guid = ? AND b.guid = ?;",
+        who);
+    StmtGuard guard(ins);
+    for (const auto &j : joins) {
+      sqlite3_reset(ins);
+      sqlite3_clear_bindings(ins);
+      bind_text(ins, 1, j.kind);
+      bind_text(ins, 2, j.at_a);
+      bind_text(ins, 3, j.at_b);
+      bind_text(ins, 4, j.wall_a);
+      bind_text(ins, 5, j.wall_b);
+      stepDone(ins, std::string(who) + ": insert of join " + j.wall_a + " - " +
+                        j.wall_b);
+    }
+  }
+
+  void replaceSpaceBoundariesOf(
+      std::string_view space,
+      const std::vector<core::SpaceBoundaryRecord> &boundaries) {
+    constexpr const char *who = "replace_space_boundaries_of";
+    checkWritable();
+    if (!hasSpacesTable)
+      throw std::runtime_error(
+          "replace_space_boundaries_of: project schema predates v35");
+    std::set<std::pair<std::string, std::string>> keys;
+    for (const auto &b : boundaries) {
+      const auto where = std::string(who) + ": boundary of space " + b.space +
+                         " on wall " + b.wall + " side " + b.side;
+      if (b.space != space)
+        throw std::invalid_argument(where + " does not name space " +
+                                    std::string(space));
+      if (b.wall.empty())
+        throw std::invalid_argument(where + " names no wall");
+      if (b.side != "a" && b.side != "b")
+        throw std::invalid_argument(where + ": side must be a or b");
+      if (!(b.s_end >= b.s_start) || !std::isfinite(b.s_start) ||
+          !std::isfinite(b.s_end))
+        throw std::invalid_argument(where + " has an invalid range");
+      if (!keys.emplace(b.wall, b.side).second)
+        throw std::invalid_argument(where + " is given twice");
+    }
+    {
+      sqlite3_stmt *del = prepare_or_throw(
+          db,
+          "DELETE FROM space_boundaries WHERE space_id = (SELECT id FROM "
+          "spaces WHERE guid = ?);",
+          who);
+      StmtGuard guard(del);
+      bind_text(del, 1, space);
+      stepDone(del, std::string(who) + ": " + std::string(space));
+    }
+    sqlite3_stmt *ins = prepare_or_throw(
+        db,
+        "INSERT INTO space_boundaries (space_id, wall_guid, side, s_start, "
+        "s_end) SELECT id, ?, ?, ?, ? FROM spaces WHERE guid = ?;",
+        who);
+    StmtGuard guard(ins);
+    for (const auto &b : boundaries) {
+      sqlite3_reset(ins);
+      sqlite3_clear_bindings(ins);
+      bind_text(ins, 1, b.wall);
+      bind_text(ins, 2, b.side);
+      sqlite3_bind_double(ins, 3, b.s_start);
+      sqlite3_bind_double(ins, 4, b.s_end);
+      bind_text(ins, 5, b.space);
+      stepDone(ins, std::string(who) + ": insert of boundary " + b.space +
+                        " / " + b.wall);
+    }
+  }
+
+  void requireModelEditTables(const char *who) const {
+    if (!hasModelEditTables)
+      throw std::runtime_error(std::string(who) +
+                               ": project schema predates v41");
+  }
+
+  void dismissModelElement(std::string_view kind, std::string_view guid,
+                           std::string_view record) {
+    constexpr const char *who = "dismiss_model_element";
+    checkWritable();
+    requireModelEditTables(who);
+    if (guid.empty())
+      throw std::invalid_argument("dismiss_model_element: empty guid");
+    if (kind != "storey" && kind != "wall" && kind != "opening" &&
+        kind != "space")
+      throw std::invalid_argument("dismiss_model_element: invalid kind '" +
+                                  std::string(kind) + "'");
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "INSERT INTO model_dismissed (guid, kind, record) VALUES (?, ?, ?) "
+        "ON CONFLICT (guid) DO UPDATE SET kind = excluded.kind, "
+        "record = excluded.record;",
+        who);
+    StmtGuard guard(s);
+    bind_text(s, 1, guid);
+    bind_text(s, 2, kind);
+    bind_text(s, 3, record);
+    stepDone(s, std::string(who) + ": " + std::string(guid));
+  }
+
+  bool undismissModelElement(std::string_view guid) {
+    checkWritable();
+    if (!hasModelEditTables)
+      return false;
+    sqlite3_stmt *s =
+        prepare_or_throw(db, "DELETE FROM model_dismissed WHERE guid = ?;",
+                         "undismiss_model_element");
+    StmtGuard guard(s);
+    bind_text(s, 1, guid);
+    return stepDone(s, "undismiss_model_element") > 0;
+  }
+
+  std::vector<ProjectDB::DismissedModelElement>
+  dismissedModelElements(std::string_view kind, std::string_view guid) const {
+    std::vector<ProjectDB::DismissedModelElement> out;
+    if (!hasModelEditTables)
+      return out;
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "SELECT kind, guid, record, dismissed_at FROM model_dismissed "
+        "WHERE (?1 = '' OR kind = ?1) AND (?2 = '' OR guid = ?2) "
+        "ORDER BY guid;",
+        "dismissed_model_elements");
+    StmtGuard guard(s);
+    bind_text(s, 1, kind);
+    bind_text(s, 2, guid);
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW)
+      out.push_back({column_text(s, 0), column_text(s, 1), column_text(s, 2),
+                     column_text(s, 3)});
+    if (rc != SQLITE_DONE)
+      throw std::runtime_error("dismissed_model_elements: " +
+                               std::string(sqlite3_errmsg(db)));
+    return out;
+  }
+
+  /// Guids of the tombstones of @p kind (for the detection writers).
+  std::set<std::string, std::less<>>
+  dismissedGuids(std::string_view kind) const {
+    std::set<std::string, std::less<>> out;
+    for (auto &d : dismissedModelElements(kind, ""))
+      out.insert(std::move(d.guid));
+    return out;
+  }
+
+  static constexpr const char *kModelRevisionKey = "model.revision";
+
+  int64_t modelRevision() const {
+    if (!hasSettingsTable)
+      return 0;
+    sqlite3_stmt *s = prepare_or_throw(
+        db, "SELECT value FROM project_settings WHERE key = ?;",
+        "model_revision");
+    StmtGuard guard(s);
+    bind_text(s, 1, kModelRevisionKey);
+    if (sqlite3_step(s) != SQLITE_ROW)
+      return 0;
+    try {
+      return std::stoll(column_text(s, 0));
+    } catch (const std::exception &) {
+      return 0;
+    }
+  }
+
+  int64_t bumpModelRevision() {
+    checkWritable();
+    if (!hasSettingsTable)
+      return 0;
+    const int64_t next = modelRevision() + 1;
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "INSERT INTO project_settings (key, value) VALUES (?1, ?2) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
+        "bump_model_revision");
+    StmtGuard guard(s);
+    bind_text(s, 1, kModelRevisionKey);
+    const std::string v = std::to_string(next);
+    bind_text(s, 2, v);
+    stepDone(s, "bump_model_revision");
+    return next;
+  }
+
+  int64_t addModelEdit(const ProjectDB::ModelEditRecord &e) {
+    constexpr const char *who = "add_model_edit";
+    checkWritable();
+    requireModelEditTables(who);
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "INSERT INTO model_edits (revision, label, author, changes, undone) "
+        "VALUES (?, ?, ?, ?, ?);",
+        who);
+    StmtGuard guard(s);
+    sqlite3_bind_int64(s, 1, e.revision);
+    bind_text(s, 2, e.label);
+    bind_text(s, 3, e.author);
+    bind_text(s, 4, e.changes);
+    sqlite3_bind_int(s, 5, e.undone ? 1 : 0);
+    stepDone(s, who);
+    return sqlite3_last_insert_rowid(db);
+  }
+
+  std::vector<ProjectDB::ModelEditRecord> modelEdits(int64_t afterId) const {
+    std::vector<ProjectDB::ModelEditRecord> out;
+    if (!hasModelEditTables)
+      return out;
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "SELECT id, revision, label, author, created_at, changes, undone "
+        "FROM model_edits WHERE id > ? ORDER BY id;",
+        "model_edits");
+    StmtGuard guard(s);
+    sqlite3_bind_int64(s, 1, afterId);
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+      ProjectDB::ModelEditRecord e;
+      e.id = sqlite3_column_int64(s, 0);
+      e.revision = sqlite3_column_int64(s, 1);
+      e.label = column_text(s, 2);
+      e.author = column_text(s, 3);
+      e.created_at = column_text(s, 4);
+      e.changes = column_text(s, 5);
+      e.undone = sqlite3_column_int(s, 6) != 0;
+      out.push_back(std::move(e));
+    }
+    if (rc != SQLITE_DONE)
+      throw std::runtime_error("model_edits: " +
+                               std::string(sqlite3_errmsg(db)));
+    return out;
+  }
+
+  void setModelEditUndone(int64_t id, bool undone) {
+    constexpr const char *who = "set_model_edit_undone";
+    checkWritable();
+    requireModelEditTables(who);
+    sqlite3_stmt *s = prepare_or_throw(
+        db, "UPDATE model_edits SET undone = ? WHERE id = ?;", who);
+    StmtGuard guard(s);
+    sqlite3_bind_int(s, 1, undone ? 1 : 0);
+    sqlite3_bind_int64(s, 2, id);
+    if (stepDone(s, who) == 0)
+      throw std::invalid_argument("set_model_edit_undone: no edit " +
+                                  std::to_string(id));
+  }
+
+  size_t deleteUndoneModelEdits() {
+    checkWritable();
+    if (!hasModelEditTables)
+      return 0;
+    return execChanges("DELETE FROM model_edits WHERE undone = 1;");
   }
 
   /// One COUNT(*) query.
@@ -10010,6 +10666,103 @@ std::vector<core::SpaceBoundaryRecord> ProjectDB::space_boundaries() const {
 }
 
 void ProjectDB::delete_spaces() { impl_->deleteSpaces(); }
+
+void ProjectDB::put_storey_row(const core::StoreyRecord &storey) {
+  impl_->putStoreyRow(storey);
+}
+
+void ProjectDB::put_wall_row(const core::WallRecord &wall) {
+  impl_->putWallRow(wall);
+}
+
+void ProjectDB::put_opening_row(const core::OpeningRecord &opening) {
+  impl_->putOpeningRow(opening);
+}
+
+void ProjectDB::put_space_row(const core::SpaceRecord &space) {
+  impl_->putSpaceRow(space);
+}
+
+bool ProjectDB::remove_storey_row(std::string_view guid) {
+  return impl_->removeRow("storeys", impl_->hasStoreysTable, guid,
+                          "remove_storey_row");
+}
+
+bool ProjectDB::remove_wall_row(std::string_view guid) {
+  return impl_->removeRow("walls", impl_->hasWallsTable, guid,
+                          "remove_wall_row");
+}
+
+bool ProjectDB::remove_opening_row(std::string_view guid) {
+  return impl_->removeRow("openings", impl_->hasOpeningsTable, guid,
+                          "remove_opening_row");
+}
+
+bool ProjectDB::remove_space_row(std::string_view guid) {
+  return impl_->removeRow("spaces", impl_->hasSpacesTable, guid,
+                          "remove_space_row");
+}
+
+void ProjectDB::replace_wall_joins_of(
+    std::string_view wall, const std::vector<core::WallJoinRecord> &joins) {
+  impl_->replaceWallJoinsOf(wall, joins);
+}
+
+void ProjectDB::replace_space_boundaries_of(
+    std::string_view space,
+    const std::vector<core::SpaceBoundaryRecord> &boundaries) {
+  impl_->replaceSpaceBoundariesOf(space, boundaries);
+}
+
+void ProjectDB::dismiss_model_element(std::string_view kind,
+                                      std::string_view guid,
+                                      std::string_view record_json) {
+  impl_->dismissModelElement(kind, guid, record_json);
+}
+
+bool ProjectDB::undismiss_model_element(std::string_view guid) {
+  return impl_->undismissModelElement(guid);
+}
+
+std::optional<ProjectDB::DismissedModelElement>
+ProjectDB::dismissed_model_element(std::string_view guid) const {
+  if (guid.empty())
+    return std::nullopt;
+  auto all = impl_->dismissedModelElements("", guid);
+  if (all.empty())
+    return std::nullopt;
+  return std::move(all.front());
+}
+
+std::vector<ProjectDB::DismissedModelElement>
+ProjectDB::dismissed_model_elements(std::string_view kind) const {
+  return impl_->dismissedModelElements(kind, "");
+}
+
+int64_t ProjectDB::model_revision() const { return impl_->modelRevision(); }
+
+int64_t ProjectDB::bump_model_revision() { return impl_->bumpModelRevision(); }
+
+int64_t ProjectDB::add_model_edit(const ModelEditRecord &edit) {
+  return impl_->addModelEdit(edit);
+}
+
+std::vector<ProjectDB::ModelEditRecord>
+ProjectDB::model_edits(int64_t after_id) const {
+  return impl_->modelEdits(after_id);
+}
+
+void ProjectDB::set_model_edit_undone(int64_t id, bool undone) {
+  impl_->setModelEditUndone(id, undone);
+}
+
+size_t ProjectDB::delete_undone_model_edits() {
+  return impl_->deleteUndoneModelEdits();
+}
+
+bool ProjectDB::in_transaction() const {
+  return sqlite3_get_autocommit(impl_->db) == 0;
+}
 
 ProjectDB::SolidModelImportResult
 ProjectDB::replace_imported_solid_model(const core::SolidModel &model,

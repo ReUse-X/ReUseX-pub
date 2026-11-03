@@ -1014,6 +1014,112 @@ class ProjectDB {
   /// action).
   void delete_spaces();
 
+  // --- Solid-model row edits (schema v41, reusex-yuja) ---
+  //
+  // The storage half of the Rediger editor (core/model_edits.hpp holds the
+  // rules: source / lock marking, tombstones, the edit log, undo / redo).
+  // Each put_*_row() writes ONE row exactly as given: a stored row with the
+  // same guid is updated in place (same id, so its wall joins / space
+  // boundaries stay), otherwise a row is inserted. They validate a record
+  // like the whole-run writers, open no transaction and do not bump
+  // model_revision(); core::apply_model_edit() does both.
+
+  /// @throws std::invalid_argument for a record save_storeys() refuses, or
+  ///         an idx another row holds; std::runtime_error on a read-only or
+  ///         pre-v30 project.
+  void put_storey_row(const core::StoreyRecord &storey);
+  /// @throws std::invalid_argument for a record save_walls() refuses;
+  ///         std::runtime_error on a read-only or pre-v33 project.
+  void put_wall_row(const core::WallRecord &wall);
+  /// @throws std::invalid_argument for a record save_openings() refuses;
+  ///         std::runtime_error on a read-only or pre-v34 project.
+  void put_opening_row(const core::OpeningRecord &opening);
+  /// @throws std::invalid_argument for a record save_spaces() refuses;
+  ///         std::runtime_error on a read-only or pre-v35 project.
+  void put_space_row(const core::SpaceRecord &space);
+  /// Delete one row by guid (a wall's joins and a space's boundaries go
+  /// with it). @returns whether a row had that guid.
+  bool remove_storey_row(std::string_view guid);
+  bool remove_wall_row(std::string_view guid);
+  bool remove_opening_row(std::string_view guid);
+  bool remove_space_row(std::string_view guid);
+  /// Replace the joins that touch wall @p wall by @p joins (each must name
+  /// @p wall). A join whose other wall is not stored is skipped.
+  /// @throws std::invalid_argument for a join save_walls() refuses or one
+  ///         that does not name @p wall.
+  void replace_wall_joins_of(std::string_view wall,
+                             const std::vector<core::WallJoinRecord> &joins);
+  /// Replace the boundaries of space @p space by @p boundaries (each must
+  /// name @p space). Nothing happens when no space has that guid.
+  /// @throws std::invalid_argument for a boundary save_spaces() refuses.
+  void replace_space_boundaries_of(
+      std::string_view space,
+      const std::vector<core::SpaceBoundaryRecord> &boundaries);
+
+  /// A deleted (dismissed) solid-model element's tombstone
+  /// (model_dismissed, schema v41): the walls / openings / spaces detection
+  /// stages do not write a record with its guid, and match re-detected
+  /// elements against `record` (the element as detected, JSON from
+  /// core::model_record_json()) so a phantom that comes back takes this
+  /// guid and is dropped.
+  struct DismissedModelElement {
+    std::string kind; ///< storey | wall | opening | space
+    std::string guid;
+    std::string record; ///< JSON of the element as last detected / imported
+    std::string dismissed_at;
+  };
+  /// Record (or replace) the tombstone of @p guid.
+  /// @throws std::invalid_argument for an empty guid or an unknown kind;
+  ///         std::runtime_error on a read-only or pre-v41 project.
+  void dismiss_model_element(std::string_view kind, std::string_view guid,
+                             std::string_view record_json);
+  /// Drop the tombstone of @p guid. @returns whether there was one.
+  bool undismiss_model_element(std::string_view guid);
+  std::optional<DismissedModelElement>
+  dismissed_model_element(std::string_view guid) const;
+  /// Every tombstone (of @p kind when not empty), guid ascending. Empty for
+  /// a pre-v41 project.
+  std::vector<DismissedModelElement>
+  dismissed_model_elements(std::string_view kind = {}) const;
+
+  /// The solid-model revision: a counter every write to the storeys /
+  /// walls / openings / spaces tables raises (the whole-run writers, the
+  /// deletes, an import, and core::apply_model_edit / undo / redo, once
+  /// each), so an editor holding revision r knows whether the model changed
+  /// under it. Kept in project setting "model.revision"; 0 before the first
+  /// write.
+  int64_t model_revision() const;
+  /// Raise model_revision() by one. @returns the new revision.
+  int64_t bump_model_revision();
+
+  /// One row of the model edit log (model_edits, schema v41): one batch
+  /// applied by core::apply_model_edit(). `changes` is its JSON (the state
+  /// of every row it touched before and after, core/model_edits.hpp).
+  struct ModelEditRecord {
+    int64_t id = -1;
+    int64_t revision = 0; ///< model_revision() the batch produced
+    std::string label;
+    std::string author;
+    std::string created_at;
+    std::string changes;
+    bool undone = false;
+  };
+  /// Append an edit. @returns its id.
+  /// @throws std::runtime_error on a read-only or pre-v41 project.
+  int64_t add_model_edit(const ModelEditRecord &edit);
+  /// The edits with id > @p after_id, id ascending. Empty before v41.
+  std::vector<ModelEditRecord> model_edits(int64_t after_id = 0) const;
+  /// Mark edit @p id undone (or applied again).
+  /// @throws std::invalid_argument for an unknown id.
+  void set_model_edit_undone(int64_t id, bool undone);
+  /// Delete every undone edit (a new edit drops the redo branch).
+  /// @returns how many.
+  size_t delete_undone_model_edits();
+
+  /// Whether a transaction (ProjectDB::Transaction or a caller's BEGIN) is
+  /// open on this connection.
+  bool in_transaction() const;
+
   // --- Solid-model import (io::store_solid_model, `rux edit plan --import`)
 
   /// What replace_imported_solid_model() wrote and replaced.
