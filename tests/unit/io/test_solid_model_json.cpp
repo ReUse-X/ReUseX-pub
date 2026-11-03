@@ -11,6 +11,7 @@
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/io/solid_model_json.hpp>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
@@ -838,18 +839,18 @@ TEST_CASE("SolidModelFixture_House2_IsAManhattanDraftOnThePoseReference",
 TEST_CASE("SolidModelFixture_House1_IsFittedOnThePoseReference",
           "[io][solid_model]") {
   // Re-fitted (reusex-rcv.1.8) on the house1 DRAFT v2 pose reference
-  // (tests/fixtures/pose_reference/house1.*), room by room. v2 fixes the
-  // Manhattan grid on world x / y (v1 left it at +1.6 deg, so the plan ran
-  // turned in its level frame) and moves room S2 and the bathroom 0.09 m
-  // south only. Every element kept its guid; the level frame is the one
-  // `rux create storeys` detects on the v2 reference copy.
+  // (tests/fixtures/pose_reference/house1.*), then SNAPPED (v3, PR #116
+  // review: "a very straight and orderly building"): every wall on the grid,
+  // wall lines continuous across rooms, one thickness per wall type, spaces on
+  // the axes. The level frame is the one `rux create storeys` detects on the
+  // v2 reference copy.
   const SolidModel m =
       reusex::io::solid_model_from_file(fixture("house1.plan.yaml"));
   CHECK_THAT(m.description, ContainsSubstring("pose reference"));
   CHECK_THAT(m.description, ContainsSubstring("DRAFT v2"));
   REQUIRE(m.storeys.size() == 1);
   CHECK(std::abs(m.storeys[0].level_transform[3] - -8.8529) < 1e-3);
-  CHECK(m.walls.size() == 24);
+  CHECK(m.walls.size() == 26); // + the coat closet's two walls
   CHECK(m.spaces.size() == 12);
   CHECK(m.openings.size() == 30);
   const auto wall = [&](const std::string &guid) {
@@ -858,22 +859,56 @@ TEST_CASE("SolidModelFixture_House1_IsFittedOnThePoseReference",
     REQUIRE(it != m.walls.end());
     return *it;
   };
-  const auto deg = [](const auto &w) {
-    return std::atan2(w.y1 - w.y0, w.x1 - w.x0) * 180.0 / std::numbers::pi;
-  };
-  // The south facade runs along the level frame's x axis now (within 1 deg
-  // per piece; on v1 it ran at +1.6..+2.8 deg, on the stored poses at -3).
-  const auto s1 = wall("x-south-1");
-  const auto s2 = wall("x-south-2");
-  const auto s3 = wall("x-south-3");
-  for (const auto &w : {s1, s2, s3}) {
+  // Every wall on the grid, and every space corner on it too.
+  for (const auto &w : m.walls) {
     INFO(w.guid);
-    CHECK(std::abs(deg(w)) < 1.0);
+    CHECK(std::min(std::abs(w.x1 - w.x0), std::abs(w.y1 - w.y0)) < 1e-9);
   }
-  // ...and is one line: the bathroom's piece and the wing's meet within a
-  // few cm (the wing follows the bathroom's 0.09 m move).
-  CHECK(std::abs(s3.y0 - s2.y1) < 0.05);
-  CHECK(std::abs(s2.y0 - s1.y1) < 0.10);
+  for (const auto &s : m.spaces) {
+    INFO(s.guid);
+    const auto &r = s.polygon.outer;
+    for (std::size_t k = 0; k < r.size(); ++k) {
+      const auto &p = r[k];
+      const auto &q = r[(k + 1) % r.size()];
+      CHECK(std::min(std::abs(q[0] - p[0]), std::abs(q[1] - p[1])) < 1e-9);
+    }
+  }
+  // Wall lines continue through rooms: the south facade, the split-level
+  // wall and the north facade are one line each.
+  for (const auto &[a, b] : std::vector<std::pair<std::string, std::string>>{
+           {"x-south-1", "x-south-2"},
+           {"x-south-2", "x-south-3"},
+           {"i-split-w", "i-split-e"},
+           {"x-north-w", "x-north-e"},
+           {"x-west-n", "x-west-s"}}) {
+    INFO(a << " / " << b);
+    const auto wa = wall(a);
+    const auto wb = wall(b);
+    const bool horizontal = std::abs(wa.y1 - wa.y0) < 1e-9;
+    CHECK((horizontal ? std::abs(wa.y0 - wb.y0) : std::abs(wa.x0 - wb.x0)) <
+          1e-9);
+  }
+  // One thickness per wall type.
+  CHECK(wall("i-s3").thickness == Catch::Approx(wall("i-s4").thickness));
+  CHECK(wall("i-s1").thickness == Catch::Approx(wall("i-s2").thickness));
+  for (const char *g : {"i-n1", "i-n2", "i-n3", "i-n-e"})
+    CHECK(wall(g).thickness == Catch::Approx(wall("i-n2").thickness));
+  // The south row shares one ceiling plane (the main roof's south pitch),
+  // and the annex another (its mono pitch).
+  const auto plane = [&](const std::string &guid) {
+    const auto it = std::find_if(m.spaces.begin(), m.spaces.end(),
+                                 [&](const auto &s) { return s.guid == guid; });
+    REQUIRE(it != m.spaces.end());
+    REQUIRE(it->ceiling_planes.size() == 1);
+    return it->ceiling_planes[0];
+  };
+  for (const char *g : {"s-room-s2", "s-bath"}) {
+    CHECK(plane(g).slope[1] == Catch::Approx(plane("s-living").slope[1]));
+    CHECK(plane(g).at[2] == Catch::Approx(plane("s-living").at[2]));
+  }
+  CHECK(plane("s-back-entry").slope[1] ==
+        Catch::Approx(plane("s-bed-wing").slope[1]));
+  CHECK(plane("s-living").slope[1] > plane("s-bed-wing").slope[1]);
 }
 
 TEST_CASE("SolidModelFixture_NewOffice_IsFittedOnThePoseReference",

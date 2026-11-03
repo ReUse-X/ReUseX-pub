@@ -566,6 +566,17 @@ of that V.
 | plan walls off the grid, median | 1.41 deg | 0.78 deg |
 | pass-to-pass median | 8.6 mm | 11.6 mm |
 
+**The plan, second review (v3).** "A very straight and orderly building":
+the re-fitted plan still followed every few-cm face wobble of the cloud. v3
+snaps it: every wall on the grid (constant x or y), wall lines continuous
+across rooms (one south facade, one split-level wall, one gable inner face),
+one thickness per wall type, spaces on the axes, built-in closets carved out
+of their rooms, and the roof pitches as one shared ceiling plane per pitch.
+Wall rms against the detected walls fell from 0.059 to 0.022 m. Two lessons:
+the plan overlay filled concave spaces as a fan, painting wedges that read
+as slanted walls (fixed in the renderer on branch `plan-overlay-earcut`),
+and the format has no roof element (reusex-v5jl).
+
 ## Pose references: scoring a trajectory against a frozen ground truth
 
 This half covers the artefact the loop above produces once a cycle's result
