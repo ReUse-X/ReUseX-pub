@@ -775,7 +775,16 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   change; v40's full "RXF1" / "RXE1" blobs are still read): read a
   version's state with `core::pose_version_state()`, never by unpacking
   `pose_version_snapshot()` alone. `posed_frames()` reads every posed frame's
-  poses, scan and stamp in one query
+  poses, scan and stamp in one query. Schema v41 adds the Rediger editor's
+  solid-model row edits (reusex-yuja): `model_dismissed` (tombstones of
+  deleted detected / imported storeys / walls / openings / spaces, honoured
+  by the detection stages and `save_*`) and `model_edits` (the undo log);
+  row primitives `put_*_row` / `remove_*_row` / `replace_wall_joins_of` /
+  `replace_space_boundaries_of`, revision counter `model_revision()`
+  (project setting `model.revision`, raised by every solid-model write).
+  The rules (manual + locked + `metadata.edited` / `edited_from`, revert,
+  undo / redo, ruxd's wire ops, the identity candidates that keep edits
+  across a re-run) live in `core/model_edits.hpp`
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)

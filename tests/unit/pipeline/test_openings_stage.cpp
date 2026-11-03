@@ -11,6 +11,7 @@
 
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
+#include <reusex/core/model_edits.hpp>
 #include <reusex/core/stage_contract.hpp>
 #include <reusex/io/solid_model_json.hpp>
 #include <reusex/pipeline/opening_parameters.hpp>
@@ -21,6 +22,8 @@
 #include <Eigen/Core>
 
 #include "../../support/temp_path.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -375,4 +378,32 @@ TEST_CASE("RoomsStage_AfterWallsAndOpenings_CutsAtAWideDoor",
   CHECK(*west.begin() > 0);
   CHECK(*east.begin() > 0);
   CHECK(*west.begin() != *east.begin());
+}
+
+TEST_CASE("OpeningsStage_Rerun_KeepsHandEdits_AndDeletedOpeningsStayDeleted",
+          "[pipeline][stages][openings][model_edits]") {
+  TempPath project("test_openings_stage_edits");
+  ProjectDB db(project.path);
+  seed_walls(db, project);
+  REQUIRE(run(db, project, JobStage::openings).ok);
+  const auto rows = db.openings();
+  REQUIRE(rows.size() >= 2);
+  // Slide the first one 0.6 m along its wall, delete the second.
+  auto slid = rows[0];
+  slid.s_start += 0.6;
+  slid.s_end += 0.6;
+  core::apply_model_edit(
+      db, {core::ModelEditOp::put(slid),
+           core::ModelEditOp::remove(core::ModelElementKind::opening,
+                                     rows[1].guid)});
+  const auto edited = *db.opening_by_guid(rows[0].guid);
+
+  const auto r = run(db, project, JobStage::openings);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  CHECK(db.openings().size() == rows.size() - 1);
+  CHECK_FALSE(db.opening_by_guid(rows[1].guid));
+  const auto kept = db.opening_by_guid(rows[0].guid);
+  REQUIRE(kept);
+  CHECK(core::model_record_json(*kept) == core::model_record_json(edited));
 }

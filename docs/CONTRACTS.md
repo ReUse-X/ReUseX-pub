@@ -54,7 +54,12 @@ subcommand makes, so a stage that validates cannot then be refused when run.
   re-detected element keeps the GUID of the stored element it matches.
   Rows with `source = imported` come from an imported model (`rux edit plan
   --import`, see "Import write: solid-model plan" below) and are locked, so
-  no re-run touches them; only the next import replaces them. New
+  no re-run touches them; only the next import replaces them. Rows
+  edited by hand (the Rediger editor, `core/model_edits.hpp`, see "Editor
+  write: solid-model row edits" below) are `manual` and locked and keep
+  their outline across a re-run; a deleted detected / imported row leaves a
+  tombstone (`model_dismissed`) that the walls / openings / spaces stages
+  honour. New
   GUIDs are deterministic (`core::deterministic_guid` over the project GUID,
   `ProjectDB::project_guid()`). A file copy of a `.rux` is the **same**
   project: same project GUID, same row GUIDs.
@@ -1053,6 +1058,50 @@ as its view, region = the instance's bbox in that frame padded 15 % per side.
 A view is never overwritten. No sensor frames: skipped with one `info` line;
 no positions cloud or misaligned clouds: `warn`, no views; parts no frame
 sees keep none (`views_unavailable`).
+
+### Editor write: solid-model row edits (Rediger, ruxd POST /model/edits)
+
+<!-- No backticks in this heading: not a pipeline stage. -->
+
+The Rediger editor's Geometri writes (reusex-yuja; ruxd `/model/edits`,
+`/model/undo`, `/model/redo`). Core only: `core/model_edits.hpp` over the
+row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
+
+| | |
+|---|---|
+| Consumes | `storeys`, `walls`, `wall_joins`, `openings`, `spaces`, `space_boundaries`, `model_dismissed`, `model_edits`, project setting `model.revision` |
+| Produces | the edited rows; `model_dismissed` (one tombstone per deleted detected / imported element: kind, guid, the record as detected); one `model_edits` row per batch (label, author, the revision it produced, every touched row's state before and after); `model.revision` + 1 |
+| Checks   | a batch's `base_revision`, when given, is the current revision (ModelEditConflict otherwise, ruxd 409); remove / revert name a stored row (revert: or a tombstone); records pass the whole-run writers' checks; undo / redo find every touched row as the edit (or its undo) left it |
+
+- **Put** writes one record. The row becomes `source = manual`, `locked = 1`
+  with `metadata.edited = true`; a detected or imported row keeps its
+  record from before the first edit in `metadata.edited_from`. A stored row
+  is updated in place (same row id: its wall joins / space boundaries stay
+  unless the op replaces them).
+- **Remove** deletes a row (joins / boundaries with it). A row that came
+  from detection or an import (or was edited from one) is tombstoned with
+  the record as detected (`edited_from` when edited); a row drawn by hand
+  is not, since its tombstone could suppress a real element later detected
+  there. Openings left on a removed wall are reported, not deleted.
+- **Revert** gives an edited row its `edited_from` record back (a detected
+  row is then unlocked again and the next run replaces it), unlocks a row
+  drawn by hand (the next run deletes it), or writes a tombstoned element
+  back and drops its tombstone.
+- **Detection runs** (`walls`, `openings`, `spaces`) match re-detected
+  elements against the stored rows plus each edited row's `edited_from`
+  and each tombstone's record (`core::*_identity_candidates()`), so an
+  element detected where an edited or deleted one was takes its GUID and is
+  dropped (`core::drop_held_*()`): the edit stays as edited, a deleted
+  phantom stays deleted. `save_storeys` / `save_walls` / `save_openings` /
+  `save_spaces` skip tombstoned GUIDs too (and joins / boundaries to them).
+  The walls stage's plan regularisation and the openings stage's grid only
+  move fresh detections; locked rows are kept as stored. A space edited
+  here keeps its outline, unlike one only named or locked (`rux set`),
+  which takes the re-detected outline (reusex-djf). An import writes a
+  tombstoned element back and drops the tombstone.
+- **Revision**: every write to the four tables (whole-run writers, deletes,
+  imports, each batch / undo / redo once) raises `model.revision`. A new
+  batch drops the undone edits (the redo branch).
 
 ### Editor write: segment resource (web GUI, POST /frames/{id}/segment/resource)
 

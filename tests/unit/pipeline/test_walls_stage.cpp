@@ -12,6 +12,7 @@
 
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
+#include <reusex/core/model_edits.hpp>
 #include <reusex/core/stage_contract.hpp>
 #include <reusex/io/solid_model_json.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
@@ -324,4 +325,62 @@ TEST_CASE("WallsStage_LockedRow_SurvivesARerun", "[pipeline][stages][walls]") {
   REQUIRE(kept.has_value());
   CHECK(kept->locked);
   CHECK_THAT(kept->thickness, WithinAbs(0.37, 1e-12));
+}
+
+TEST_CASE("WallsStage_Rerun_KeepsHandEdits_AndDeletedWallsStayDeleted",
+          "[pipeline][stages][walls][model_edits]") {
+  TempPath project("test_walls_stage_edits");
+  ProjectDB db(project.path);
+  seed_rooms(db);
+  REQUIRE(run(db, project).ok);
+  const auto walls = db.walls();
+  const size_t n = walls.size();
+  REQUIRE(n >= 5);
+  const auto partition =
+      std::find_if(walls.begin(), walls.end(), [](const auto &w) {
+        return std::abs(w.x0 - 2.0) < 0.05 && std::abs(w.x1 - 2.0) < 0.05;
+      });
+  const auto south =
+      std::find_if(walls.begin(), walls.end(), [](const auto &w) {
+        return std::abs(w.y0 - w.y1) < 0.05 && w.y0 < 0.5 &&
+               std::abs(w.x1 - w.x0) > 3.0;
+      });
+  REQUIRE(partition != walls.end());
+  REQUIRE(south != walls.end());
+
+  // Treat the partition as a phantom (delete it) and move the south wall
+  // 0.5 m out, beyond the 0.25 m the identity match reaches.
+  auto moved = *south;
+  moved.y0 -= 0.5;
+  moved.y1 -= 0.5;
+  core::apply_model_edit(
+      db, {core::ModelEditOp::put(moved),
+           core::ModelEditOp::remove(core::ModelElementKind::wall,
+                                     partition->guid)});
+  const auto edited = *db.wall_by_guid(south->guid);
+
+  const auto r = run(db, project);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  const auto after = db.walls();
+  CHECK(after.size() == n - 1);
+  CHECK_FALSE(db.wall_by_guid(partition->guid));
+  const auto kept = db.wall_by_guid(south->guid);
+  REQUIRE(kept);
+  CHECK(core::model_record_json(*kept) == core::model_record_json(edited));
+  // No detected copy of either came back.
+  for (const auto &w : after) {
+    INFO("wall " << w.guid << " (" << w.x0 << ", " << w.y0 << ") - (" << w.x1
+                 << ", " << w.y1 << ")");
+    if (w.guid == south->guid)
+      continue;
+    CHECK_FALSE((std::abs(w.y0 - w.y1) < 0.05 && w.y0 < 0.5));
+    CHECK_FALSE((std::abs(w.x0 - 2.0) < 0.05 && std::abs(w.x1 - 2.0) < 0.05));
+  }
+
+  // The edit can still be undone after the re-run.
+  core::undo_model_edit(db);
+  CHECK(db.wall_by_guid(partition->guid));
+  CHECK_FALSE(db.wall_by_guid(south->guid)->locked);
+  CHECK(db.dismissed_model_elements().empty());
 }

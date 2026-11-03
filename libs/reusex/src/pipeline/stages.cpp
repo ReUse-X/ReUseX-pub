@@ -20,6 +20,7 @@
 #include "reusex/core/guid.hpp"
 #include "reusex/core/label_semantics.hpp"
 #include "reusex/core/logging.hpp"
+#include "reusex/core/model_edits.hpp"
 #include "reusex/core/normal_orientation.hpp"
 #include "reusex/core/opening_identity.hpp"
 #include "reusex/core/space_identity.hpp"
@@ -427,7 +428,8 @@ geometry::SpacesResult polygonise_with_guids(
     const std::vector<core::WallRecord> &walls, const SpaceStageOptions &so,
     core::SpaceIdentityResult *ids = nullptr) {
   auto sp = geometry::polygonise_spaces(grids, storeys, walls, so.spaces);
-  auto r = core::assign_space_guids(sp.spaces, sp.boundaries, db.spaces(),
+  auto r = core::assign_space_guids(sp.spaces, sp.boundaries,
+                                    core::space_identity_candidates(db),
                                     storeys, db.project_guid(), so.identity);
   if (ids)
     *ids = std::move(r);
@@ -1288,7 +1290,12 @@ StageResult run_walls(ProjectDB &db, const json &params, int log_id) {
   // GUID of the stored wall it lies on, so openings/spaces referring to it
   // and a locked (hand-edited) row survive a re-run; only an unmatched wall
   // gets a fresh GUID from its 5 cm-rounded axis key (core/wall_identity.hpp).
-  const auto stored = db.walls();
+  // Hand edits (reusex-yuja): a wall that lands where an edited wall was
+  // detected, or where a deleted one stood, takes that GUID and is dropped,
+  // so the edit stays and the deleted wall stays deleted. Plan
+  // regularisation above only moved the fresh walls; locked rows are kept
+  // as stored by save_walls.
+  const auto stored = core::wall_identity_candidates(db);
   core::WallIdentityResult ids;
   try {
     ids = core::assign_wall_guids(walls, joins, stored, db.project_guid(),
@@ -1299,6 +1306,12 @@ StageResult run_walls(ProjectDB &db, const json &params, int log_id) {
   info("walls: {} matched a stored wall ({} locked, kept as stored), {} new "
        "GUID(s)",
        ids.matched, ids.locked_matched, ids.minted);
+  if (const size_t held = core::drop_held_walls(
+          walls, joins, core::model_holds(db, core::ModelElementKind::wall));
+      held > 0)
+    info("walls: {} detected wall(s) fall on a wall edited or deleted by "
+         "hand; the edit is kept",
+         held);
 
   const size_t written = db.save_walls(walls, joins, log_id);
   const auto rows = db.walls();
@@ -1583,14 +1596,21 @@ StageResult run_openings(ProjectDB &db, const json &params, int log_id) {
   // walls re-run, so a locked (hand-fixed) opening survives both.
   core::OpeningIdentityResult ids;
   try {
-    ids = core::assign_opening_guids(found, db.openings(), db.project_guid(),
-                                     o.identity);
+    ids =
+        core::assign_opening_guids(found, core::opening_identity_candidates(db),
+                                   db.project_guid(), o.identity);
   } catch (const std::invalid_argument &e) {
     return StageResult::failure(e.what());
   }
   info("openings: {} matched a stored opening ({} locked, kept as stored), "
        "{} new GUID(s)",
        ids.matched, ids.locked_matched, ids.minted);
+  if (const size_t held = core::drop_held_openings(
+          found, core::model_holds(db, core::ModelElementKind::opening));
+      held > 0)
+    info("openings: {} detected opening(s) fall on an opening edited or "
+         "deleted by hand; the edit is kept",
+         held);
 
   const size_t written = db.save_openings(found, log_id);
   const auto rows = db.openings();
@@ -1730,6 +1750,20 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
   info("spaces: {} matched a stored space by footprint ({} locked, {} took "
        "a stored name), {} new GUID(s)",
        ids.matched, ids.locked_matched, ids.named_matched, ids.minted);
+  // Hand edits (reusex-yuja): a space edited in the Rediger editor keeps its
+  // outline (unlike a named / locked one, which takes the new outline), and
+  // a deleted one stays deleted.
+  {
+    const auto holds = core::model_holds(db, core::ModelElementKind::space);
+    if (const size_t held =
+            core::drop_held_spaces(sp.spaces, sp.boundaries, holds);
+        held > 0)
+      info("spaces: {} detected space(s) fall on a space edited or deleted "
+           "by hand; the edit is kept",
+           held);
+    std::erase_if(ids.kept,
+                  [&](const auto &k) { return holds.edited.count(k.guid); });
+  }
   // A locked space nothing matched is written back as stored, flagged
   // "unmatched" (reusex-djf). Its boundaries stay while their wall does.
   if (!ids.kept.empty()) {

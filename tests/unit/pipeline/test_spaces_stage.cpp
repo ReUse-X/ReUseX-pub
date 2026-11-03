@@ -12,6 +12,7 @@
 
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
+#include <reusex/core/model_edits.hpp>
 #include <reusex/core/space_identity.hpp>
 #include <reusex/core/space_polygon.hpp>
 #include <reusex/core/stage_contract.hpp>
@@ -24,6 +25,8 @@
 #include <Eigen/Core>
 
 #include "../../support/temp_path.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -455,4 +458,37 @@ TEST_CASE("SpacesStage_UnmatchedLockedSpace_IsKeptFlagged",
     CHECK(kept->polygon.outer == drawn.polygon.outer);
     CHECK(kept->metadata.find("\"unmatched\":true") != std::string::npos);
   }
+}
+
+TEST_CASE("SpacesStage_Rerun_KeepsHandEditedOutlines_AndDeletedSpaces",
+          "[pipeline][stages][spaces][model_edits]") {
+  TempPath project("test_spaces_stage_edits");
+  ProjectDB db(project.path);
+  seed_band_rooms(db, project);
+  REQUIRE(run(db, project, JobStage::spaces).ok);
+  const auto rows = db.spaces();
+  REQUIRE(rows.size() == 2);
+  // Redraw the first space as a plain rectangle and delete the second.
+  auto redrawn = rows[0];
+  const auto c = core::space_polygon_centroid(redrawn.polygon);
+  redrawn.polygon.outer = {{c[0] - 0.5, c[1] - 0.5},
+                           {c[0] + 0.5, c[1] - 0.5},
+                           {c[0] + 0.5, c[1] + 0.5},
+                           {c[0] - 0.5, c[1] + 0.5}};
+  redrawn.polygon.holes.clear();
+  redrawn.name = "Bad";
+  core::apply_model_edit(
+      db,
+      {core::ModelEditOp::put(redrawn),
+       core::ModelEditOp::remove(core::ModelElementKind::space, rows[1].guid)});
+  const auto edited = *db.space_by_guid(rows[0].guid);
+
+  const auto r = run(db, project, JobStage::spaces);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  const auto after = db.spaces();
+  REQUIRE(after.size() == 1);
+  CHECK(after[0].guid == rows[0].guid);
+  CHECK(core::model_record_json(after[0]) == core::model_record_json(edited));
+  CHECK_FALSE(db.space_by_guid(rows[1].guid));
 }
