@@ -704,6 +704,10 @@ ModelEditResult apply_model_edit(ProjectDB &db,
   };
   std::vector<Relation> relations;
   std::set<std::string> removed_walls;
+  std::vector<std::string> op_warnings;
+  for (const auto &op : ops)
+    op_warnings.insert(op_warnings.end(), op.warnings.begin(),
+                       op.warnings.end());
 
   for (const auto &op : ops) {
     switch (op.action) {
@@ -810,6 +814,7 @@ ModelEditResult apply_model_edit(ProjectDB &db,
   }
 
   ModelEditResult result;
+  result.warnings = std::move(op_warnings);
   json changes = json::array();
   for (const auto &k : order) {
     const RowState after = capture(db, k.kind, k.guid);
@@ -1105,6 +1110,72 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
     }
   };
 
+  // The stored rows with this list's earlier puts laid over them.
+  const auto overlay = [&](auto rows) {
+    for (auto &row : rows)
+      if (const auto it = pending.find(row.guid); it != pending.end()) {
+        using R = std::decay_t<decltype(row)>;
+        if constexpr (std::is_same_v<R, WallRecord>)
+          row = wall_from_json(it->second);
+        else if constexpr (std::is_same_v<R, OpeningRecord>)
+          row = opening_from_json(it->second);
+        else
+          row = space_from_json(it->second);
+      }
+    return rows;
+  };
+  const auto openings_now = [&]() { return overlay(db.openings()); };
+  // Notes for the first op an expansion emits.
+  const auto note = [&](size_t first, const std::vector<std::string> &ws) {
+    if (!ws.empty() && first < out.size())
+      out[first].warnings.insert(out[first].warnings.end(), ws.begin(),
+                                 ws.end());
+  };
+  const auto put_new_or_changed_opening = [&](const OpeningRecord &o) {
+    const auto it = pending.find(o.guid);
+    const RowState st = capture(db, ModelElementKind::opening, o.guid);
+    const json now = it != pending.end()
+                         ? it->second
+                         : (st.row.is_null() ? json() : st.row.at("record"));
+    if (!now.is_null() && model_record_json(o) == now)
+      return;
+    pending[o.guid] = model_record_json(o);
+    out.push_back(ModelEditOp::put(o));
+  };
+  const auto point_of = [](const json &v, const char *what) {
+    if (!v.is_array() || v.size() != 2 || !v[0].is_number() ||
+        !v[1].is_number())
+      throw std::invalid_argument(std::string("\"") + what +
+                                  "\" must be [x, y]");
+    return PlanPoint{v[0].get<double>(), v[1].get<double>()};
+  };
+  // selection.transform / wall.offset (core/wall_edit_ops.hpp).
+  const auto expand_transform =
+      [&](const std::vector<std::string> &guids, const PlanTransform &t,
+          bool copy, const std::map<std::string, std::string> &new_guids) {
+        const size_t first = out.size();
+        const auto r =
+            transform_selection(guids, t, copy, overlay(db.walls()),
+                                openings_now(), overlay(db.spaces()),
+                                joins_now(), db.space_boundaries(), new_guids);
+        for (const auto &w : r.walls)
+          put_wall(w, r.joins);
+        for (const auto &o : r.openings)
+          put_new_or_changed_opening(o);
+        for (const auto &sp : r.spaces) {
+          std::optional<std::vector<SpaceBoundaryRecord>> bs;
+          if (copy) {
+            bs.emplace();
+            for (const auto &b : r.boundaries)
+              if (b.space == sp.guid)
+                bs->push_back(b);
+          }
+          pending[sp.guid] = model_record_json(sp);
+          out.push_back(ModelEditOp::put(sp, std::move(bs)));
+        }
+        note(first, r.warnings);
+      };
+
   for (const auto &op : ops) {
     if (!op.is_object() || !op.contains("op") || !op.at("op").is_string())
       throw std::invalid_argument(
@@ -1133,6 +1204,83 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
       if (head == "wall" &&
           (verb == "split" || verb == "merge" || verb == "join")) {
         expand_wall_topology(verb, op);
+        continue;
+      }
+      if (head == "wall" && verb == "extend_to") {
+        const std::string g = guid_of();
+        if (!op.contains("target") || !op.at("target").is_string() ||
+            !op.contains("end") || !op.at("end").is_string())
+          throw std::invalid_argument("model edit ops: wall.extend_to needs "
+                                      "\"guid\", \"end\" and \"target\"");
+        const std::string end = op.at("end").get<std::string>();
+        const std::string tg = op.at("target").get<std::string>();
+        const size_t first = out.size();
+        const auto r =
+            extend_wall_to(wall_now(g), end, wall_now(tg), openings_now());
+        // The end left whatever it was joined to; the pair gets the new join.
+        std::vector<WallJoinRecord> all;
+        std::vector<std::string> notes;
+        for (const auto &j : joins_now()) {
+          const bool pair = (j.wall_a == g && j.wall_b == tg) ||
+                            (j.wall_a == tg && j.wall_b == g);
+          const bool at_end = (j.wall_a == g && j.at_a == end) ||
+                              (j.wall_b == g && j.at_b == end);
+          if (!pair && at_end)
+            notes.push_back(fmt::format(
+                "the {} join between wall {} and wall {} was dropped: its {} "
+                "moved to wall {}",
+                j.kind, j.wall_a, j.wall_b, end, tg));
+          if (!pair && !at_end)
+            all.push_back(j);
+        }
+        all.push_back(r.join);
+        put_wall(r.wall, all);
+        if (r.target)
+          put_wall(*r.target, all);
+        put_openings(r.openings);
+        note(first, notes);
+        continue;
+      }
+      if (head == "selection" && verb == "transform") {
+        if (!op.contains("guids") || !op.at("guids").is_array() ||
+            op.at("guids").empty())
+          throw std::invalid_argument("model edit ops: selection.transform "
+                                      "needs a non-empty \"guids\" array");
+        PlanTransform t;
+        if (op.contains("translate")) {
+          const PlanPoint d = point_of(op.at("translate"), "translate");
+          t.dx = d[0];
+          t.dy = d[1];
+        }
+        t.rotate_deg = op.value("rotate_deg", 0.0);
+        if (op.contains("pivot"))
+          t.pivot = point_of(op.at("pivot"), "pivot");
+        std::map<std::string, std::string> new_guids;
+        if (op.contains("new_guids"))
+          new_guids =
+              op.at("new_guids").get<std::map<std::string, std::string>>();
+        expand_transform(op.at("guids").get<std::vector<std::string>>(), t,
+                         op.value("copy", false), new_guids);
+        continue;
+      }
+      if (head == "wall" && verb == "offset") {
+        const std::string g = guid_of();
+        if (!op.contains("distance") || !op.at("distance").is_number())
+          throw std::invalid_argument(
+              "model edit ops: wall.offset needs a \"distance\" in metres");
+        const WallRecord w = wall_now(g);
+        const double len = wall_length(w);
+        if (!(len > 0.0))
+          throw std::invalid_argument("model edit ops: wall.offset: wall " + g +
+                                      " has a zero-length axis");
+        const double dist = op.at("distance").get<double>();
+        PlanTransform t; // left of start -> end is +
+        t.dx = -(w.y1 - w.y0) / len * dist;
+        t.dy = (w.x1 - w.x0) / len * dist;
+        std::map<std::string, std::string> new_guids;
+        if (op.contains("new_guid"))
+          new_guids[g] = op.at("new_guid").get<std::string>();
+        expand_transform({g}, t, op.value("copy", true), new_guids);
         continue;
       }
       const ModelElementKind kind = parse_model_element_kind(head);

@@ -7,12 +7,14 @@
 #include "core/guid.hpp"
 
 #include <fmt/format.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <stdexcept>
 
 namespace reusex::core {
@@ -380,6 +382,412 @@ WallJoinResult join_walls(const WallRecord &a, const WallRecord &b,
     if (!(o.s_end > o.s_start))
       o.s_start = std::max(0.0, o.s_end - 0.01);
     r.openings.push_back(std::move(o));
+  }
+  return r;
+}
+
+} // namespace reusex::core
+
+// --- extend_wall_to / transform_selection (reusex-so4t) ---------------------
+
+namespace reusex::core {
+
+namespace {
+
+constexpr double kMinWallLengthM = 0.05;
+
+/// The intersection of the two walls' axis lines.
+/// @throws std::invalid_argument when they are parallel within
+///         @p min_angle_deg.
+V axes_intersection(const WallRecord &a, const WallRecord &b,
+                    double min_angle_deg) {
+  const V da = unit_dir(a), db = unit_dir(b);
+  if (std::abs(cross(da, db)) <
+      std::sin(min_angle_deg * std::numbers::pi / 180.0))
+    throw std::invalid_argument(
+        fmt::format("walls {} and {} are parallel within {:.1f} deg", a.guid,
+                    b.guid, min_angle_deg));
+  const double t = cross(sub(start_of(b), start_of(a)), db) / cross(da, db);
+  return add(start_of(a), mul(da, t));
+}
+
+/// Move the end ("end" when @p at_end, else the start) of @p w to the point
+/// of its axis nearest @p p, keeping the other end; the top profile is
+/// re-measured. @throws std::invalid_argument when that would leave the
+/// wall shorter than 5 cm or turn it round.
+void move_wall_end(WallRecord &w, bool at_end, V p) {
+  const V fixed = at_end ? start_of(w) : end_of(w);
+  const V moving = at_end ? end_of(w) : start_of(w);
+  const V d = mul(sub(moving, fixed), 1.0 / norm(sub(moving, fixed)));
+  const double along = dot(sub(p, fixed), d);
+  if (!(along >= kMinWallLengthM))
+    throw std::invalid_argument(fmt::format(
+        "moving the {} of wall {} there would {}", at_end ? "end" : "start",
+        w.guid,
+        along < 0.0 ? "turn it round"
+                    : fmt::format("leave it {:.3f} m long", along)));
+  const V q = add(fixed, mul(d, along));
+  // s is measured from the start: a moved start shifts every s.
+  const double ds = at_end ? 0.0 : dot(sub(start_of(w), q), mul(d, -1.0));
+  if (at_end)
+    set_axis(w, fixed, q);
+  else
+    set_axis(w, q, fixed);
+  w.top = remeasure_top(w.top, ds, along);
+}
+
+/// Where the @p at_end end of @p w meets @p t's near face: the face on the
+/// side of w's other end (the axis when t's thickness is unknown).
+/// @throws std::invalid_argument when the axes miss @p t's extent.
+V tee_point(const WallRecord &w, bool at_end, const WallRecord &t,
+            double min_angle_deg) {
+  const V x = axes_intersection(w, t, min_angle_deg);
+  const V dt = unit_dir(t);
+  const double u = dot(sub(x, start_of(t)), dt);
+  if (u < 0.0 || u > wall_length(t))
+    throw std::invalid_argument(fmt::format(
+        "wall {} no longer meets wall {} ({:.2f} m off its {})", w.guid, t.guid,
+        u < 0.0 ? -u : u - wall_length(t), u < 0.0 ? "start" : "end"));
+  const double h = t.thickness > 0.0 ? 0.5 * t.thickness : 0.0;
+  double side = cross(dt, sub(at_end ? start_of(w) : end_of(w), start_of(t)));
+  if (std::abs(side) < 1e-9)
+    side = cross(dt, sub(at_end ? end_of(w) : start_of(w), start_of(t)));
+  if (h == 0.0 || std::abs(side) < 1e-9)
+    return x;
+  const V n{-dt[1], dt[0]};
+  const V face = add(start_of(t), mul(n, side > 0.0 ? h : -h));
+  WallRecord f = t;
+  set_axis(f, face, add(face, dt));
+  return axes_intersection(w, f, min_angle_deg);
+}
+
+bool parse_end(const std::string &end) {
+  if (end != "start" && end != "end")
+    throw std::invalid_argument("wall end must be \"start\" or \"end\", not '" +
+                                end + "'");
+  return end == "end";
+}
+
+/// @p after's openings re-measured from @p before's start (their plan
+/// place kept), into @p out; nothing when the start did not move.
+void remeasure_openings(const WallRecord &before, const WallRecord &after,
+                        const std::vector<OpeningRecord> &openings,
+                        std::vector<OpeningRecord> &out) {
+  if (before.x0 == after.x0 && before.y0 == after.y0)
+    return;
+  const double ds =
+      dot(sub(start_of(before), start_of(after)), unit_dir(after));
+  const double len = wall_length(after);
+  for (auto o : openings) {
+    if (o.wall != before.guid)
+      continue;
+    o.s_start = std::clamp(o.s_start + ds, 0.0, len);
+    o.s_end = std::clamp(o.s_end + ds, 0.0, len);
+    if (!(o.s_end > o.s_start))
+      o.s_start = std::max(0.0, o.s_end - 0.01);
+    out.push_back(std::move(o));
+  }
+}
+
+/// A copy is a new hand-drawn row: no edit marks from the original.
+std::string copy_metadata(const std::string &text) {
+  if (text.empty())
+    return text;
+  auto meta = nlohmann::json::parse(text, nullptr, false);
+  if (!meta.is_object())
+    return text;
+  meta.erase("edited");
+  meta.erase("edited_from");
+  return meta.empty() ? std::string() : meta.dump();
+}
+
+} // namespace
+
+WallExtendResult extend_wall_to(const WallRecord &wall, const std::string &end,
+                                const WallRecord &target,
+                                const std::vector<OpeningRecord> &openings,
+                                double min_angle_deg) {
+  const bool at_end = parse_end(end);
+  if (wall.guid == target.guid)
+    throw std::invalid_argument("extend_wall_to: a wall cannot extend to "
+                                "itself");
+  if (wall.storey != target.storey)
+    throw std::invalid_argument(
+        fmt::format("extend_wall_to: walls {} and {} are on storeys {} and {}",
+                    wall.guid, target.guid, wall.storey, target.storey));
+  try {
+    const V x = axes_intersection(wall, target, min_angle_deg);
+    const double lt = wall_length(target);
+    const double u = dot(sub(x, start_of(target)), unit_dir(target));
+    const double snap = std::max(target.thickness, 0.1);
+    WallExtendResult r;
+    r.wall = wall;
+    if (u > snap && u < lt - snap) {
+      move_wall_end(r.wall, at_end,
+                    tee_point(wall, at_end, target, min_angle_deg));
+      r.join = {wall.guid, target.guid, "tee", end, "path"};
+    } else {
+      move_wall_end(r.wall, at_end, x);
+      const bool t_end = u > 0.5 * lt;
+      const V tp = t_end ? end_of(target) : start_of(target);
+      if (norm(sub(tp, x)) > 1e-9) {
+        WallRecord t = target;
+        move_wall_end(t, t_end, x);
+        r.target = std::move(t);
+      }
+      r.join = {wall.guid, target.guid, "corner", end, t_end ? "end" : "start"};
+    }
+    remeasure_openings(wall, r.wall, openings, r.openings);
+    if (r.target)
+      remeasure_openings(target, *r.target, openings, r.openings);
+    return r;
+  } catch (const std::invalid_argument &e) {
+    throw std::invalid_argument(fmt::format("extend_wall_to: wall {} to {}: {}",
+                                            wall.guid, target.guid, e.what()));
+  }
+}
+
+PlanPoint PlanTransform::apply(PlanPoint p) const {
+  double x = p[0], y = p[1];
+  if (rotate_deg != 0.0) {
+    const double a = rotate_deg * std::numbers::pi / 180.0;
+    const double c = std::cos(a), s = std::sin(a);
+    const double rx = x - pivot[0], ry = y - pivot[1];
+    x = pivot[0] + c * rx - s * ry;
+    y = pivot[1] + s * rx + c * ry;
+  }
+  return {x + dx, y + dy};
+}
+
+SelectionTransformResult
+transform_selection(const std::vector<std::string> &guids,
+                    const PlanTransform &t, bool copy,
+                    const std::vector<WallRecord> &walls,
+                    const std::vector<OpeningRecord> &openings,
+                    const std::vector<SpaceRecord> &spaces,
+                    const std::vector<WallJoinRecord> &joins,
+                    const std::vector<SpaceBoundaryRecord> &boundaries,
+                    const std::map<std::string, std::string> &new_guids) {
+  const auto index = [](const auto &rows) {
+    std::map<std::string, size_t> m;
+    for (size_t i = 0; i < rows.size(); ++i)
+      m.emplace(rows[i].guid, i);
+    return m;
+  };
+  const auto wall_at = index(walls), opening_at = index(openings),
+             space_at = index(spaces);
+  std::vector<std::string> sel_walls, sel_openings, sel_spaces;
+  std::set<std::string> seen, moved;
+  for (const auto &g : guids) {
+    if (!seen.insert(g).second)
+      continue;
+    if (wall_at.count(g)) {
+      sel_walls.push_back(g);
+      moved.insert(g);
+    } else if (opening_at.count(g))
+      sel_openings.push_back(g);
+    else if (space_at.count(g))
+      sel_spaces.push_back(g);
+    else
+      throw std::invalid_argument("transform_selection: " + g +
+                                  " is no stored wall, opening or space");
+  }
+
+  SelectionTransformResult r;
+  std::map<std::string, std::string> copy_of;
+  const auto copy_guid = [&](const std::string &g) {
+    const auto it = new_guids.find(g);
+    std::string n = it != new_guids.end() && !it->second.empty()
+                        ? it->second
+                        : generate_guid();
+    r.copies.emplace_back(g, n);
+    copy_of[g] = n;
+    return n;
+  };
+  const double rot = t.rotate_deg * std::numbers::pi / 180.0;
+  const auto rotate_vec = [&](std::array<double, 2> v) {
+    if (t.rotate_deg == 0.0)
+      return v;
+    const double c = std::cos(rot), s = std::sin(rot);
+    return std::array<double, 2>{c * v[0] - s * v[1], s * v[0] + c * v[1]};
+  };
+
+  // Walls: the rigid motion (a moved wall's openings, top profile and
+  // boundaries are measured along it, so they move with it as they are).
+  std::vector<std::string> order;
+  std::map<std::string, WallRecord> cur;   // the walls to put, as they are
+  std::map<std::string, WallRecord> rigid; // ...as the motion left them
+  for (const auto &g : sel_walls) {
+    WallRecord w = walls[wall_at.at(g)];
+    const PlanPoint p0 = t.apply({w.x0, w.y0}), p1 = t.apply({w.x1, w.y1});
+    set_axis(w, p0, p1);
+    if (copy) {
+      w.guid = copy_guid(g);
+      w.id = -1;
+      w.source = "manual";
+      w.metadata = copy_metadata(w.metadata);
+    }
+    order.push_back(w.guid);
+    rigid[w.guid] = w;
+    cur[w.guid] = std::move(w);
+  }
+
+  // Joins: kept, copied, or re-solved against the unmoved wall.
+  const auto get = [&](const std::string &g) -> WallRecord & {
+    if (!cur.count(g)) {
+      cur[g] = walls[wall_at.at(g)];
+      rigid[g] = cur[g];
+      order.push_back(g);
+    }
+    return cur.at(g);
+  };
+  constexpr double kMinAngle = 5.0;
+  for (const auto &j : joins) {
+    const bool am = moved.count(j.wall_a) > 0, bm = moved.count(j.wall_b) > 0;
+    if (copy) {
+      r.joins.push_back(j);
+      if (am && bm) {
+        WallJoinRecord c = j;
+        c.wall_a = copy_of.at(j.wall_a);
+        c.wall_b = copy_of.at(j.wall_b);
+        r.joins.push_back(std::move(c));
+      }
+      continue;
+    }
+    if (am == bm || !wall_at.count(am ? j.wall_b : j.wall_a)) {
+      r.joins.push_back(j);
+      continue;
+    }
+    const std::string &mg = am ? j.wall_a : j.wall_b;
+    const std::string &ug = am ? j.wall_b : j.wall_a;
+    const std::string &at_m = am ? j.at_a : j.at_b;
+    const std::string &at_u = am ? j.at_b : j.at_a;
+    try {
+      if (j.kind == "collinear")
+        throw std::invalid_argument("a collinear join cannot follow");
+      if (at_m == "path" && at_u == "path")
+        throw std::invalid_argument("a crossing cannot follow");
+      WallRecord m = get(mg), u = get(ug);
+      if (at_m != "path" && at_u != "path") {
+        const V x = axes_intersection(m, u, kMinAngle);
+        move_wall_end(m, at_m == "end", x);
+        move_wall_end(u, at_u == "end", x);
+      } else if (at_u == "path") {
+        move_wall_end(m, at_m == "end",
+                      tee_point(m, at_m == "end", u, kMinAngle));
+      } else {
+        move_wall_end(u, at_u == "end",
+                      tee_point(u, at_u == "end", m, kMinAngle));
+      }
+      cur[mg] = std::move(m);
+      cur[ug] = std::move(u);
+      r.joins.push_back(j);
+    } catch (const std::invalid_argument &e) {
+      r.warnings.push_back(
+          fmt::format("the {} join between wall {} and wall {} was dropped: {}",
+                      j.kind, mg, ug, e.what()));
+    }
+  }
+  for (const auto &g : order) {
+    const WallRecord &w = cur.at(g);
+    const WallRecord &was = rigid.at(g);
+    // An unmoved wall a failed re-solve only looked at stays out.
+    if (!moved.count(g) && !copy && w.x0 == was.x0 && w.y0 == was.y0 &&
+        w.x1 == was.x1 && w.y1 == was.y1)
+      continue;
+    r.walls.push_back(w);
+  }
+
+  // Openings, by guid, last write wins.
+  std::vector<std::string> o_order;
+  std::map<std::string, OpeningRecord> o_out;
+  const auto emit = [&](OpeningRecord o) {
+    if (!o_out.count(o.guid))
+      o_order.push_back(o.guid);
+    o_out[o.guid] = std::move(o);
+  };
+  if (copy) {
+    for (const auto &o : openings) {
+      if (!moved.count(o.wall))
+        continue;
+      OpeningRecord c = o;
+      c.guid = copy_guid(o.guid);
+      c.wall = copy_of.at(o.wall);
+      c.id = -1;
+      c.source = "manual";
+      c.source_instance_guid.clear();
+      c.metadata = copy_metadata(c.metadata);
+      emit(std::move(c));
+    }
+  } else {
+    // An end a re-solved join moved re-measures that wall's openings.
+    for (const auto &g : order) {
+      std::vector<OpeningRecord> re;
+      remeasure_openings(rigid.at(g), cur.at(g), openings, re);
+      for (auto &o : re)
+        emit(std::move(o));
+    }
+  }
+  for (const auto &g : sel_openings) {
+    const OpeningRecord &o = openings[opening_at.at(g)];
+    if (moved.count(o.wall))
+      continue; // it moves (or is copied) with its host
+    if (!wall_at.count(o.wall)) {
+      r.warnings.push_back(fmt::format(
+          "opening {} was not moved: its host wall {} is not stored", g,
+          o.wall));
+      continue;
+    }
+    const WallRecord &was = walls[wall_at.at(o.wall)];
+    const WallRecord &host = cur.count(o.wall) ? cur.at(o.wall) : was;
+    const PlanPoint c = opening_centre(o, was);
+    OpeningRecord n = o_out.count(g) ? o_out.at(g) : o;
+    if (copy) {
+      n = o;
+      n.guid = copy_guid(g);
+      n.id = -1;
+      n.source = "manual";
+      n.source_instance_guid.clear();
+      n.metadata = copy_metadata(n.metadata);
+    }
+    rehost(n, host, t.apply(c));
+    if (!copy && n.s_start == o.s_start && n.s_end == o.s_end &&
+        !o_out.count(g))
+      continue;
+    emit(std::move(n));
+  }
+  for (const auto &g : o_order)
+    r.openings.push_back(o_out.at(g));
+
+  // Spaces.
+  for (const auto &g : sel_spaces) {
+    SpaceRecord s = spaces[space_at.at(g)];
+    for (auto &p : s.polygon.outer)
+      p = t.apply(p);
+    for (auto &ring : s.polygon.holes)
+      for (auto &p : ring)
+        p = t.apply(p);
+    for (auto &plane : s.ceiling_planes) {
+      const PlanPoint at = t.apply({plane.at[0], plane.at[1]});
+      plane.at[0] = at[0];
+      plane.at[1] = at[1];
+      plane.slope = rotate_vec(plane.slope); // the gradient turns with it
+    }
+    if (copy) {
+      s.guid = copy_guid(g);
+      s.id = -1;
+      s.source = "manual";
+      s.room_label = -1;
+      s.metadata = copy_metadata(s.metadata);
+      for (const auto &b : boundaries)
+        if (b.space == g && copy_of.count(b.wall)) {
+          SpaceBoundaryRecord c = b;
+          c.space = s.guid;
+          c.wall = copy_of.at(b.wall);
+          r.boundaries.push_back(std::move(c));
+        }
+    }
+    r.spaces.push_back(std::move(s));
   }
   return r;
 }

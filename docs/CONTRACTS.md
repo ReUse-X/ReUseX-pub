@@ -1108,7 +1108,19 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   between the parts), `merge_walls` (length-weighted axis refit, the second
   wall removed, openings re-hosted and re-measured), `join_walls` (extend /
   trim both to the axes' intersection, a tee when it lies more than 0.5 m
-  inside one wall); wire ops `wall.split` / `wall.merge` / `wall.join`.
+  inside one wall), `extend_wall_to` (one end to a boundary wall: a tee
+  onto its near face when the axes meet farther inside it than its
+  thickness, at least 0.1 m, from both its ends, else a corner at the axes'
+  intersection that moves the boundary's nearer end too; the end's other
+  joins are dropped with a warning), `transform_selection` (move / rotate /
+  copy walls, openings and spaces as one body: hosted openings ride along,
+  a lone opening slides along its host, joins among the moved walls stay,
+  a join to an unmoved wall is re-solved -- corner: both ends to the new
+  intersection, tee: the stem to the through wall's near face -- or dropped
+  with a warning; copies are new manual rows with only their joins among
+  themselves); wire ops `wall.split` / `wall.merge` / `wall.join` /
+  `wall.extend_to` / `selection.transform` / `wall.offset` (each one batch,
+  one undo step; a dropped join comes back in `warnings`).
   `segmentation/model_edit_geometry.hpp`: `rebuild_spaces_from_walls` (a
   storey's spaces from its walls alone, names / guids / heights / ceiling
   planes carried by overlap, boundaries on the wall faces; a stored space

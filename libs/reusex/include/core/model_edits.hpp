@@ -87,6 +87,10 @@ struct ModelEditOp {
   std::optional<std::vector<WallJoinRecord>> joins;
   /// put space: replace its boundaries; nullopt keeps the stored ones.
   std::optional<std::vector<SpaceBoundaryRecord>> boundaries;
+  /// Notes from the wire op this op was expanded from (e.g. a join a move
+  /// had to drop); apply_model_edit() passes them on in
+  /// ModelEditResult::warnings.
+  std::vector<std::string> warnings;
 
   static ModelEditOp put(StoreyRecord storey);
   static ModelEditOp
@@ -201,12 +205,25 @@ SpaceRecord space_from_json(const nlohmann::json &j);
 ///   {"op": "wall.split", "guid": g, "s": metres, "new_guid"?: g2}
 ///   {"op": "wall.merge", "guids": [a, b]}     (b is removed)
 ///   {"op": "wall.join", "guids": [a, b]}      (extend / trim to a corner)
+///   {"op": "wall.extend_to", "guid": g, "end": "start" | "end",
+///    "target": t}            (extend / trim g's end to t: corner or tee)
+///   {"op": "selection.transform", "guids": [...], "translate"?: [dx, dy],
+///    "rotate_deg"?: deg, "pivot"?: [x, y], "copy"?: bool,
+///    "new_guids"?: {old: new}}   (move / rotate / copy walls, openings,
+///                                 spaces as one body)
+///   {"op": "wall.offset", "guid": g, "distance": m, "copy"?: bool (true),
+///    "new_guid"?: g2}   (move / copy g sideways; + = left of start -> end)
 ///   {"op": "storey.update", "guid": g, "set": {...}}
 /// with <kind> = wall | opening | space | storey. "joins" (wall) and
 /// "boundaries" (space) may ride along on create / update. An update of a
 /// row created earlier in the same list patches that one. split / merge /
-/// join expand into puts of the walls and of their re-measured openings
-/// (core/wall_edit_ops.hpp), reading openings and joins as stored.
+/// join / extend_to / selection.transform / wall.offset expand into puts of
+/// the walls, openings and spaces they change and of the copies they make
+/// (core/wall_edit_ops.hpp: extend_wall_to(), transform_selection()),
+/// reading openings, spaces, joins and boundaries as stored; a transform
+/// whose join to an unmoved wall had to be dropped says so in
+/// ModelEditOp::warnings. rotate_deg is counter-clockwise about pivot
+/// (default [0, 0]), applied before translate.
 /// @throws std::invalid_argument for an unknown op, a missing guid, an
 ///         update of an unknown row or a bad record.
 std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
