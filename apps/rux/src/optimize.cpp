@@ -346,7 +346,9 @@ NOTES:
          "block moves, same-surface and relative constraints, edge "
          "rejections, lowered into extra factors of the solve. Prints each "
          "edit's residual. Refused when its project_guid names another "
-         "project")
+         "project. Without it the solve uses the project's working pose "
+         "edits (the editor's detach cuts and holds), as the optimize job "
+         "does")
       ->check(CLI::ExistingFile);
   sub->add_option("--edit-inlier-cost", opt->edit_inlier_cost,
                   "GNC-TLS inlier threshold of the pose-edit factors (0.5 * "
@@ -613,13 +615,22 @@ int run_subcommand_optimize(SubcommandOptimizeOptions const &opt,
                                                 optimize_stage_parameters(opt));
 
     // Pose edits: read (strict) and checked against this project before
-    // anything is logged or solved.
+    // anything is logged or solved. Without --edits the solve uses the
+    // project's working document (the editor's detach cuts and holds,
+    // reusex-fkqd), the same edits the optimize job stage reads.
     std::optional<reusex::core::PoseEdits> edits;
+    std::string edits_source;
     if (!opt.edits.empty()) {
       edits = reusex::io::read_pose_edits(opt.edits, db.project_guid());
-      spdlog::info("Pose edits: {} edits from {} (frame {})",
-                   edits->edits.size(), opt.edits, edits->frame);
+      edits_source = opt.edits;
+    } else if (auto stored = reusex::io::stored_pose_edits(db);
+               !stored.edits.empty()) {
+      edits = std::move(stored);
+      edits_source = "the project's working pose edits";
     }
+    if (edits)
+      spdlog::info("Pose edits: {} edits from {} (frame {})",
+                   edits->edits.size(), edits_source, edits->frame);
 
     int logId = db.log_pipeline_start(
         "pose_optimization_plane_graph",
@@ -630,7 +641,10 @@ int run_subcommand_optimize(SubcommandOptimizeOptions const &opt,
             opt.max_planes_per_frame, opt.min_plane_inliers,
             opt.no_plane_inlier_weight ? "uniform" : opt.plane_noise,
             !opt.no_gnc, opt.iterations, opt.seed, dry_run, opt.loop_trust,
-            nlohmann::json(opt.edits).dump()));
+            nlohmann::json(!opt.edits.empty() ? opt.edits
+                           : edits            ? std::string("working")
+                                              : std::string())
+                .dump()));
 
     auto result = reusex::geometry::optimize_sensor_poses(
         db, options, dry_run, edits ? &*edits : nullptr);

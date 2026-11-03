@@ -14,6 +14,7 @@
 // mistake. Every message names the edit ("edit 'm-late-pass'", or
 // "edits[3]" when it has no id) and the field.
 
+#include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/pose_edits.hpp>
 
 #include <filesystem>
@@ -54,6 +55,15 @@ void check_pose_edits_project(const core::PoseEdits &edits,
 /// @throws std::runtime_error naming the path or the offending edit.
 core::PoseEdits read_pose_edits(const std::filesystem::path &path,
                                 std::string_view expected_project_guid = {});
+
+/// The project's working pose-edits document (core/working_pose_edits.hpp,
+/// project_settings 'pose_edits.working': the editor's detach cuts and
+/// holds), parsed with the full reader and checked against the project's
+/// guid. Empty when nothing is stored. This is what `rux optimize` without
+/// --edits and the optimize job stage solve with (reusex-fkqd).
+/// @throws std::runtime_error "pose edits: <where>: <what>" naming the
+///         stored edit this build cannot read.
+core::PoseEdits stored_pose_edits(const ProjectDB &db);
 
 /// Write @p edits to @p path (YAML or JSON by extension), creating parent
 /// directories.
