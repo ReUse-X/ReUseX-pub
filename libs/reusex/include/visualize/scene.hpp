@@ -280,8 +280,8 @@ inline constexpr const char *kSolidsActorName = "reusex.solids";
 /// The meshes the `solids` layer draws, as the solids stage names them
 /// (pipeline/solid_parameters.hpp, docs/CONTRACTS.md `solids`): walls,
 /// slabs, spaces.
-inline constexpr std::array<const char *, 3> kSolidMeshNames{
-    "solid_walls", "solid_slabs", "solid_spaces"};
+inline constexpr std::array<const char *, 4> kSolidMeshNames{
+    "solid_walls", "solid_slabs", "solid_spaces", "solid_stairs"};
 
 /// The building-element categories a viewer can show and hide one by one
 /// (SceneLayer::actor_categories, count_building_elements()). One vocabulary
@@ -301,13 +301,14 @@ inline constexpr const char *space = "space";
 inline constexpr const char *door = "door";
 inline constexpr const char *window = "window";
 inline constexpr const char *opening = "opening";
+inline constexpr const char *stair = "stair";
 } // namespace element_category
 
 /// Every element category, in the order a viewer lists them.
-inline constexpr std::array<const char *, 7> kElementCategories{
-    element_category::wall,   element_category::slab, element_category::roof,
-    element_category::space,  element_category::door, element_category::window,
-    element_category::opening};
+inline constexpr std::array<const char *, 8> kElementCategories{
+    element_category::wall,    element_category::slab, element_category::roof,
+    element_category::space,   element_category::door, element_category::window,
+    element_category::opening, element_category::stair};
 
 /// How many building elements of one category one storey holds.
 struct ElementCount {

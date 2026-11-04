@@ -871,7 +871,7 @@ corner or tee run on to the far face of the wall they meet.
 |---|---|
 | Consumes | `walls`, `storeys` |
 | Optional | `openings` (cut out of the walls), `spaces` (space volumes; the slab outline) |
-| Produces | `solid_walls`, `solid_slabs`, `solid_spaces` (`meshes` table); `slabs` rows (schema v44) |
+| Produces | `solid_walls`, `solid_slabs`, `solid_spaces`, `solid_stairs` (only with stairs) (`meshes` table); `slabs` rows (schema v44) |
 | Options  | `SolidsOptions` (`libs/reusex/include/reconstruction/solids.hpp`), parameter keys are its field names. One table, `pipeline::solid_parameter_table()`, defines the keys, the CLI flags and their bounds |
 | Checks   | ≥1 wall; ≥1 storey |
 
@@ -1189,6 +1189,20 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   keep their source and lock); only the split / merged storeys are marked
   edited. Moving one element to another storey is a `*.update` of its
   `storey` (ruxd keeps its world position across level frames).
+- **Stairs** (schema v45, reusex-xvnl): `stairs` (`core::StairRecord`:
+  storey / storey_to idx, kind straight | L | U | spiral, location of the
+  walking line, runs `[{start, end, width, risers}]` and landings as JSON
+  text, z_base / z_top in the storey's level frame, tread_depth, nosing,
+  cut_slab_above). Kind `stair` (`stair.create` / `update` / `delete` /
+  `revert`; drawn by hand, a removed one leaves no tombstone);
+  `core/stairs.hpp` measures (riser height, goings, run bases) and advises
+  (BR18 risers, 2 x riser + going 0.59 .. 0.65 m, going >= 0.25 m, width
+  >= 0.80 m). The solids stage writes `solid_stairs` (one stepped block per
+  run, a 0.2 m slab per landing, `reconstruction::stair_solids`; no mesh
+  when there are no stairs) and cuts the footprint of each stair with
+  cut_slab_above out of the floor slabs of its storey_to (the stored
+  derived rows get the hole; edited and drawn rows are cut when built).
+  Stairs follow their storeys through `storey.split` / `storey.merge`.
 - **Zones** (schema v43, reusex-pccw): `zones` (guid, name, use, source,
   locked, confidence, metadata) and `zone_members` (zone row -> space
   *guid*, ordered; no foreign key to `spaces`, so a spaces re-run that

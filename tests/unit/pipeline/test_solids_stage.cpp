@@ -301,3 +301,65 @@ TEST_CASE("SolidsStage_SlabRows_DerivedEditedDeletedDrawn",
   CHECK(db.slab_by_guid(floor)->thickness == 0.4);
   CHECK_FALSE(db.slab_by_guid(roof));
 }
+
+TEST_CASE("SolidsStage_Stairs_SolidsAndSlabOpening",
+          "[pipeline][solids][stairs]") {
+  TempPath project("test_solids_stage_stairs");
+  ProjectDB db(project.path);
+  auto m = two_rooms();
+  // A storey above, so the stair has somewhere to arrive.
+  auto upper = m.storeys.front();
+  upper.guid = "st1";
+  upper.idx = 1;
+  upper.z_floor = upper.z_ceiling;
+  upper.z_ceiling = upper.z_floor + 2.5;
+  m.storeys.push_back(upper);
+  store(db, m);
+  REQUIRE(run(db, project).ok);
+  CHECK_FALSE(db.has_mesh(kSolidStairsMesh));
+
+  // A straight stair in the first room, up to storey 1.
+  core::StairRecord st;
+  st.guid = "stair";
+  st.storey = 0;
+  st.storey_to = 1;
+  st.runs = {{{1.0, 0.5}, {1.0, 3.0}, 0.9, 15}};
+  st.z_base = 0.0;
+  st.z_top = m.storeys.front().z_ceiling;
+  core::apply_model_edit(db, {core::ModelEditOp::put(st)});
+  const auto r = run(db, project);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  REQUIRE(db.has_mesh(kSolidStairsMesh));
+  const json idx =
+      json::parse(db.mesh_metadata(kSolidStairsMesh).parameters).at("elements");
+  REQUIRE(idx.size() == 1);
+  CHECK(idx[0].at("type") == "stair");
+  CHECK(idx[0].at("element_guid") == "stair");
+  CHECK(idx[0].at("closed").get<bool>());
+  CHECK(idx[0].at("volume").get<double>() > 0.5);
+
+  // A floor drawn on storey 1 over the stair gets the opening.
+  core::SlabRecord floor1;
+  floor1.guid = "floor-1";
+  floor1.storey = 1;
+  floor1.outline.outer = {{0, 0}, {4, 0}, {4, 4}, {0, 4}};
+  floor1.z_top = upper.z_floor;
+  floor1.thickness = 0.2;
+  core::apply_model_edit(db, {core::ModelEditOp::put(floor1)});
+  const auto r3 = run(db, project);
+  INFO(r3.message);
+  REQUIRE(r3.ok);
+  bool cut = false;
+  const json slab_meta =
+      json::parse(db.mesh_metadata(kSolidSlabsMesh).parameters);
+  for (const auto &e : slab_meta.at("elements"))
+    if (e.value("element_guid", "") == "floor-1") {
+      CHECK(e.at("profile").at("holes").size() == 1);
+      // 16 m2 minus the 2.5 x 0.9 m run, 0.2 m thick.
+      CHECK_THAT(e.at("volume").get<double>(),
+                 WithinAbs((16.0 - 2.5 * 0.9) * 0.2, 1e-6));
+      cut = true;
+    }
+  CHECK(cut);
+}

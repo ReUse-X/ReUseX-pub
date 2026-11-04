@@ -806,7 +806,11 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   rows and builds edited / drawn rows with `reconstruction::slab_solid`;
   edit kind `slab`) and `storeys.is_ground`; storey ops `storey.split` /
   `storey.merge` and a guarded `storey.delete` are wire ops of
-  `core/model_edits.hpp`
+  `core/model_edits.hpp`. Schema v45 adds `stairs` (reusex-xvnl,
+  `core::StairRecord`, `core/stairs.hpp`; edit kind `stair`; the solids
+  stage builds `solid_stairs` with `reconstruction::stair_solids` and cuts
+  stair openings into the floor slabs above; the `solids` render layer and
+  the Qt element filter ("Trapper", category `stair`) draw them)
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)

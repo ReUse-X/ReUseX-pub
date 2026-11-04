@@ -17,7 +17,7 @@ struct Category {
 };
 
 /// visualize::kElementCategories, in its order, with the rows' labels.
-constexpr std::array<Category, 7> kCategories{{
+constexpr std::array<Category, 8> kCategories{{
     {"wall", "Vægge"},
     {"slab", "Dæk"},
     {"roof", "Tag"},
@@ -25,6 +25,7 @@ constexpr std::array<Category, 7> kCategories{{
     {"door", "Døre"},
     {"window", "Vinduer"},
     {"opening", "Andre åbninger"},
+    {"stair", "Trapper"},
 }};
 
 } // namespace

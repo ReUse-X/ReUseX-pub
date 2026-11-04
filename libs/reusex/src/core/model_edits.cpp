@@ -7,6 +7,7 @@
 #include "core/guid.hpp"
 #include "core/logging.hpp"
 #include "core/opening_fit.hpp"
+#include "core/stairs.hpp"
 #include "core/wall_edit_ops.hpp"
 
 #include <fmt/format.h>
@@ -40,6 +41,8 @@ std::string_view to_string(ModelElementKind kind) {
     return "zone";
   case ModelElementKind::slab:
     return "slab";
+  case ModelElementKind::stair:
+    return "stair";
   }
   return "wall";
 }
@@ -57,9 +60,11 @@ ModelElementKind parse_model_element_kind(std::string_view text) {
     return ModelElementKind::zone;
   if (text == "slab")
     return ModelElementKind::slab;
+  if (text == "stair")
+    return ModelElementKind::stair;
   throw std::invalid_argument(
       "unknown model element kind '" + std::string(text) +
-      "' (storey | wall | opening | space | zone | slab)");
+      "' (storey | wall | opening | space | zone | slab | stair)");
 }
 
 // --- ModelEditOp factories ---------------------------------------------------
@@ -114,6 +119,14 @@ ModelEditOp ModelEditOp::put(SlabRecord slab) {
   op.kind = ModelElementKind::slab;
   op.guid = slab.guid;
   op.record = std::move(slab);
+  return op;
+}
+
+ModelEditOp ModelEditOp::put(StairRecord stair) {
+  ModelEditOp op;
+  op.kind = ModelElementKind::stair;
+  op.guid = stair.guid;
+  op.record = std::move(stair);
   return op;
 }
 
@@ -342,6 +355,27 @@ json model_record_json(const SlabRecord &r) {
   return j;
 }
 
+json model_record_json(const StairRecord &r) {
+  json j;
+  j["guid"] = r.guid;
+  j["storey"] = r.storey;
+  j["storey_to"] = r.storey_to;
+  j["kind"] = r.kind;
+  j["location"] = r.location;
+  j["runs"] = json::parse(r.runs.empty() ? std::string("[]")
+                                         : encode_stair_runs(r.runs));
+  j["landings"] =
+      json::parse(r.landings.empty() ? std::string("[]")
+                                     : encode_stair_landings(r.landings));
+  j["z_base"] = r.z_base;
+  j["z_top"] = r.z_top;
+  j["tread_depth"] = r.tread_depth;
+  j["nosing"] = r.nosing;
+  j["cut_slab_above"] = r.cut_slab_above;
+  common_json(j, r);
+  return j;
+}
+
 StoreyRecord storey_from_json(const json &j) {
   StoreyRecord r;
   Fields f(j, "storey");
@@ -520,6 +554,47 @@ SlabRecord slab_from_json(const json &j) {
   return r;
 }
 
+StairRecord stair_from_json(const json &j) {
+  StairRecord r;
+  Fields f(j, "stair");
+  common_from(f, r);
+  f.get("storey", r.storey);
+  f.get("storey_to", r.storey_to);
+  f.get("kind", r.kind);
+  f.get("location", r.location);
+  if (const json *runs = f.raw("runs")) {
+    if (!runs->is_array())
+      throw std::invalid_argument("stair.runs: expected an array");
+    try {
+      r.runs = decode_stair_runs(runs->dump());
+    } catch (const std::runtime_error &e) {
+      throw std::invalid_argument(
+          std::string("stair.runs: expected [{\"start\": [x, y], "
+                      "\"end\": [x, y], \"width\": w, \"risers\": n}]: ") +
+          e.what());
+    }
+  }
+  if (const json *landings = f.raw("landings")) {
+    if (!landings->is_array())
+      throw std::invalid_argument("stair.landings: expected an array");
+    try {
+      r.landings = decode_stair_landings(landings->dump());
+    } catch (const std::runtime_error &e) {
+      throw std::invalid_argument(
+          std::string("stair.landings: expected [{\"outer\": [[x, y], "
+                      "...]}]: ") +
+          e.what());
+    }
+  }
+  f.get("z_base", r.z_base);
+  f.get("z_top", r.z_top);
+  f.get("tread_depth", r.tread_depth);
+  f.get("nosing", r.nosing);
+  f.get("cut_slab_above", r.cut_slab_above);
+  f.done();
+  return r;
+}
+
 // --- Row state ---------------------------------------------------------------
 
 namespace {
@@ -614,6 +689,10 @@ RowState capture(const ProjectDB &db, ModelElementKind kind,
     if (auto r = db.slab_by_guid(guid))
       st.row = {{"record", model_record_json(*r)}};
     break;
+  case ModelElementKind::stair:
+    if (auto r = db.stair_by_guid(guid))
+      st.row = {{"record", model_record_json(*r)}};
+    break;
   }
   if (auto d = db.dismissed_model_element(guid))
     st.tomb = parse_text_object(d->record);
@@ -649,6 +728,9 @@ void put_record_exact(ProjectDB &db, ModelElementKind kind, const json &rec) {
   case ModelElementKind::slab:
     db.put_slab_row(slab_from_json(rec));
     break;
+  case ModelElementKind::stair:
+    db.put_stair_row(stair_from_json(rec));
+    break;
   }
 }
 
@@ -666,6 +748,8 @@ bool remove_row(ProjectDB &db, ModelElementKind kind, const std::string &g) {
     return db.remove_zone_row(g);
   case ModelElementKind::slab:
     return db.remove_slab_row(g);
+  case ModelElementKind::stair:
+    return db.remove_stair_row(g);
   }
   return false;
 }
@@ -764,6 +848,11 @@ std::optional<ZoneRecord> stored_as(const ProjectDB &db, const std::string &g) {
 template <>
 std::optional<SlabRecord> stored_as(const ProjectDB &db, const std::string &g) {
   return db.slab_by_guid(g);
+}
+template <>
+std::optional<StairRecord> stored_as(const ProjectDB &db,
+                                     const std::string &g) {
+  return db.stair_by_guid(g);
 }
 
 json row_record(const RowState &st) {
@@ -930,6 +1019,8 @@ ModelEditResult apply_model_edit(ProjectDB &db,
           db.put_zone_row(rec);
         } else if constexpr (std::is_same_v<R, SlabRecord>)
           db.put_slab_row(rec);
+        else if constexpr (std::is_same_v<R, StairRecord>)
+          db.put_stair_row(rec);
         else
           db.put_space_row(rec);
         db.undismiss_model_element(rec.guid);
@@ -1059,19 +1150,21 @@ ModelEditResult apply_model_edit(ProjectDB &db,
     if (std::any_of(storeys_now.begin(), storeys_now.end(),
                     [&](const auto &st) { return st.idx == idx; }))
       continue; // another storey took the idx (a merge renumbered)
-    size_t walls = 0, spaces = 0, slabs = 0;
+    size_t walls = 0, spaces = 0, slabs = 0, stairs = 0;
     for (const auto &w : db.walls())
       walls += w.storey == idx;
     for (const auto &sp : db.spaces())
       spaces += sp.storey == idx;
     for (const auto &sl : db.slabs())
       slabs += sl.storey == idx;
-    if (walls + spaces + slabs > 0)
+    for (const auto &st : db.stairs())
+      stairs += st.storey == idx;
+    if (walls + spaces + slabs + stairs > 0)
       throw std::invalid_argument(fmt::format(
           "model edit: storey {} (idx {}) still holds {} wall(s), {} "
-          "space(s) and {} slab(s); move them to another storey or delete "
-          "them in the same batch",
-          k.guid, idx, walls, spaces, slabs));
+          "space(s), {} slab(s) and {} stair(s); move them to another "
+          "storey or delete them in the same batch",
+          k.guid, idx, walls, spaces, slabs, stairs));
   }
 
   // Openings left without their host.
@@ -1135,6 +1228,9 @@ void normalise_logged_row(ModelElementKind kind, json &row) {
     break;
   case ModelElementKind::slab:
     rec = model_record_json(slab_from_json(rec));
+    break;
+  case ModelElementKind::stair:
+    rec = model_record_json(stair_from_json(rec));
     break;
   }
 }
@@ -1309,6 +1405,9 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
       break;
     case ModelElementKind::slab:
       put = ModelEditOp::put(slab_from_json(rec));
+      break;
+    case ModelElementKind::stair:
+      put = ModelEditOp::put(stair_from_json(rec));
       break;
     }
     return put;
@@ -1507,6 +1606,24 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
         p.exact = exact;
         out.push_back(std::move(p));
       }
+    }
+    // A stair follows its bottom; one that arrives at a renumbered storey
+    // follows it too.
+    for (auto st : db.stairs()) {
+      if (const auto it = pending.find(st.guid); it != pending.end())
+        st = stair_from_json(it->second);
+      const bool base = st.storey == from && moves(st.z_base);
+      const bool arrives = st.storey_to == from && moves(st.z_top);
+      if (!base && !arrives)
+        continue;
+      if (base)
+        st.storey = to;
+      if (arrives)
+        st.storey_to = to;
+      pending[st.guid] = model_record_json(st);
+      auto p = ModelEditOp::put(st);
+      p.exact = exact;
+      out.push_back(std::move(p));
     }
   };
   const auto all = [](double) { return true; };
@@ -1855,6 +1972,9 @@ ModelHolds model_holds(const ProjectDB &db, ModelElementKind kind) {
     break;
   case ModelElementKind::slab:
     add_edited(db.slabs());
+    break;
+  case ModelElementKind::stair:
+    add_edited(db.stairs());
     break;
   }
   return h;

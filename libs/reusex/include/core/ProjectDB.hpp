@@ -1098,6 +1098,20 @@ class ProjectDB {
   /// Delete every slab row (locked ones included); raises model_revision().
   void delete_slabs();
 
+  // --- Stairs (schema v45, reusex-xvnl) ---
+
+  /// Every stair, storey ascending, then row id. Empty before v45.
+  std::vector<core::StairRecord> stairs() const;
+  std::optional<core::StairRecord> stair_by_guid(std::string_view guid) const;
+  /// One row exactly as given (see put_*_row above).
+  /// @throws std::invalid_argument for an empty guid, a bad source or a
+  ///         record core::check_stair() refuses; std::runtime_error before
+  ///         v45.
+  void put_stair_row(const core::StairRecord &stair);
+  bool remove_stair_row(std::string_view guid);
+  /// Delete every stair; raises model_revision().
+  void delete_stairs();
+
   /// A deleted (dismissed) solid-model element's tombstone
   /// (model_dismissed, schema v41): the walls / openings / spaces detection
   /// stages do not write a record with its guid, and match re-detected

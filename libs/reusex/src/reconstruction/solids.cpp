@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "reusex/reconstruction/solids.hpp"
+#include "reusex/core/space_polygon.hpp"
+#include "reusex/core/stairs.hpp"
 
 #include "reusex/core/guid.hpp"
 #include "reusex/core/logging.hpp"
@@ -1323,6 +1325,8 @@ std::string_view to_string(SolidType type) {
     return "slab";
   case SolidType::space:
     return "space";
+  case SolidType::stair:
+    return "stair";
   }
   return "unknown";
 }
@@ -1545,6 +1549,180 @@ ElementSolid slab_solid(const core::SlabRecord &slab,
   }
   finish(e, mesh, T);
   return e;
+}
+
+namespace {
+
+/// A run's frame: start, unit direction, right normal, length and the
+/// across range (right-normal coordinate) its width covers.
+struct RunFrame {
+  Vec2 p0, d, right;
+  double len = 0.0, lo = 0.0, width = 0.0;
+};
+
+RunFrame run_frame(const core::StairRun &r, const std::string &location) {
+  RunFrame f;
+  f.p0 = Vec2(r.start[0], r.start[1]);
+  const Vec2 v = Vec2(r.end[0], r.end[1]) - f.p0;
+  f.len = v.norm();
+  f.d = f.len > 1e-9 ? Vec2(v / f.len) : Vec2::UnitX();
+  f.right = Vec2(f.d.y(), -f.d.x());
+  f.width = r.width;
+  // The walking line at the left edge: the stair lies to its right.
+  f.lo = location == "left"    ? 0.0
+         : location == "right" ? -r.width
+                               : -0.5 * r.width;
+  return f;
+}
+
+Ring run_rect(const RunFrame &f) {
+  const auto at = [&](double s, double w) -> Vec2 {
+    return f.p0 + s * f.d + w * f.right;
+  };
+  // Counter-clockwise: the right normal is clockwise of d.
+  return {at(0.0, f.lo + f.width), at(f.len, f.lo + f.width), at(f.len, f.lo),
+          at(0.0, f.lo)};
+}
+
+std::vector<Ring> stair_rings(const core::StairRecord &st) {
+  std::vector<Ring> rings;
+  for (const auto &r : st.runs)
+    if (r.risers > 1)
+      rings.push_back(run_rect(run_frame(r, st.location)));
+  for (const auto &l : st.landings)
+    rings.push_back(to_ring(l.outer));
+  return rings;
+}
+
+core::SpacePolygon space_polygon_of(const EPolygonWithHoles &pwh) {
+  core::SpacePolygon p;
+  p.outer = to_plan(dring(pwh.outer_boundary()));
+  for (auto h = pwh.holes_begin(); h != pwh.holes_end(); ++h)
+    p.holes.push_back(to_plan(dring(*h)));
+  return p;
+}
+
+} // namespace
+
+std::vector<ElementSolid> stair_solids(const core::StairRecord &stair,
+                                       const core::StoreyRecord &storey) {
+  std::vector<ElementSolid> out;
+  if (const auto bad = core::check_stair(stair); !bad.empty()) {
+    warn("solids: stair {} is not built: {}", stair.guid, bad);
+    return out;
+  }
+  core::SolidModel one;
+  one.storeys = {storey};
+  const Frames frames = make_frames(one);
+  const Eigen::Affine3d &T = frames.of(storey.idx);
+  const double h = core::stair_riser_height(stair);
+  for (std::size_t i = 0; i < stair.runs.size(); ++i) {
+    const auto &r = stair.runs[i];
+    if (r.risers < 2)
+      continue; // one riser: the landing / floor carries it
+    const RunFrame f = run_frame(r, stair.location);
+    const double z0 = core::stair_run_base(stair, i);
+    const int treads = r.risers - 1;
+    const double g = f.len / treads;
+    // The side profile in (s, z), counter-clockwise: the bottom, the top
+    // tread's front, then the steps back down to the first riser.
+    Ring prof;
+    prof.emplace_back(0.0, z0);
+    prof.emplace_back(f.len, z0);
+    for (int k = treads; k >= 1; --k) {
+      prof.emplace_back(k * g, z0 + k * h);
+      prof.emplace_back((k - 1) * g, z0 + k * h);
+    }
+    // (s, z, w) -> level: d, up, right is right-handed (d x up = right).
+    Eigen::Affine3d M = Eigen::Affine3d::Identity();
+    M.linear().col(0) = Eigen::Vector3d(f.d.x(), f.d.y(), 0.0);
+    M.linear().col(1) = Eigen::Vector3d::UnitZ();
+    M.linear().col(2) = Eigen::Vector3d(f.right.x(), f.right.y(), 0.0);
+    M.translation() = Eigen::Vector3d(f.p0.x() + f.lo * f.right.x(),
+                                      f.p0.y() + f.lo * f.right.y(), 0.0);
+    ElementSolid e;
+    e.type = SolidType::stair;
+    e.source_guid = stair.guid;
+    e.element_guid = stair.guid;
+    e.storey = storey.idx;
+    e.predefined = "STRAIGHT_RUN_STAIR";
+    e.part = static_cast<int>(i);
+    e.profile.outer = to_plan(prof);
+    e.profile.depth = f.width;
+    e.profile.placement = row_major(T * M);
+    auto m = extrude(prof, {}, 0.0, f.width);
+    Mesh mesh = m ? std::move(*m) : Mesh{};
+    finish(e, mesh, T * M);
+    out.push_back(std::move(e));
+  }
+  for (std::size_t i = 0; i < stair.landings.size(); ++i) {
+    // A landing sits where the run before it ends (the next run's base).
+    const double zt =
+        core::stair_run_base(stair, std::min(i + 1, stair.runs.size()));
+    const double t = std::min(0.2, std::max(0.05, zt - stair.z_base));
+    ElementSolid e;
+    e.type = SolidType::stair;
+    e.source_guid = stair.guid;
+    e.element_guid = stair.guid;
+    e.storey = storey.idx;
+    e.predefined = "LANDING";
+    e.part = 100 + static_cast<int>(i);
+    const Ring outer = to_ring(stair.landings[i].outer);
+    std::vector<Ring> holes;
+    for (const auto &hr : stair.landings[i].holes)
+      holes.push_back(to_ring(hr));
+    e.profile.outer = to_plan(clean_ring(outer, true));
+    e.profile.depth = t;
+    e.profile.placement =
+        row_major(T * local_frame(Vec2::Zero(), zt - t, Vec2::UnitX()));
+    auto m = extrude(outer, holes, zt - t, zt);
+    Mesh mesh = m ? std::move(*m) : Mesh{};
+    finish(e, mesh, T);
+    out.push_back(std::move(e));
+  }
+  return out;
+}
+
+std::vector<core::SpacePolygon>
+stair_footprint(const core::StairRecord &stair) {
+  std::size_t not_simple = 0;
+  const EPolygonSet set = ring_set(stair_rings(stair), not_simple);
+  std::vector<EPolygonWithHoles> pwhs;
+  set.polygons_with_holes(std::back_inserter(pwhs));
+  std::vector<core::SpacePolygon> out;
+  for (const auto &pwh : pwhs)
+    if (!pwh.is_unbounded())
+      out.push_back(space_polygon_of(pwh));
+  return out;
+}
+
+std::vector<core::SpacePolygon>
+subtract_polygons(const core::SpacePolygon &outline,
+                  const std::vector<core::SpacePolygon> &cut) {
+  std::size_t not_simple = 0;
+  EPolygonSet set = ring_set({to_ring(outline.outer)}, not_simple);
+  for (const auto &h : outline.holes) {
+    EPolygonSet hs = ring_set({to_ring(h)}, not_simple);
+    set.difference(hs);
+  }
+  for (const auto &c : cut) {
+    EPolygonSet cs = ring_set({to_ring(c.outer)}, not_simple);
+    for (const auto &h : c.holes) {
+      EPolygonSet hs = ring_set({to_ring(h)}, not_simple);
+      cs.difference(hs);
+    }
+    set.difference(cs);
+  }
+  std::vector<EPolygonWithHoles> pwhs;
+  set.polygons_with_holes(std::back_inserter(pwhs));
+  std::vector<core::SpacePolygon> out;
+  for (const auto &pwh : pwhs)
+    if (!pwh.is_unbounded())
+      out.push_back(space_polygon_of(pwh));
+  std::stable_sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+    return core::space_polygon_area(a) > core::space_polygon_area(b);
+  });
+  return out;
 }
 
 SolidsResult build_solids(const core::SolidModel &model_in,

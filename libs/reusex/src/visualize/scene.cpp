@@ -1402,8 +1402,9 @@ void add_solids_layer(vtkRenderer *renderer, const ProjectDB &db,
   const std::array<std::array<std::uint8_t, 3>, 3> reveal_rgb{
       opts.plan_door_rgb, opts.plan_window_rgb, opts.plan_opening_rgb};
   // The category of each mesh's elements (a slab may be a roof).
-  const std::array<const char *, 3> categories{
-      element_category::wall, element_category::slab, element_category::space};
+  const std::array<const char *, 4> categories{
+      element_category::wall, element_category::slab, element_category::space,
+      element_category::stair};
   for (std::size_t k = 0; k < kSolidMeshNames.size(); ++k) {
     const char *name = kSolidMeshNames[k];
     if (!db.has_mesh(name))
@@ -1421,9 +1422,10 @@ void add_solids_layer(vtkRenderer *renderer, const ProjectDB &db,
                  "parameters; re-run `{}`",
                  name, producing_command(Layer::solids));
     }
+    // Stairs (k == 3) share the slabs' colour.
     const auto &base = k == 0   ? opts.solid_wall_rgb
-                       : k == 1 ? opts.solid_slab_rgb
-                                : opts.solid_space_rgb;
+                       : k == 2 ? opts.solid_space_rgb
+                                : opts.solid_slab_rgb;
     // Per-cell colours: the type's, or a reveal's kind.
     const std::vector<int> reveal =
         k == 0 ? solid_reveals(*mesh, meta.parameters) : std::vector<int>{};
@@ -2207,8 +2209,9 @@ double SceneBounds::diagonal() const {
 std::vector<ElementCount> count_building_elements(const ProjectDB &db) {
   std::map<std::pair<std::string, int>, std::size_t> n;
   bool solids = false;
-  const std::array<const char *, 3> categories{
-      element_category::wall, element_category::slab, element_category::space};
+  const std::array<const char *, 4> categories{
+      element_category::wall, element_category::slab, element_category::space,
+      element_category::stair};
   for (std::size_t k = 0; k < kSolidMeshNames.size(); ++k) {
     if (!db.has_mesh(kSolidMeshNames[k]))
       continue;

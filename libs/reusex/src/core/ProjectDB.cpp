@@ -18,6 +18,7 @@
 #include "reusex/core/pose_graph.hpp"
 #include "reusex/core/sloped_ceiling.hpp"
 #include "reusex/core/space_polygon.hpp"
+#include "reusex/core/stairs.hpp"
 
 #include <Eigen/Geometry>
 #include <opencv2/core/mat.hpp>
@@ -458,9 +459,11 @@ class ProjectDB::Impl {
   bool hasStoreyGroundColumn = false;
   /// slabs exists (v44).
   bool hasSlabsTable = false;
+  /// stairs exists (v45).
+  bool hasStairsTable = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 44;
+  static constexpr int LATEST_SCHEMA_VERSION = 45;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -602,6 +605,7 @@ class ProjectDB::Impl {
     hasZonesTable = tableExists("zones") && tableExists("zone_members");
     hasStoreyGroundColumn = columnExists("storeys", "is_ground");
     hasSlabsTable = tableExists("slabs");
+    hasStairsTable = tableExists("stairs");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -961,6 +965,10 @@ class ProjectDB::Impl {
 
     if (current < 44) {
       migrateToV44();
+    }
+
+    if (current < 45) {
+      migrateToV45();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -5006,6 +5014,146 @@ class ProjectDB::Impl {
     hasStoreyGroundColumn = true;
     hasSlabsTable = true;
     reusex::info("Migration to schema version 44 complete");
+  }
+
+  void migrateToV45() {
+    reusex::info("Migrating database to schema version 45");
+    // Rediger editor slice S8 (reusex-xvnl): stairs by run. Runs and
+    // landings are JSON text (core/stairs.hpp); storey / storey_to are
+    // storey idxs (the walls rule). Drawn by hand for now.
+    Savepoint sp(db, "migrate_v45");
+    execOrThrow(R"(
+      CREATE TABLE IF NOT EXISTS stairs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        guid           TEXT    NOT NULL UNIQUE,
+        storey         INTEGER NOT NULL,
+        storey_to      INTEGER NOT NULL DEFAULT -1,
+        kind           TEXT    NOT NULL DEFAULT 'straight'
+          CHECK (kind IN ('straight', 'L', 'U', 'spiral')),
+        location       TEXT    NOT NULL DEFAULT 'centre'
+          CHECK (location IN ('left', 'centre', 'right')),
+        runs           TEXT    NOT NULL,
+        landings       TEXT    NOT NULL DEFAULT '',
+        z_base         REAL    NOT NULL,
+        z_top          REAL    NOT NULL,
+        tread_depth    REAL    NOT NULL DEFAULT -1,
+        nosing         REAL    NOT NULL DEFAULT 0,
+        cut_slab_above INTEGER NOT NULL DEFAULT 1
+          CHECK (cut_slab_above IN (0, 1)),
+        source         TEXT    NOT NULL DEFAULT 'manual'
+          CHECK (source IN ('detected', 'manual', 'imported')),
+        locked         INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+        confidence     REAL    NOT NULL DEFAULT -1,
+        metadata       TEXT    NOT NULL DEFAULT '',
+        created_at     TEXT    NOT NULL
+          DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_stairs_storey ON stairs(storey);
+    )");
+    insertSchemaVersion(45, "Solid model: stairs table (runs, landings)");
+    sp.release();
+    hasStairsTable = true;
+    reusex::info("Migration to schema version 45 complete");
+  }
+
+  // ── Stairs (v45) ─────────────────────────────────────────────────────────
+
+  std::vector<core::StairRecord> listStairs(std::string_view guid) const {
+    std::vector<core::StairRecord> out;
+    if (!hasStairsTable)
+      return out;
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "SELECT id, guid, storey, storey_to, kind, location, runs, landings, "
+        "z_base, z_top, tread_depth, nosing, cut_slab_above, source, locked, "
+        "confidence, metadata FROM stairs WHERE (?1 = '' OR guid = ?1) "
+        "ORDER BY storey, id;",
+        "stairs");
+    StmtGuard guard(s);
+    bind_text(s, 1, guid);
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+      core::StairRecord r;
+      r.id = sqlite3_column_int64(s, 0);
+      r.guid = column_text(s, 1);
+      r.storey = sqlite3_column_int(s, 2);
+      r.storey_to = sqlite3_column_int(s, 3);
+      r.kind = column_text(s, 4);
+      r.location = column_text(s, 5);
+      try {
+        r.runs = core::decode_stair_runs(column_text(s, 6));
+        r.landings = core::decode_stair_landings(column_text(s, 7));
+      } catch (const std::exception &e) {
+        throw std::runtime_error("stair " + r.guid + ": " + e.what());
+      }
+      r.z_base = sqlite3_column_double(s, 8);
+      r.z_top = sqlite3_column_double(s, 9);
+      r.tread_depth = sqlite3_column_double(s, 10);
+      r.nosing = sqlite3_column_double(s, 11);
+      r.cut_slab_above = sqlite3_column_int(s, 12) != 0;
+      r.source = column_text(s, 13);
+      r.locked = sqlite3_column_int(s, 14) != 0;
+      r.confidence = sqlite3_column_double(s, 15);
+      r.metadata = column_text(s, 16);
+      out.push_back(std::move(r));
+    }
+    if (rc != SQLITE_DONE)
+      throw std::runtime_error("stairs: " + std::string(sqlite3_errmsg(db)));
+    return out;
+  }
+
+  void putStairRow(const core::StairRecord &r) {
+    constexpr const char *who = "put_stair_row";
+    checkWritable();
+    if (!hasStairsTable)
+      throw std::runtime_error("put_stair_row: project schema predates v45");
+    if (r.guid.empty())
+      throw std::invalid_argument("put_stair_row: a stair has no guid");
+    checkSource(r.source, std::string(who) + ": stair " + r.guid);
+    if (const auto bad = core::check_stair(r); !bad.empty())
+      throw std::invalid_argument(std::string(who) + ": stair " + r.guid +
+                                  ": " + bad);
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "INSERT INTO stairs (guid, storey, storey_to, kind, location, runs, "
+        "landings, z_base, z_top, tread_depth, nosing, cut_slab_above, "
+        "source, locked, confidence, metadata) VALUES (?1, ?2, ?3, ?4, ?5, "
+        "?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) "
+        "ON CONFLICT (guid) DO UPDATE SET storey = excluded.storey, "
+        "storey_to = excluded.storey_to, kind = excluded.kind, "
+        "location = excluded.location, runs = excluded.runs, "
+        "landings = excluded.landings, z_base = excluded.z_base, "
+        "z_top = excluded.z_top, tread_depth = excluded.tread_depth, "
+        "nosing = excluded.nosing, cut_slab_above = excluded.cut_slab_above, "
+        "source = excluded.source, locked = excluded.locked, "
+        "confidence = excluded.confidence, metadata = excluded.metadata;",
+        who);
+    StmtGuard guard(s);
+    bind_text(s, 1, r.guid);
+    sqlite3_bind_int(s, 2, r.storey);
+    sqlite3_bind_int(s, 3, r.storey_to);
+    bind_text(s, 4, r.kind);
+    bind_text(s, 5, r.location);
+    bind_text(s, 6, core::encode_stair_runs(r.runs));
+    bind_text(s, 7, core::encode_stair_landings(r.landings));
+    sqlite3_bind_double(s, 8, r.z_base);
+    sqlite3_bind_double(s, 9, r.z_top);
+    sqlite3_bind_double(s, 10, r.tread_depth);
+    sqlite3_bind_double(s, 11, r.nosing);
+    sqlite3_bind_int(s, 12, r.cut_slab_above ? 1 : 0);
+    bind_text(s, 13, r.source);
+    sqlite3_bind_int(s, 14, r.locked ? 1 : 0);
+    sqlite3_bind_double(s, 15, r.confidence);
+    bind_text(s, 16, r.metadata);
+    stepDone(s, std::string(who) + ": stair " + r.guid);
+  }
+
+  void deleteStairs() {
+    checkWritable();
+    if (hasStairsTable) {
+      execOrThrow("DELETE FROM stairs;");
+      bumpModelRevision();
+    }
   }
 
   // ── Slabs (v44) ──────────────────────────────────────────────────────────
@@ -11313,6 +11461,31 @@ bool ProjectDB::remove_slab_row(std::string_view guid) {
 }
 
 void ProjectDB::delete_slabs() { impl_->deleteSlabs(); }
+
+std::vector<core::StairRecord> ProjectDB::stairs() const {
+  return impl_->listStairs("");
+}
+
+std::optional<core::StairRecord>
+ProjectDB::stair_by_guid(std::string_view guid) const {
+  if (guid.empty())
+    return std::nullopt;
+  auto all = impl_->listStairs(guid);
+  if (all.empty())
+    return std::nullopt;
+  return std::move(all.front());
+}
+
+void ProjectDB::put_stair_row(const core::StairRecord &stair) {
+  impl_->putStairRow(stair);
+}
+
+bool ProjectDB::remove_stair_row(std::string_view guid) {
+  return impl_->removeRow("stairs", impl_->hasStairsTable, guid,
+                          "remove_stair_row");
+}
+
+void ProjectDB::delete_stairs() { impl_->deleteStairs(); }
 
 void ProjectDB::replace_wall_joins_of(
     std::string_view wall, const std::vector<core::WallJoinRecord> &joins) {
