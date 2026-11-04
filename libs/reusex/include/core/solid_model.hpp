@@ -60,6 +60,9 @@ struct StoreyRecord {
   /// World -> level frame, 4x4 row-major. Identity when not measured.
   std::array<double, 16> level_transform{1, 0, 0, 0, 0, 1, 0, 0,
                                          0, 0, 1, 0, 0, 0, 0, 1};
+  /// The ground (entrance) storey, "stueetage" (schema v44): at most one
+  /// storey of a project; set by hand (storey.update), never detected.
+  bool is_ground = false;
   std::string source = "detected";
   bool locked = false;
   double confidence = -1.0;
@@ -192,6 +195,29 @@ inline constexpr std::array<std::string_view, 13> kOpeningOperations = {
   return std::find(kOpeningOperations.begin(), kOpeningOperations.end(), v) !=
          kOpeningOperations.end();
 }
+
+/// A floor, ceiling or roof slab (reusex-d5us, schema v44): its outline in
+/// plan and its top, extruded down by its thickness. The solids stage
+/// writes one detected row per slab piece it derives (floor per storey and
+/// level, roof over the top storey); a row edited or drawn by hand is
+/// locked, survives re-runs and is built from its fields instead.
+struct SlabRecord {
+  int64_t id = -1;
+  std::string guid;
+  int storey = 0;             ///< StoreyRecord::idx
+  std::string kind = "floor"; ///< floor | ceiling | roof
+  SpacePolygon outline;       ///< in the storey's level frame
+  double z_top = 0.0;         ///< level frame [m]
+  double thickness = 0.20;    ///< > 0 [m]; the slab is [z_top - t, z_top]
+  /// Sloped top (a roof over sloped ceilings): the top at (x, y) is the
+  /// lowest of z_top and these planes, as core::ceiling_at() for a space.
+  /// Empty: flat at z_top.
+  std::vector<CeilingPlane> top_planes;
+  std::string source = "detected";
+  bool locked = false;
+  double confidence = -1.0;
+  std::string metadata;
+};
 
 /// A zone: a named group of spaces on one or more storeys (a dwelling, a
 /// fire cell, a use; IfcZone). Drawn by hand in the Rediger editor

@@ -233,6 +233,7 @@ bool stored_solids(const ProjectDB &db, std::string_view name,
       s.storey = e.value("storey", 0);
       s.predefined = e.value("predefined", "");
       s.part = e.value("part", 0);
+      s.element_guid = e.value("element_guid", "");
       s.closed = e.value("closed", false);
       s.volume = e.value("volume", 0.0);
       if (e.contains("profile"))
@@ -425,7 +426,9 @@ void gather_typed_elements(const ProjectDB &db, ExportScene &scene,
     p["part"] = std::to_string(s.part);
     if (s.closed)
       p["volume"] = num(s.volume);
-    add(roof ? "roof" : "slab", slab_guid(s.source_guid, s.predefined, s.part),
+    add(roof ? "roof" : "slab",
+        s.element_guid.empty() ? slab_guid(s.source_guid, s.predefined, s.part)
+                               : s.element_guid,
         "", s.storey, s.mesh, std::move(p));
   }
 

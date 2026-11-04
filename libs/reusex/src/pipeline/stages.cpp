@@ -1865,6 +1865,8 @@ concat_solids(const std::vector<geometry::ElementSolid> &elements,
                   {"profile", profile_json(e.profile)},
                   {"voids", std::move(voids)},
                   {"voids_failed", e.voids_failed}};
+    if (!e.element_guid.empty())
+      entry["element_guid"] = e.element_guid;
     // Sloped ceilings / wall tops (reusex-546), only when there are any.
     if (!e.clip_planes.empty())
       entry["clip_planes"] = e.clip_planes;
@@ -1874,6 +1876,98 @@ concat_solids(const std::vector<geometry::ElementSolid> &elements,
   }
   pcl::toPCLPointCloud2(all, out.cloud);
   return out;
+}
+
+/// A slab piece's guid (= io/export_scene.cpp slab_guid(), ruxd GET
+/// /slabs): uuid5 of "slab/<predefined>/<part>" in its storey's namespace.
+std::string derived_slab_guid(const std::string &storey_guid,
+                              const std::string &predefined, int part) {
+  const std::string name = fmt::format(
+      "slab/{}/{}", predefined.empty() ? "FLOOR" : predefined, part);
+  try {
+    return core::deterministic_guid(storey_guid, name);
+  } catch (const std::invalid_argument &) {
+    return storey_guid + "/" + name;
+  }
+}
+
+/// Slab rows (schema v44, reusex-d5us): write the derived pieces as
+/// detected rows (locked rows and tombstones kept by save_slabs), then
+/// build what the rows say: a tombstoned piece is dropped, an edited one
+/// is built from its row, a row drawn by hand is added. Every slab solid
+/// carries its row guid (element_guid). @returns a note for the summary.
+std::string slab_rows(ProjectDB &db, const core::SolidModel &model,
+                      std::vector<geometry::ElementSolid> &slabs) {
+  std::map<int, const core::StoreyRecord *> storeys;
+  for (const auto &s : model.storeys)
+    storeys[s.idx] = &s;
+  std::vector<core::SlabRecord> derived;
+  for (auto &e : slabs) {
+    const auto it = storeys.find(e.storey);
+    if (it == storeys.end())
+      continue;
+    const auto &st = *it->second;
+    e.element_guid = derived_slab_guid(st.guid, e.predefined, e.part);
+    // The profile is in the storey's level frame by construction (local
+    // frame = level x / y at the slab's bottom).
+    core::SlabRecord row;
+    row.guid = e.element_guid;
+    row.storey = st.idx;
+    row.kind = e.predefined == "ROOF" ? "roof" : "floor";
+    row.outline.outer = e.profile.outer;
+    row.outline.holes = e.profile.holes;
+    const auto T = geometry::LevelFrame::from_record(st);
+    const auto &m = e.profile.placement;
+    const Eigen::Vector3d world_bottom(m[3], m[7], m[11]);
+    const double z_bottom = T.to_level(world_bottom).z();
+    row.thickness = e.profile.depth;
+    row.z_top = z_bottom + e.profile.depth;
+    row.confidence = -1.0;
+    derived.push_back(std::move(row));
+  }
+  db.save_slabs(derived);
+  const auto holds = core::model_holds(db, core::ModelElementKind::slab);
+  std::map<std::string, core::SlabRecord> rows;
+  for (auto &row : db.slabs())
+    rows.emplace(row.guid, std::move(row));
+  size_t dropped = 0, rebuilt = 0, drawn = 0;
+  std::set<std::string> seen;
+  std::vector<geometry::ElementSolid> out;
+  for (auto &e : slabs) {
+    seen.insert(e.element_guid);
+    if (holds.dismissed.count(e.element_guid)) {
+      ++dropped;
+      continue;
+    }
+    const auto it = rows.find(e.element_guid);
+    if (it != rows.end() && holds.edited.count(e.element_guid)) {
+      const auto st = storeys.find(it->second.storey);
+      if (st != storeys.end()) {
+        out.push_back(geometry::slab_solid(it->second, *st->second));
+        out.back().part = e.part;
+        ++rebuilt;
+        continue;
+      }
+    }
+    out.push_back(std::move(e));
+  }
+  for (const auto &[guid, row] : rows) {
+    if (seen.count(guid) || !row.locked)
+      continue;
+    const auto st = storeys.find(row.storey);
+    if (st == storeys.end()) {
+      warn("solids: slab {} names storey {}, which is not stored; not built",
+           guid, row.storey);
+      continue;
+    }
+    out.push_back(geometry::slab_solid(row, *st->second));
+    out.back().part = 1000 + static_cast<int>(drawn);
+    ++drawn;
+  }
+  slabs = std::move(out);
+  return fmt::format("; slab rows: {} derived, {} edited, {} drawn, {} "
+                     "deleted",
+                     derived.size(), rebuilt, drawn, dropped);
 }
 
 /// `solids` (W6.1, reusex-z1v.8.1): the typed model (storeys, walls,
@@ -1899,7 +1993,8 @@ StageResult run_solids(ProjectDB &db, const json &params) {
     warn("solids: no spaces table (run `rux create spaces` first): no space "
          "volumes, and each storey's slab is the hull of its walls");
 
-  const auto r = geometry::build_solids(model, so.solids);
+  auto r = geometry::build_solids(model, so.solids);
+  const std::string slab_note = slab_rows(db, model, r.slabs);
   if (r.openings_failed > 0)
     warn("solids: {} of {} opening(s) could not be subtracted from their wall "
          "(the corefinement failed); those walls are left uncut there",
@@ -1959,10 +2054,10 @@ StageResult run_solids(ProjectDB &db, const json &params) {
   return StageResult::success(
       fmt::format("{} wall solid(s) ({:.1f} m3; {} opening(s) cut, {} "
                   "failed, {} skipped), {} slab(s), {} space volume(s); {} "
-                  "not closed",
+                  "not closed{}",
                   r.walls.size(), wall_volume, r.openings_cut,
                   r.openings_failed, r.openings_skipped, r.slabs.size(),
-                  r.spaces.size(), r.not_closed),
+                  r.spaces.size(), r.not_closed, slab_note),
       std::move(outputs));
 }
 

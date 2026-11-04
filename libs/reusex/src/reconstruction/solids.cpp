@@ -1507,6 +1507,46 @@ std::optional<core::SolidModel> with_eave_walls(const core::SolidModel &model) {
 
 } // namespace
 
+ElementSolid slab_solid(const core::SlabRecord &slab,
+                        const core::StoreyRecord &storey) {
+  core::SolidModel one;
+  one.storeys = {storey};
+  const Frames frames = make_frames(one);
+  const Eigen::Affine3d &T = frames.of(storey.idx);
+  ElementSolid e;
+  e.type = SolidType::slab;
+  e.source_guid = storey.guid;
+  e.element_guid = slab.guid;
+  e.storey = storey.idx;
+  e.predefined = slab.kind == "roof" ? "ROOF" : "FLOOR";
+  e.part = 0;
+  const Ring outer = to_ring(slab.outline.outer);
+  std::vector<Ring> holes;
+  for (const auto &h : slab.outline.holes)
+    holes.push_back(to_ring(h));
+  const double z0 = slab.z_top - slab.thickness;
+  e.profile.outer = to_plan(clean_ring(outer, true));
+  for (const auto &h : holes)
+    e.profile.holes.push_back(to_plan(clean_ring(h, false)));
+  e.profile.depth = slab.thickness;
+  e.profile.placement =
+      row_major(T * local_frame(Vec2::Zero(), z0, Vec2::UnitX()));
+  auto m = extrude(outer, holes, z0, slab.z_top);
+  Mesh mesh = m ? std::move(*m) : Mesh{};
+  if (!m)
+    warn("solids: slab {} has a degenerate outline or thickness; no solid",
+         slab.guid);
+  if (m && !slab.top_planes.empty() &&
+      !clip_below(mesh, slab.top_planes, 0.0)) {
+    warn("solids: slab {}: clipping its top by its {} plane(s) failed; it "
+         "is left flat at z_top",
+         slab.guid, slab.top_planes.size());
+    mesh = std::move(*extrude(outer, holes, z0, slab.z_top));
+  }
+  finish(e, mesh, T);
+  return e;
+}
+
 SolidsResult build_solids(const core::SolidModel &model_in,
                           const SolidsOptions &opts) {
   // Eaves with no wall get one (reusex-wyi0).

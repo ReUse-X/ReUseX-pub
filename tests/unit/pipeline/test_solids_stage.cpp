@@ -229,3 +229,75 @@ TEST_CASE("SolidsStage_RecordsTheModelRevision", "[pipeline][solids]") {
   for (auto name : {kSolidWallsMesh, kSolidSlabsMesh, kSolidSpacesMesh})
     CHECK(stored(name) != db.model_revision());
 }
+
+TEST_CASE("SolidsStage_SlabRows_DerivedEditedDeletedDrawn",
+          "[pipeline][solids][slabs]") {
+  TempPath project("test_solids_stage_slab_rows");
+  ProjectDB db(project.path);
+  store(db, two_rooms());
+  REQUIRE(run(db, project).ok);
+  const auto index = [&]() {
+    return json::parse(db.mesh_metadata(kSolidSlabsMesh).parameters)
+        .at("elements");
+  };
+  // The derived floor and roof, as rows whose guids the index carries.
+  auto rows = db.slabs();
+  REQUIRE(rows.size() == 2);
+  REQUIRE(index().size() == 2);
+  std::string floor, roof;
+  for (const auto &e : index()) {
+    const auto g = e.at("element_guid").get<std::string>();
+    REQUIRE(db.slab_by_guid(g));
+    (e.at("predefined") == "ROOF" ? roof : floor) = g;
+  }
+  const auto f = *db.slab_by_guid(floor);
+  CHECK(f.kind == "floor");
+  CHECK(f.source == "detected");
+  CHECK_FALSE(f.locked);
+  CHECK(f.outline.outer.size() >= 4);
+  CHECK(f.thickness > 0.0);
+  CHECK(db.slab_by_guid(roof)->kind == "roof");
+
+  // Edit the floor (thicker), delete the roof, draw a slab: the re-run
+  // builds what the rows say and keeps the edits.
+  core::apply_model_edit(
+      db, core::model_edit_ops_from_json(
+              db, json::array(
+                      {{{"op", "slab.update"},
+                        {"guid", floor},
+                        {"set", {{"thickness", 0.4}}}},
+                       {{"op", "slab.delete"}, {"guid", roof}},
+                       {{"op", "slab.create"},
+                        {"record",
+                         {{"guid", "drawn-slab"},
+                          {"storey", 0},
+                          {"kind", "floor"},
+                          {"outline",
+                           {{"outer", {{10, 0}, {12, 0}, {12, 2}, {10, 2}}}}},
+                          {"z_top", 0.0},
+                          {"thickness", 0.2}}}}})));
+  const auto r = run(db, project);
+  INFO(r.message);
+  REQUIRE(r.ok);
+  const auto els = index();
+  REQUIRE(els.size() == 2);
+  bool saw_floor = false, saw_drawn = false;
+  for (const auto &e : els) {
+    const auto g = e.at("element_guid").get<std::string>();
+    CHECK(g != roof);
+    if (g == floor) {
+      saw_floor = true;
+      CHECK_THAT(e.at("profile").at("depth").get<double>(),
+                 WithinAbs(0.4, 1e-9));
+      CHECK(e.at("closed").get<bool>());
+    }
+    if (g == "drawn-slab") {
+      saw_drawn = true;
+      CHECK_THAT(e.at("volume").get<double>(), WithinAbs(0.8, 1e-6));
+    }
+  }
+  CHECK(saw_floor);
+  CHECK(saw_drawn);
+  CHECK(db.slab_by_guid(floor)->thickness == 0.4);
+  CHECK_FALSE(db.slab_by_guid(roof));
+}

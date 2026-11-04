@@ -871,7 +871,7 @@ corner or tee run on to the far face of the wall they meet.
 |---|---|
 | Consumes | `walls`, `storeys` |
 | Optional | `openings` (cut out of the walls), `spaces` (space volumes; the slab outline) |
-| Produces | `solid_walls`, `solid_slabs`, `solid_spaces` (`meshes` table; no schema change) |
+| Produces | `solid_walls`, `solid_slabs`, `solid_spaces` (`meshes` table); `slabs` rows (schema v44) |
 | Options  | `SolidsOptions` (`libs/reusex/include/reconstruction/solids.hpp`), parameter keys are its field names. One table, `pipeline::solid_parameter_table()`, defines the keys, the CLI flags and their bounds |
 | Checks   | ≥1 wall; ≥1 storey |
 
@@ -885,7 +885,8 @@ space's or -- for a slab -- storey's GUID), `type`, `storey`, `predefined`
 (wall `STANDARD`, slab `FLOOR` / `ROOF`, space its kind), `part` (slab piece,
 largest first), `closed` (`CGAL::is_closed`), `volume`, `faces` / `vertices`
 (`[first, count]` in the mesh), `profile` (`outer`, `holes`, `depth`,
-`placement`: the IFC-ready extrusion, local -> world, 4x4 row-major) and, for a
+`placement`: the IFC-ready extrusion, local -> world, 4x4 row-major), for a
+slab `element_guid` (its `slabs` row), and, for a
 wall, `voids` (each opening cut: `guid`, `kind`, `profile`) and
 `voids_failed`; a space with a sloped ceiling also has `clip_planes` (world
 `[a, b, c, d]`, the kept side a x + b y + c z + d <= 0) and a wall with a
@@ -893,6 +894,19 @@ sloped top `top` (`[x, z]` in its profile's placement frame); their
 `profile` is then the bounding extrusion. A type with no element leaves no mesh (a stale one is
 deleted). The `solids` render layer and the Qt 3D workspace's "Solider
 (typede)" row draw the three meshes.
+
+**Slab rows** (schema v44, reusex-d5us): every derived slab piece is
+written to `slabs` as a detected row (guid = uuid5 of
+`slab/<FLOOR|ROOF>/<part>` in its storey's guid, as the typed export and
+ruxd `GET /slabs` name it; outline and z_top in the storey's level frame,
+thickness = the extrusion depth) through `save_slabs`, which replaces the
+unlocked rows, keeps the locked ones and skips tombstoned guids. The mesh
+then follows the rows: a tombstoned piece is left out, an edited (locked)
+row is built from its fields (`reconstruction::slab_solid`: outline minus
+holes extruded down from z_top by its thickness, the top clipped by
+`top_planes`), and a locked row with no derived piece (drawn by hand) is
+added (part 1000 + k). Unedited pieces keep the derived solid (a sloped
+roof stays sloped; its row is the bounding flat extrusion).
 
 ### `mesh` (`rux create mesh`)
 
@@ -1157,6 +1171,24 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   the name with " (k)"; refused unless the segment cuts it in two). Each
   returns a preview with metrics and boundaries re-measured, and `*_ops()`
   makes it one batch.
+- **Slabs and storeys** (schema v44, reusex-d5us): kind `slab`
+  (`slab.create` / `update` / `delete` / `revert`; record `storey`, `kind`
+  floor | ceiling | roof, `outline` {outer, holes} (holes: stair openings,
+  shafts), `z_top`, `thickness` > 0, `top_planes`); a deleted derived slab
+  is tombstoned, so the solids stage leaves it out. `storeys.is_ground`
+  (`StoreyRecord::is_ground`, set by `storey.update`): at most one storey;
+  setting it clears it on the other (logged in the same batch). Storey
+  ops: a `storey.delete` is refused while walls, spaces or slabs remain on
+  it after the batch; `storey.split` (`guid`, `z` level height, optional
+  `new_guid` / `name`) makes a storey above at `z` (idx + 1, same level
+  frame), moves the storeys above up one idx and the storey's walls /
+  spaces / slabs whose base is at or above `z` onto the new one;
+  `storey.merge` (`guids: [a, b]`, adjacent, same level frame) gives a both
+  height ranges and b's elements and removes b, the storeys above moving
+  down one idx. Renumbering and moving elements are exact puts (the rows
+  keep their source and lock); only the split / merged storeys are marked
+  edited. Moving one element to another storey is a `*.update` of its
+  `storey` (ruxd keeps its world position across level frames).
 - **Zones** (schema v43, reusex-pccw): `zones` (guid, name, use, source,
   locked, confidence, metadata) and `zone_members` (zone row -> space
   *guid*, ordered; no foreign key to `spaces`, so a spaces re-run that

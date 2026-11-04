@@ -1079,6 +1079,25 @@ class ProjectDB {
   /// Delete every zone (an explicit user action); raises model_revision().
   void delete_zones();
 
+  // --- Slabs (schema v44, reusex-d5us) ---
+
+  /// Every slab row, storey ascending, then row id. Empty before v44.
+  std::vector<core::SlabRecord> slabs() const;
+  std::optional<core::SlabRecord> slab_by_guid(std::string_view guid) const;
+  /// The solids stage's writer: every unlocked row is replaced by @p slabs;
+  /// a locked row keeps its guid (the record with that guid is skipped), a
+  /// tombstoned guid is not written. Raises model_revision().
+  /// @throws std::invalid_argument for an empty or repeated guid, a kind
+  ///         other than floor | ceiling | roof, a thickness <= 0, a bad
+  ///         outline or top plane; std::runtime_error before v44.
+  size_t save_slabs(const std::vector<core::SlabRecord> &slabs,
+                    int run_id = -1);
+  /// One row exactly as given (see put_*_row above).
+  void put_slab_row(const core::SlabRecord &slab);
+  bool remove_slab_row(std::string_view guid);
+  /// Delete every slab row (locked ones included); raises model_revision().
+  void delete_slabs();
+
   /// A deleted (dismissed) solid-model element's tombstone
   /// (model_dismissed, schema v41): the walls / openings / spaces detection
   /// stages do not write a record with its guid, and match re-detected
