@@ -227,3 +227,120 @@ TEST_CASE("FitCeilingPlane_SlopedCeilingWithClutter",
   CHECK_FALSE(r3.ok);
   CHECK(r3.reason.find("point") != std::string::npos);
 }
+
+// --- Room tools of the Rediger editor's slice S6 (reusex-pccw) ---------------
+
+TEST_CASE("PlaceSpace_ClickInAClosedArea_GivesThatRoom",
+          "[segmentation][model_edit_geometry]") {
+  const auto walls = box_walls();
+  // The right room: nothing stored there yet.
+  const auto r = segmentation::place_space_at(
+      walls, {stored_space("kitchen", 0.1, 2.9, "Køkken")}, storey(), kProject,
+      {4.5, 2.0});
+  INFO(r.reason);
+  REQUIRE(r.ok);
+  CHECK_FALSE(r.existing);
+  CHECK(r.space.guid.size() == 36);
+  CHECK(r.space.storey == 0);
+  CHECK_THAT(r.space.area, WithinAbs(2.85 * 3.8, 1e-6));
+  std::set<std::string> ws;
+  for (const auto &b : r.boundaries) {
+    CHECK(b.space == r.space.guid);
+    ws.insert(b.wall);
+  }
+  CHECK(ws == std::set<std::string>{"s", "e", "n", "p"});
+  const auto ops = segmentation::place_space_ops(r);
+  REQUIRE(ops.size() == 1);
+  CHECK(ops[0].boundaries);
+
+  // A click in the stored room re-fits that room to its walls.
+  const auto again = segmentation::place_space_at(
+      walls, {stored_space("kitchen", 0.5, 2.0, "Køkken")}, storey(), kProject,
+      {1.0, 1.0});
+  REQUIRE(again.ok);
+  CHECK(again.existing);
+  CHECK(again.space.guid == "kitchen");
+  CHECK(again.space.name == "Køkken");
+
+  // In a wall body, or outside the walls: no room.
+  CHECK_FALSE(
+      segmentation::place_space_at(walls, {}, storey(), kProject, {3.0, 2.0})
+          .ok);
+  const auto outside =
+      segmentation::place_space_at(walls, {}, storey(), kProject, {20.0, 2.0});
+  CHECK_FALSE(outside.ok);
+  CHECK_FALSE(outside.reason.empty());
+}
+
+TEST_CASE("MergeSpaces_AcrossTheirPartition_OneRoomTheOtherRemoved",
+          "[segmentation][model_edit_geometry]") {
+  const auto walls = box_walls();
+  const auto rebuilt =
+      segmentation::rebuild_spaces_from_walls(walls, {}, storey(), kProject);
+  REQUIRE(rebuilt.spaces.size() == 2);
+  auto a = rebuilt.spaces[0];
+  auto b = rebuilt.spaces[1];
+  if (a.polygon.outer[0][0] > b.polygon.outer[0][0])
+    std::swap(a, b);
+  a.name = "Stue";
+  const auto r = segmentation::merge_spaces(a, b, walls);
+  INFO(r.reason);
+  REQUIRE(r.ok);
+  CHECK(r.space.guid == a.guid);
+  CHECK(r.space.name == "Stue");
+  CHECK(r.removed == b.guid);
+  CHECK(r.bridged_walls == std::vector<std::string>{"p"});
+  // Both rooms plus the partition's 0.1 x 3.8 m.
+  CHECK_THAT(r.space.area, WithinAbs(2 * 2.85 * 3.8 + 0.1 * 3.8, 1e-6));
+  CHECK(r.space.polygon.outer.size() == 4); // a clean rectangle
+  CHECK(r.space.polygon.holes.empty());
+  for (const auto &bd : r.boundaries)
+    CHECK(bd.wall != "p");
+  const auto ops = segmentation::merge_spaces_ops(r);
+  REQUIRE(ops.size() == 2);
+  CHECK(ops[1].action == core::ModelEditOp::Action::remove);
+
+  // Two rooms apart (another room between them): refused.
+  auto far = b;
+  for (auto &p : far.polygon.outer)
+    p[0] += 10.0;
+  const auto no = segmentation::merge_spaces(a, far, walls);
+  CHECK_FALSE(no.ok);
+  CHECK_FALSE(no.reason.empty());
+}
+
+TEST_CASE("SplitSpace_ByALine_TwoRoomsWithBoundaries",
+          "[segmentation][model_edit_geometry]") {
+  auto walls = box_walls();
+  walls.pop_back(); // no partition: one 5.8 x 3.8 room
+  const auto rebuilt =
+      segmentation::rebuild_spaces_from_walls(walls, {}, storey(), kProject);
+  REQUIRE(rebuilt.spaces.size() == 1);
+  auto s = rebuilt.spaces[0];
+  s.name = "Stue";
+  // A line across the room at x = 2 (drawn from just inside the faces).
+  const auto r = segmentation::split_space(s, {2.0, 0.12}, {2.0, 3.88}, walls,
+                                           kProject, {s.guid});
+  INFO(r.reason);
+  REQUIRE(r.ok);
+  REQUIRE(r.spaces.size() == 2);
+  CHECK(r.spaces[0].guid == s.guid); // the larger keeps the guid
+  CHECK(r.spaces[0].name == "Stue");
+  CHECK_THAT(r.spaces[0].area, WithinAbs(3.9 * 3.8, 1e-6));
+  CHECK_THAT(r.spaces[1].area, WithinAbs(1.9 * 3.8, 1e-6));
+  CHECK(r.spaces[1].guid != s.guid);
+  CHECK(r.spaces[1].guid.size() == 36);
+  CHECK(r.spaces[1].kind == s.kind);
+  std::set<std::string> small;
+  for (const auto &b : r.boundaries)
+    if (b.space == r.spaces[1].guid)
+      small.insert(b.wall);
+  CHECK(small == std::set<std::string>{"s", "n", "w"});
+  CHECK(segmentation::split_space_ops(r).size() == 2);
+
+  // A line that does not cross the room: refused.
+  const auto no = segmentation::split_space(s, {2.0, 1.0}, {2.0, 2.0}, walls,
+                                            kProject, {s.guid});
+  CHECK_FALSE(no.ok);
+  CHECK_FALSE(no.reason.empty());
+}

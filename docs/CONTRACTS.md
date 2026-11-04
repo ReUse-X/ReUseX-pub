@@ -1076,7 +1076,7 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
 
 | | |
 |---|---|
-| Consumes | `storeys`, `walls`, `wall_joins`, `openings`, `spaces`, `space_boundaries`, `model_dismissed`, `model_edits`, project setting `model.revision` |
+| Consumes | `storeys`, `walls`, `wall_joins`, `openings`, `spaces`, `space_boundaries`, `zones`, `zone_members`, `model_dismissed`, `model_edits`, project setting `model.revision` |
 | Produces | the edited rows; `model_dismissed` (one tombstone per deleted detected / imported element: kind, guid, the record as detected); one `model_edits` row per batch (label, author, the revision it produced, every touched row's state before and after); `model.revision` + 1 |
 | Checks   | a batch's `base_revision`, when given, is the current revision (ModelEditConflict otherwise, ruxd 409); remove / revert name a stored row (revert: or a tombstone); records pass the whole-run writers' checks; undo / redo find every touched row as the edit (or its undo) left it |
 
@@ -1142,7 +1142,32 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   the walls do not close is kept unless the caller asks to remove it;
   preview, then `rebuild_spaces_ops()`), `fit_ceiling_plane` (least squares over the
   cloud's points in a plan region and height band, trimmed to 5 cm; the
-  client sends the plane back as `ceiling.set`).
+  client sends the plane back as `ceiling.set`), and the room tools
+  (reusex-pccw): `place_space_at` (the room `rebuild_spaces_from_walls`
+  finds around a clicked point; a stored space it overlaps hands over its
+  guid, so the click re-fits it), `merge_spaces` (b joined into a across
+  the bodies of the walls they bound from opposite sides, overlapping at
+  least 0.1 m along them; a keeps its guid and fields, b is removed;
+  refused unless the union is one polygon), `split_space` (cut along a
+  segment, extended 5 cm each way; the largest piece keeps the guid, the
+  others get `deterministic_guid(project, "spaces/split/<guid>/<k>")` and
+  the name with " (k)"; refused unless the segment cuts it in two). Each
+  returns a preview with metrics and boundaries re-measured, and `*_ops()`
+  makes it one batch.
+- **Zones** (schema v43, reusex-pccw): `zones` (guid, name, use, source,
+  locked, confidence, metadata) and `zone_members` (zone row -> space
+  *guid*, ordered; no foreign key to `spaces`, so a spaces re-run that
+  gives a space back under its guid keeps its zones). Edited as kind
+  `zone` (`zone.create` / `zone.update` / `zone.delete` / `zone.revert`,
+  record `{name, use, spaces: [space guid, ...]}`); every member must be a
+  stored space once the batch's earlier ops are applied, at most once. A
+  space removed by any writer (`remove_space_row`, `save_spaces`,
+  `delete_spaces`, an import) leaves every zone; a space removed by a batch
+  logs each zone it left as updated, so undo puts it back. No stage
+  detects zones and a removed zone leaves no tombstone. Area, volume and
+  storeys come from the members (`core::zone_measures()`,
+  `core/zones.hpp`). `model_dismissed.kind` also takes `zone`, `slab` and
+  `stair` from v43.
 
 ### Editor write: segment resource (web GUI, POST /frames/{id}/segment/resource)
 

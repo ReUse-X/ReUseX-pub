@@ -11,7 +11,11 @@
 
 #include <CGAL/Arr_segment_traits_2.h>
 #include <CGAL/Arrangement_2.h>
+#include <CGAL/Boolean_set_operations_2.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Polygon_2.h>
+#include <CGAL/Polygon_set_2.h>
+#include <CGAL/Polygon_with_holes_2.h>
 
 #include <Eigen/Dense>
 #include <fmt/format.h>
@@ -19,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iterator>
 #include <map>
 #include <numbers>
 #include <optional>
@@ -172,6 +177,75 @@ void fill_metrics(core::SpaceRecord &s) {
                                     : -1.0;
 }
 
+/// The stretches of @p walls' faces the edges of @p s lie on (within
+/// @p tolerance_m, parallel), one boundary per (wall, side).
+std::vector<core::SpaceBoundaryRecord>
+find_boundaries(const core::SpaceRecord &s, const std::vector<WallGeom> &walls,
+                double tolerance_m) {
+  std::vector<core::SpaceBoundaryRecord> out;
+  std::map<std::pair<std::string, std::string>, std::pair<double, double>> hull;
+  const auto edges = [&](const Ring &r) {
+    for (size_t i = 0; i < r.size(); ++i) {
+      const V a{r[i][0], r[i][1]};
+      const V b{r[(i + 1) % r.size()][0], r[(i + 1) % r.size()][1]};
+      const double el = std::hypot(b[0] - a[0], b[1] - a[1]);
+      if (el < 1e-6)
+        continue;
+      const V ed{(b[0] - a[0]) / el, (b[1] - a[1]) / el};
+      const V mid{0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])};
+      for (const auto &g : walls) {
+        if (std::abs(ed[0] * g.n[0] + ed[1] * g.n[1]) > 0.01)
+          continue; // not parallel
+        const auto off_of = [&](V p) {
+          return (p[0] - g.p0[0]) * g.n[0] + (p[1] - g.p0[1]) * g.n[1];
+        };
+        const double oa = off_of(a), ob = off_of(b);
+        std::string side;
+        for (const double face : {g.half, -g.half}) {
+          if (std::abs(oa - face) <= tolerance_m &&
+              std::abs(ob - face) <= tolerance_m) {
+            // The space is on the far side of the face from the axis; a
+            // one-sided wall: the side its interior lies on.
+            double sgn = face;
+            if (g.half <= 0.0) {
+              const V in{mid[0] - 1e-3 * ed[1], mid[1] + 1e-3 * ed[0]};
+              const V probe =
+                  in_polygon(s.polygon, in[0], in[1])
+                      ? in
+                      : V{mid[0] + 1e-3 * ed[1], mid[1] - 1e-3 * ed[0]};
+              sgn = off_of(probe);
+            }
+            side = sgn >= 0.0 ? "a" : "b";
+            break;
+          }
+        }
+        if (side.empty())
+          continue;
+        const auto s_of = [&](V p) {
+          return (p[0] - g.p0[0]) * g.d[0] + (p[1] - g.p0[1]) * g.d[1];
+        };
+        double s0 = std::clamp(std::min(s_of(a), s_of(b)), 0.0, g.len);
+        double s1 = std::clamp(std::max(s_of(a), s_of(b)), 0.0, g.len);
+        if (s1 - s0 < 1e-3)
+          continue;
+        const auto key = std::make_pair(g.w->guid, side);
+        if (auto it = hull.find(key); it != hull.end()) {
+          it->second.first = std::min(it->second.first, s0);
+          it->second.second = std::max(it->second.second, s1);
+        } else {
+          hull.emplace(key, std::make_pair(s0, s1));
+        }
+      }
+    }
+  };
+  edges(s.polygon.outer);
+  for (const auto &h : s.polygon.holes)
+    edges(h);
+  for (const auto &[key, range] : hull)
+    out.push_back({s.guid, key.first, key.second, range.first, range.second});
+  return out;
+}
+
 } // namespace
 
 RebuildSpacesResult
@@ -314,68 +388,8 @@ rebuild_spaces_from_walls(const std::vector<core::WallRecord> &walls_in,
 
   // 4. Boundaries: polygon edges on a wall face.
   for (const auto &s : res.spaces) {
-    std::map<std::pair<std::string, std::string>, std::pair<double, double>>
-        hull;
-    const auto edges = [&](const Ring &r) {
-      for (size_t i = 0; i < r.size(); ++i) {
-        const V a{r[i][0], r[i][1]};
-        const V b{r[(i + 1) % r.size()][0], r[(i + 1) % r.size()][1]};
-        const double el = std::hypot(b[0] - a[0], b[1] - a[1]);
-        if (el < 1e-6)
-          continue;
-        const V ed{(b[0] - a[0]) / el, (b[1] - a[1]) / el};
-        const V mid{0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])};
-        for (const auto &g : walls) {
-          if (std::abs(ed[0] * g.n[0] + ed[1] * g.n[1]) > 0.01)
-            continue; // not parallel
-          const auto off_of = [&](V p) {
-            return (p[0] - g.p0[0]) * g.n[0] + (p[1] - g.p0[1]) * g.n[1];
-          };
-          const double oa = off_of(a), ob = off_of(b);
-          std::string side;
-          for (const double face : {g.half, -g.half}) {
-            if (std::abs(oa - face) <= opt.boundary_tolerance_m &&
-                std::abs(ob - face) <= opt.boundary_tolerance_m) {
-              // The space is on the far side of the face from the axis; a
-              // one-sided wall: the side its interior lies on.
-              double sgn = face;
-              if (g.half <= 0.0) {
-                const V in{mid[0] - 1e-3 * ed[1], mid[1] + 1e-3 * ed[0]};
-                const V probe =
-                    in_polygon(s.polygon, in[0], in[1])
-                        ? in
-                        : V{mid[0] + 1e-3 * ed[1], mid[1] - 1e-3 * ed[0]};
-                sgn = off_of(probe);
-              }
-              side = sgn >= 0.0 ? "a" : "b";
-              break;
-            }
-          }
-          if (side.empty())
-            continue;
-          const auto s_of = [&](V p) {
-            return (p[0] - g.p0[0]) * g.d[0] + (p[1] - g.p0[1]) * g.d[1];
-          };
-          double s0 = std::clamp(std::min(s_of(a), s_of(b)), 0.0, g.len);
-          double s1 = std::clamp(std::max(s_of(a), s_of(b)), 0.0, g.len);
-          if (s1 - s0 < 1e-3)
-            continue;
-          const auto key = std::make_pair(g.w->guid, side);
-          if (auto it = hull.find(key); it != hull.end()) {
-            it->second.first = std::min(it->second.first, s0);
-            it->second.second = std::max(it->second.second, s1);
-          } else {
-            hull.emplace(key, std::make_pair(s0, s1));
-          }
-        }
-      }
-    };
-    edges(s.polygon.outer);
-    for (const auto &h : s.polygon.holes)
-      edges(h);
-    for (const auto &[key, range] : hull)
-      res.boundaries.push_back(
-          {s.guid, key.first, key.second, range.first, range.second});
+    auto bs = find_boundaries(s, walls, opt.boundary_tolerance_m);
+    res.boundaries.insert(res.boundaries.end(), bs.begin(), bs.end());
   }
 
   if (res.spaces.empty())
@@ -507,6 +521,348 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
   }
   r.ok = true;
   return r;
+}
+
+// --- Room tools (reusex-pccw)
+// -------------------------------------------------
+
+namespace {
+
+using Polygon2 = CGAL::Polygon_2<K>;
+using PolygonH = CGAL::Polygon_with_holes_2<K>;
+using PolySet = CGAL::Polygon_set_2<K>;
+
+std::vector<WallGeom> storey_walls(const std::vector<core::WallRecord> &walls,
+                                   int storey) {
+  std::vector<WallGeom> out;
+  for (const auto &w : walls)
+    if (w.storey == storey && std::hypot(w.x1 - w.x0, w.y1 - w.y0) > 1e-6)
+      out.push_back(geom_of(w));
+  return out;
+}
+
+/// Drop vertices within @p eps of the line through their neighbours
+/// (collinear runs, the hair-thin notches a union of rounded rings leaves).
+Ring simplify(Ring r, double eps) {
+  for (bool changed = true; changed && r.size() > 3;) {
+    changed = false;
+    for (size_t i = 0; i < r.size() && r.size() > 3; ++i) {
+      const auto &p = r[(i + r.size() - 1) % r.size()];
+      const auto &q = r[i];
+      const auto &n = r[(i + 1) % r.size()];
+      const double dx = n[0] - p[0], dy = n[1] - p[1];
+      const double l = std::hypot(dx, dy);
+      const double d =
+          l < 1e-12 ? std::hypot(q[0] - p[0], q[1] - p[1])
+                    : std::abs((q[0] - p[0]) * dy - (q[1] - p[1]) * dx) / l;
+      if (d < eps) {
+        r.erase(r.begin() + static_cast<std::ptrdiff_t>(i));
+        changed = true;
+        break;
+      }
+    }
+  }
+  return r;
+}
+
+core::SpacePolygon simplify(core::SpacePolygon p, double eps) {
+  p.outer = canonical(simplify(std::move(p.outer), eps));
+  for (auto &h : p.holes)
+    h = canonical(simplify(std::move(h), eps));
+  std::erase_if(p.holes, [](const Ring &h) {
+    return h.size() < 3 || std::abs(ring_signed_area(h)) < 1e-9;
+  });
+  return p;
+}
+
+std::optional<Polygon2> cgal_ring(const Ring &r, bool ccw) {
+  Polygon2 p;
+  for (const auto &q : r)
+    p.push_back(Point(q[0], q[1]));
+  if (p.size() < 3 || !p.is_simple())
+    return std::nullopt;
+  if (p.is_counterclockwise_oriented() != ccw)
+    p.reverse_orientation();
+  return p;
+}
+
+std::optional<PolygonH> cgal_polygon(const core::SpacePolygon &poly) {
+  auto outer = cgal_ring(poly.outer, true);
+  if (!outer)
+    return std::nullopt;
+  PolygonH out(*outer);
+  for (const auto &h : poly.holes) {
+    auto hole = cgal_ring(h, false);
+    if (!hole)
+      return std::nullopt;
+    out.add_hole(*hole);
+  }
+  return out;
+}
+
+Ring ring_from(const Polygon2 &p) {
+  Ring r;
+  for (auto v = p.vertices_begin(); v != p.vertices_end(); ++v)
+    r.push_back({CGAL::to_double(v->x()), CGAL::to_double(v->y())});
+  return r;
+}
+
+core::SpacePolygon polygon_from(const PolygonH &p) {
+  core::SpacePolygon out;
+  out.outer = ring_from(p.outer_boundary());
+  if (ring_signed_area(out.outer) < 0.0)
+    std::reverse(out.outer.begin(), out.outer.end());
+  for (auto h = p.holes_begin(); h != p.holes_end(); ++h)
+    out.holes.push_back(ring_from(*h));
+  return out;
+}
+
+} // namespace
+
+PlaceSpaceResult place_space_at(const std::vector<core::WallRecord> &walls,
+                                const std::vector<core::SpaceRecord> &stored,
+                                const core::StoreyRecord &storey,
+                                std::string_view project_guid,
+                                const core::PlanPoint &seed,
+                                const RebuildSpacesOptions &opt) {
+  PlaceSpaceResult r;
+  const auto rebuilt =
+      rebuild_spaces_from_walls(walls, stored, storey, project_guid, opt);
+  for (const auto &s : rebuilt.spaces) {
+    if (!in_polygon(s.polygon, seed[0], seed[1]))
+      continue;
+    r.ok = true;
+    r.space = s;
+    r.existing = std::any_of(stored.begin(), stored.end(), [&](const auto &o) {
+      return o.storey == storey.idx && o.guid == s.guid;
+    });
+    for (const auto &b : rebuilt.boundaries)
+      if (b.space == s.guid)
+        r.boundaries.push_back(b);
+    return r;
+  }
+  for (const auto &g : storey_walls(walls, storey.idx))
+    if (distance_to_segment({seed[0], seed[1]}, g.p0, g.p1) <=
+        std::max(g.half, 1e-3)) {
+      r.reason = fmt::format("({:.2f}, {:.2f}) lies in wall {}; click inside "
+                             "a room",
+                             seed[0], seed[1], g.w->guid);
+      return r;
+    }
+  r.reason = fmt::format(
+      "no closed area of storey {}'s walls holds ({:.2f}, {:.2f}) ({} "
+      "wall(s), {} room(s) found); close the walls or draw the room as a "
+      "polygon",
+      storey.idx, seed[0], seed[1], rebuilt.walls, rebuilt.spaces.size());
+  return r;
+}
+
+std::vector<core::ModelEditOp> place_space_ops(const PlaceSpaceResult &r) {
+  std::vector<core::ModelEditOp> ops;
+  if (r.ok)
+    ops.push_back(core::ModelEditOp::put(r.space, r.boundaries));
+  return ops;
+}
+
+MergeSpacesResult merge_spaces(const core::SpaceRecord &a,
+                               const core::SpaceRecord &b,
+                               const std::vector<core::WallRecord> &walls_in,
+                               const RoomToolOptions &opt) {
+  MergeSpacesResult r;
+  if (a.guid == b.guid) {
+    r.reason = "merge: a space cannot be merged with itself";
+    return r;
+  }
+  if (a.storey != b.storey) {
+    r.reason = fmt::format("merge: spaces {} and {} are on storeys {} and {}",
+                           a.guid, b.guid, a.storey, b.storey);
+    return r;
+  }
+  const auto pa = cgal_polygon(a.polygon);
+  const auto pb = cgal_polygon(b.polygon);
+  if (!pa || !pb) {
+    r.reason = fmt::format("merge: the polygon of space {} is not simple",
+                           pa ? b.guid : a.guid);
+    return r;
+  }
+  const auto walls = storey_walls(walls_in, a.storey);
+  const auto ba = find_boundaries(a, walls, opt.boundary_tolerance_m);
+  const auto bb = find_boundaries(b, walls, opt.boundary_tolerance_m);
+  PolySet set(*pa);
+  set.join(*pb);
+  constexpr double kOverlap = 1e-4; // into both rooms, past rounding
+  for (const auto &g : walls) {
+    double lo = 0.0, hi = -1.0;
+    for (const auto &x : ba)
+      for (const auto &y : bb)
+        if (x.wall == g.w->guid && y.wall == g.w->guid && x.side != y.side) {
+          const double l = std::max(x.s_start, y.s_start);
+          const double h = std::min(x.s_end, y.s_end);
+          if (h - l > hi - lo) {
+            lo = l;
+            hi = h;
+          }
+        }
+    if (hi - lo < opt.min_shared_m)
+      continue;
+    const double off = g.half + kOverlap;
+    Ring rect = {at(g, lo, -off), at(g, hi, -off), at(g, hi, off),
+                 at(g, lo, off)};
+    if (const auto p = cgal_ring(rect, true)) {
+      set.join(*p);
+      r.bridged_walls.push_back(g.w->guid);
+    }
+  }
+  std::vector<PolygonH> out;
+  set.polygons_with_holes(std::back_inserter(out));
+  if (out.size() != 1) {
+    r.reason = fmt::format(
+        "merge: spaces {} and {} neither touch nor share a wall ({} piece(s) "
+        "after the union)",
+        a.guid, b.guid, out.size());
+    r.bridged_walls.clear();
+    return r;
+  }
+  r.ok = true;
+  r.space = a;
+  r.space.id = -1;
+  r.space.polygon = simplify(polygon_from(out.front()), opt.simplify_m);
+  fill_metrics(r.space);
+  r.boundaries = find_boundaries(r.space, walls, opt.boundary_tolerance_m);
+  r.removed = b.guid;
+  std::sort(r.bridged_walls.begin(), r.bridged_walls.end());
+  return r;
+}
+
+std::vector<core::ModelEditOp> merge_spaces_ops(const MergeSpacesResult &r) {
+  std::vector<core::ModelEditOp> ops;
+  if (!r.ok)
+    return ops;
+  ops.push_back(core::ModelEditOp::put(r.space, r.boundaries));
+  ops.push_back(
+      core::ModelEditOp::remove(core::ModelElementKind::space, r.removed));
+  return ops;
+}
+
+SplitSpaceResult split_space(const core::SpaceRecord &space,
+                             const core::PlanPoint &p0,
+                             const core::PlanPoint &p1,
+                             const std::vector<core::WallRecord> &walls_in,
+                             std::string_view project_guid,
+                             const std::vector<std::string> &taken_in,
+                             const RoomToolOptions &opt) {
+  (void)core::deterministic_guid(project_guid, "spaces"); // validates
+  SplitSpaceResult r;
+  const double len = std::hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  if (!(len > 1e-6)) {
+    r.reason = "split: the line has no length";
+    return r;
+  }
+  if (space.polygon.outer.size() < 3) {
+    r.reason = "split: space " + space.guid + " has no polygon";
+    return r;
+  }
+  const V d{(p1[0] - p0[0]) / len, (p1[1] - p0[1]) / len};
+  const double ext = opt.split_extension_m;
+  std::vector<Segment> segs;
+  const auto seg = [&](V a, V b) {
+    if (std::hypot(b[0] - a[0], b[1] - a[1]) > 1e-9)
+      segs.emplace_back(Point(a[0], a[1]), Point(b[0], b[1]));
+  };
+  const auto ring_segs = [&](const Ring &ring) {
+    for (size_t i = 0; i < ring.size(); ++i)
+      seg({ring[i][0], ring[i][1]},
+          {ring[(i + 1) % ring.size()][0], ring[(i + 1) % ring.size()][1]});
+  };
+  ring_segs(space.polygon.outer);
+  for (const auto &h : space.polygon.holes)
+    ring_segs(h);
+  seg({p0[0] - ext * d[0], p0[1] - ext * d[1]},
+      {p1[0] + ext * d[0], p1[1] + ext * d[1]});
+  Arr arr;
+  CGAL::insert(arr, segs.begin(), segs.end());
+  for (bool again = true; again;) {
+    again = false;
+    for (auto e = arr.edges_begin(); e != arr.edges_end(); ++e)
+      if (e->face() == e->twin()->face()) {
+        arr.remove_edge(e);
+        again = true;
+        break;
+      }
+  }
+  std::vector<core::SpacePolygon> pieces;
+  for (auto f = arr.faces_begin(); f != arr.faces_end(); ++f) {
+    if (f->is_unbounded() || !f->has_outer_ccb())
+      continue;
+    core::SpacePolygon poly;
+    poly.outer = ring_of(f->outer_ccb());
+    if (ring_signed_area(poly.outer) < 0.0)
+      std::reverse(poly.outer.begin(), poly.outer.end());
+    for (auto h = f->inner_ccbs_begin(); h != f->inner_ccbs_end(); ++h) {
+      Ring hole = ring_of(*h);
+      if (hole.size() >= 3 && std::abs(ring_signed_area(hole)) > 1e-9)
+        poly.holes.push_back(std::move(hole));
+    }
+    poly = simplify(std::move(poly), opt.simplify_m);
+    if (poly.outer.size() < 3)
+      continue;
+    const auto ip = interior_point(poly);
+    if (!ip || !in_polygon(space.polygon, (*ip)[0], (*ip)[1]))
+      continue; // a hole of the space
+    pieces.push_back(std::move(poly));
+  }
+  if (pieces.size() < 2) {
+    r.reason = fmt::format(
+        "split: the line ({:.2f}, {:.2f}) - ({:.2f}, {:.2f}) does not cut "
+        "space {} in two; draw it across the room, edge to edge",
+        p0[0], p0[1], p1[0], p1[1], space.guid);
+    return r;
+  }
+  std::stable_sort(
+      pieces.begin(), pieces.end(), [](const auto &x, const auto &y) {
+        return core::space_polygon_area(x) > core::space_polygon_area(y);
+      });
+  std::set<std::string> taken(taken_in.begin(), taken_in.end());
+  taken.insert(space.guid);
+  const auto walls = storey_walls(walls_in, space.storey);
+  for (size_t k = 0; k < pieces.size(); ++k) {
+    core::SpaceRecord s = space;
+    s.id = -1;
+    s.polygon = pieces[k];
+    if (k > 0) {
+      const std::string key = fmt::format("spaces/split/{}/{}", space.guid, k);
+      std::string g = core::deterministic_guid(project_guid, key);
+      for (int n = 2; taken.count(g); ++n)
+        g = core::deterministic_guid(project_guid,
+                                     fmt::format("{}#{}", key, n));
+      taken.insert(g);
+      s.guid = g;
+      if (!s.name.empty())
+        s.name = fmt::format("{} ({})", space.name, k + 1);
+      s.room_label = -1;
+      s.metadata.clear();
+    }
+    fill_metrics(s);
+    auto bs = find_boundaries(s, walls, opt.boundary_tolerance_m);
+    r.boundaries.insert(r.boundaries.end(), bs.begin(), bs.end());
+    r.spaces.push_back(std::move(s));
+  }
+  r.ok = true;
+  return r;
+}
+
+std::vector<core::ModelEditOp> split_space_ops(const SplitSpaceResult &r) {
+  std::vector<core::ModelEditOp> ops;
+  if (!r.ok)
+    return ops;
+  for (const auto &s : r.spaces) {
+    std::vector<core::SpaceBoundaryRecord> bs;
+    for (const auto &b : r.boundaries)
+      if (b.space == s.guid)
+        bs.push_back(b);
+    ops.push_back(core::ModelEditOp::put(s, std::move(bs)));
+  }
+  return ops;
 }
 
 } // namespace reusex::segmentation

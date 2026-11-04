@@ -59,9 +59,9 @@
 
 namespace reusex::core {
 
-enum class ModelElementKind { storey, wall, opening, space };
+enum class ModelElementKind { storey, wall, opening, space, zone };
 
-/// "storey" | "wall" | "opening" | "space".
+/// "storey" | "wall" | "opening" | "space" | "zone".
 std::string_view to_string(ModelElementKind kind);
 /// @throws std::invalid_argument for anything else.
 ModelElementKind parse_model_element_kind(std::string_view text);
@@ -80,7 +80,7 @@ struct ModelEditOp {
   /// remove / revert: the row's guid (put: the record's).
   std::string guid;
   std::variant<std::monostate, StoreyRecord, WallRecord, OpeningRecord,
-               SpaceRecord>
+               SpaceRecord, ZoneRecord>
       record;
   /// put wall: replace the joins touching it (each must name it); nullopt
   /// keeps the stored ones.
@@ -100,6 +100,9 @@ struct ModelEditOp {
   static ModelEditOp put(SpaceRecord space,
                          std::optional<std::vector<SpaceBoundaryRecord>>
                              boundaries = std::nullopt);
+  /// A zone's members must be stored spaces once the batch's earlier ops
+  /// are applied (apply_model_edit() refuses the batch otherwise).
+  static ModelEditOp put(ZoneRecord zone);
   static ModelEditOp remove(ModelElementKind kind, std::string guid);
   static ModelEditOp revert(ModelElementKind kind, std::string guid);
 };
@@ -190,6 +193,7 @@ nlohmann::json model_record_json(const StoreyRecord &r);
 nlohmann::json model_record_json(const WallRecord &r);
 nlohmann::json model_record_json(const OpeningRecord &r);
 nlohmann::json model_record_json(const SpaceRecord &r);
+nlohmann::json model_record_json(const ZoneRecord &r);
 /// The inverse; a missing field keeps the record's default, so
 /// `wall_from_json(model_record_json(w).merge_patch(partial))` applies a
 /// partial update. @throws std::invalid_argument for an unknown key or a
@@ -198,6 +202,7 @@ StoreyRecord storey_from_json(const nlohmann::json &j);
 WallRecord wall_from_json(const nlohmann::json &j);
 OpeningRecord opening_from_json(const nlohmann::json &j);
 SpaceRecord space_from_json(const nlohmann::json &j);
+ZoneRecord zone_from_json(const nlohmann::json &j);
 
 /// Ops in the ruxd wire form, read against @p db's current rows:
 ///   {"op": "<kind>.create", "record": {...}}             (put; guid optional)
@@ -217,12 +222,14 @@ SpaceRecord space_from_json(const nlohmann::json &j);
 ///   {"op": "wall.offset", "guid": g, "distance": m, "copy"?: bool (true),
 ///    "new_guid"?: g2}   (move / copy g sideways; + = left of start -> end)
 ///   {"op": "storey.update", "guid": g, "set": {...}}
-/// with <kind> = wall | opening | space | storey. "joins" (wall) and
-/// "boundaries" (space) may ride along on create / update. An update of a
-/// row created earlier in the same list patches that one. split / merge /
-/// join / extend_to / selection.transform / wall.offset expand into puts of
-/// the walls, openings and spaces they change and of the copies they make
-/// (core/wall_edit_ops.hpp: extend_wall_to(), transform_selection()),
+/// with <kind> = wall | opening | space | storey | zone (a zone's record:
+/// name, use, spaces = member space guids; a space delete also drops it
+/// from every zone, logged as an update of that zone, so undo restores it).
+/// "joins" (wall) and "boundaries" (space) may ride along on create / update.
+/// An update of a row created earlier in the same list patches that one. split
+/// / merge / join / extend_to / selection.transform / wall.offset expand into
+/// puts of the walls, openings and spaces they change and of the copies they
+/// make (core/wall_edit_ops.hpp: extend_wall_to(), transform_selection()),
 /// reading openings, spaces, joins and boundaries as stored; a transform
 /// whose join to an unmoved wall had to be dropped says so in
 /// ModelEditOp::warnings. rotate_deg is counter-clockwise about pivot
