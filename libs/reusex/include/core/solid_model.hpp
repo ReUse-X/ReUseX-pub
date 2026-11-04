@@ -219,6 +219,43 @@ struct SlabRecord {
   std::string metadata;
 };
 
+/// One flight of a stair: its walking line from the bottom step to the top
+/// one, in the level frame of the stair's storey.
+struct StairRun {
+  PlanPoint start{0.0, 0.0}; ///< walking line at the first riser [m]
+  PlanPoint end{0.0, 0.0};   ///< walking line at the last riser [m]
+  double width = 1.0;        ///< clear width across the line [m], > 0
+  int risers = 0;            ///< risers in this run, >= 1
+};
+
+/// A stair (reusex-xvnl, schema v45): straight / L / U flights by run
+/// (Revit's "stair by run"), with landings between them. Drawn by hand; no
+/// stage detects one yet. Each run climbs `risers` x riser_height(); a
+/// landing sits at the height its preceding run ends at. With
+/// cut_slab_above the solids stage cuts the stair's footprint out of the
+/// slabs of storey_to (core/stairs.hpp).
+struct StairRecord {
+  int64_t id = -1;
+  std::string guid;
+  int storey = 0;                ///< StoreyRecord::idx it starts on
+  int storey_to = -1;            ///< idx it arrives at; -1 = none (a few steps)
+  std::string kind = "straight"; ///< straight | L | U | spiral
+  /// Where the walking line runs within the width: left | centre | right
+  /// (as seen walking up); runs' start / end are the walking line.
+  std::string location = "centre";
+  std::vector<StairRun> runs;
+  std::vector<SpacePolygon> landings; ///< level frame
+  double z_base = 0.0;       ///< level z of the bottom (the floor it stands on)
+  double z_top = 0.0;        ///< level z it climbs to (> z_base)
+  double tread_depth = -1.0; ///< going [m]; -1 = run length / treads
+  double nosing = 0.0;       ///< [m]
+  bool cut_slab_above = true;
+  std::string source = "manual";
+  bool locked = false;
+  double confidence = -1.0;
+  std::string metadata;
+};
+
 /// A zone: a named group of spaces on one or more storeys (a dwelling, a
 /// fire cell, a use; IfcZone). Drawn by hand in the Rediger editor
 /// (reusex-pccw); no stage detects one. Its area and volume are its

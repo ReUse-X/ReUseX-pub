@@ -24,6 +24,7 @@
 #include "reusex/core/normal_orientation.hpp"
 #include "reusex/core/opening_identity.hpp"
 #include "reusex/core/space_identity.hpp"
+#include "reusex/core/space_polygon.hpp"
 #include "reusex/core/storey_identity.hpp"
 #include "reusex/core/validate.hpp"
 #include "reusex/core/wall_identity.hpp"
@@ -1891,6 +1892,80 @@ std::string derived_slab_guid(const std::string &storey_guid,
   }
 }
 
+/// A stair's footprint cut into the floor slabs of the storey it arrives
+/// at, in that storey's level frame.
+struct StairCut {
+  int storey = -1;
+  std::vector<core::SpacePolygon> footprint;
+};
+
+std::vector<StairCut>
+stair_cuts(const ProjectDB &db,
+           const std::map<int, const core::StoreyRecord *> &storeys) {
+  std::vector<StairCut> out;
+  for (const auto &st : db.stairs()) {
+    if (!st.cut_slab_above || st.storey_to < 0)
+      continue;
+    const auto from = storeys.find(st.storey);
+    const auto to = storeys.find(st.storey_to);
+    if (from == storeys.end() || to == storeys.end()) {
+      warn("solids: stair {} names storey {} / {}, not both stored; no "
+           "opening cut",
+           st.guid, st.storey, st.storey_to);
+      continue;
+    }
+    StairCut c;
+    c.storey = st.storey_to;
+    c.footprint = geometry::stair_footprint(st);
+    // Into the upper storey's frame through world coordinates.
+    const auto F = geometry::LevelFrame::from_record(*from->second);
+    const auto G = geometry::LevelFrame::from_record(*to->second);
+    const auto map_ring = [&](std::vector<core::PlanPoint> &ring) {
+      for (auto &p : ring) {
+        const Eigen::Vector3d w =
+            F.to_world(Eigen::Vector3d(p[0], p[1], st.z_top));
+        const Eigen::Vector3d l = G.to_level(w);
+        p = {l.x(), l.y()};
+      }
+    };
+    for (auto &poly : c.footprint) {
+      map_ring(poly.outer);
+      for (auto &h : poly.holes)
+        map_ring(h);
+    }
+    out.push_back(std::move(c));
+  }
+  return out;
+}
+
+/// Cut the stairs arriving at @p slab's storey out of it (a floor slab
+/// only). @returns whether its outline changed.
+bool cut_slab(core::SlabRecord &slab, const std::vector<StairCut> &cuts) {
+  if (slab.kind != "floor")
+    return false;
+  std::vector<core::SpacePolygon> cut;
+  for (const auto &c : cuts)
+    if (c.storey == slab.storey)
+      cut.insert(cut.end(), c.footprint.begin(), c.footprint.end());
+  if (cut.empty())
+    return false;
+  const double before = core::space_polygon_area(slab.outline);
+  auto pieces = geometry::subtract_polygons(slab.outline, cut);
+  if (pieces.empty()) {
+    warn("solids: slab {} lies entirely in a stair opening; left uncut",
+         slab.guid);
+    return false;
+  }
+  if (std::abs(core::space_polygon_area(pieces.front()) - before) < 1e-6)
+    return false;
+  if (pieces.size() > 1)
+    warn("solids: a stair opening splits slab {} into {} pieces; the "
+         "largest is kept",
+         slab.guid, pieces.size());
+  slab.outline = std::move(pieces.front());
+  return true;
+}
+
 /// Slab rows (schema v44, reusex-d5us): write the derived pieces as
 /// detected rows (locked rows and tombstones kept by save_slabs), then
 /// build what the rows say: a tombstoned piece is dropped, an edited one
@@ -1925,6 +2000,14 @@ std::string slab_rows(ProjectDB &db, const core::SolidModel &model,
     row.confidence = -1.0;
     derived.push_back(std::move(row));
   }
+  // Stairs that arrive at a storey cut their footprint out of its floor
+  // slabs (schema v45): in the stored derived rows, and in every slab
+  // built below.
+  const auto cuts = stair_cuts(db, storeys);
+  std::set<std::string> cut_guids;
+  for (auto &row : derived)
+    if (cut_slab(row, cuts))
+      cut_guids.insert(row.guid);
   db.save_slabs(derived);
   const auto holds = core::model_holds(db, core::ModelElementKind::slab);
   std::map<std::string, core::SlabRecord> rows;
@@ -1940,12 +2023,15 @@ std::string slab_rows(ProjectDB &db, const core::SolidModel &model,
       continue;
     }
     const auto it = rows.find(e.element_guid);
-    if (it != rows.end() && holds.edited.count(e.element_guid)) {
+    const bool edited = holds.edited.count(e.element_guid) > 0;
+    if (it != rows.end() && (edited || cut_guids.count(e.element_guid))) {
       const auto st = storeys.find(it->second.storey);
       if (st != storeys.end()) {
-        out.push_back(geometry::slab_solid(it->second, *st->second));
+        auto row = it->second;
+        cut_slab(row, cuts);
+        out.push_back(geometry::slab_solid(row, *st->second));
         out.back().part = e.part;
-        ++rebuilt;
+        rebuilt += edited ? 1 : 0;
         continue;
       }
     }
@@ -1960,7 +2046,9 @@ std::string slab_rows(ProjectDB &db, const core::SolidModel &model,
            guid, row.storey);
       continue;
     }
-    out.push_back(geometry::slab_solid(row, *st->second));
+    auto cut = row;
+    cut_slab(cut, cuts);
+    out.push_back(geometry::slab_solid(cut, *st->second));
     out.back().part = 1000 + static_cast<int>(drawn);
     ++drawn;
   }
@@ -2043,6 +2131,29 @@ StageResult run_solids(ProjectDB &db, const json &params) {
   store(kSolidWallsMesh, r.walls, "wall");
   store(kSolidSlabsMesh, r.slabs, "slab");
   store(kSolidSpacesMesh, r.spaces, "space");
+  // Stairs (schema v45): one mesh when the project has any.
+  {
+    std::vector<geometry::ElementSolid> stairs;
+    std::map<int, const core::StoreyRecord *> by_idx;
+    for (const auto &s : model.storeys)
+      by_idx[s.idx] = &s;
+    for (const auto &st : db.stairs()) {
+      const auto it = by_idx.find(st.storey);
+      if (it == by_idx.end()) {
+        warn("solids: stair {} names storey {}, which is not stored; not "
+             "built",
+             st.guid, st.storey);
+        continue;
+      }
+      auto els = geometry::stair_solids(st, *it->second);
+      stairs.insert(stairs.end(), std::make_move_iterator(els.begin()),
+                    std::make_move_iterator(els.end()));
+    }
+    if (!stairs.empty())
+      store(kSolidStairsMesh, stairs, "stair");
+    else
+      db.delete_mesh(kSolidStairsMesh);
+  }
   if (outputs.empty())
     return StageResult::failure(fmt::format(
         "solids: no solid from {} wall(s), {} space(s) on {} storey(s)",

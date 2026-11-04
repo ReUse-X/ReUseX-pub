@@ -26,6 +26,8 @@ namespace reusex::pipeline {
 inline constexpr std::string_view kSolidWallsMesh = "solid_walls";
 inline constexpr std::string_view kSolidSlabsMesh = "solid_slabs";
 inline constexpr std::string_view kSolidSpacesMesh = "solid_spaces";
+/// The stairs' solids (schema v45; only when the project has stairs).
+inline constexpr std::string_view kSolidStairsMesh = "solid_stairs";
 
 /// Everything the solids stage is tuned by.
 struct SolidStageOptions {

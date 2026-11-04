@@ -80,7 +80,7 @@
 namespace reusex::geometry {
 
 /// What an element solid is.
-enum class SolidType { wall, slab, space };
+enum class SolidType { wall, slab, space, stair };
 
 /// "wall" | "slab" | "space".
 std::string_view to_string(SolidType type);
@@ -203,5 +203,27 @@ SolidsResult build_solids(const core::SolidModel &model,
 /// IFC has no ceiling slab type), part 0.
 ElementSolid slab_solid(const core::SlabRecord &slab,
                         const core::StoreyRecord &storey);
+
+/// The solids of one stair (reusex-xvnl), in @p storey's level frame: per
+/// run of n > 1 risers a solid stepped block (n - 1 treads of the run's
+/// going, risers of core::stair_riser_height(), down to the run's base),
+/// predefined "STRAIGHT_RUN_STAIR" / part = run index; per landing a 0.2 m
+/// slab under the height the run before it ends at, predefined "LANDING" /
+/// part = 100 + landing index. source_guid / element_guid = the stair's
+/// guid. An invalid stair (core::check_stair) gives none, with a warning.
+std::vector<ElementSolid> stair_solids(const core::StairRecord &stair,
+                                       const core::StoreyRecord &storey);
+
+/// The plan area a stair takes (its runs' rectangles across their width,
+/// from the first to the last riser, and its landings), as the union in
+/// the stair's level frame.
+std::vector<core::SpacePolygon> stair_footprint(const core::StairRecord &stair);
+
+/// @p outline minus @p cut (both in one plan frame): the remaining pieces,
+/// largest first (none when the cut covers it). A hole-free cut inside the
+/// outline becomes a hole.
+std::vector<core::SpacePolygon>
+subtract_polygons(const core::SpacePolygon &outline,
+                  const std::vector<core::SpacePolygon> &cut);
 
 } // namespace reusex::geometry

@@ -59,9 +59,9 @@
 
 namespace reusex::core {
 
-enum class ModelElementKind { storey, wall, opening, space, zone, slab };
+enum class ModelElementKind { storey, wall, opening, space, zone, slab, stair };
 
-/// "storey" | "wall" | "opening" | "space" | "zone" | "slab".
+/// "storey" | "wall" | "opening" | "space" | "zone" | "slab" | "stair".
 std::string_view to_string(ModelElementKind kind);
 /// @throws std::invalid_argument for anything else.
 ModelElementKind parse_model_element_kind(std::string_view text);
@@ -80,7 +80,7 @@ struct ModelEditOp {
   /// remove / revert: the row's guid (put: the record's).
   std::string guid;
   std::variant<std::monostate, StoreyRecord, WallRecord, OpeningRecord,
-               SpaceRecord, ZoneRecord, SlabRecord>
+               SpaceRecord, ZoneRecord, SlabRecord, StairRecord>
       record;
   /// put wall: replace the joins touching it (each must name it); nullopt
   /// keeps the stored ones.
@@ -108,6 +108,7 @@ struct ModelEditOp {
   /// are applied (apply_model_edit() refuses the batch otherwise).
   static ModelEditOp put(ZoneRecord zone);
   static ModelEditOp put(SlabRecord slab);
+  static ModelEditOp put(StairRecord stair);
   static ModelEditOp remove(ModelElementKind kind, std::string guid);
   static ModelEditOp revert(ModelElementKind kind, std::string guid);
 };
@@ -200,6 +201,7 @@ nlohmann::json model_record_json(const OpeningRecord &r);
 nlohmann::json model_record_json(const SpaceRecord &r);
 nlohmann::json model_record_json(const ZoneRecord &r);
 nlohmann::json model_record_json(const SlabRecord &r);
+nlohmann::json model_record_json(const StairRecord &r);
 /// The inverse; a missing field keeps the record's default, so
 /// `wall_from_json(model_record_json(w).merge_patch(partial))` applies a
 /// partial update. @throws std::invalid_argument for an unknown key or a
@@ -210,6 +212,7 @@ OpeningRecord opening_from_json(const nlohmann::json &j);
 SpaceRecord space_from_json(const nlohmann::json &j);
 ZoneRecord zone_from_json(const nlohmann::json &j);
 SlabRecord slab_from_json(const nlohmann::json &j);
+StairRecord stair_from_json(const nlohmann::json &j);
 
 /// Ops in the ruxd wire form, read against @p db's current rows:
 ///   {"op": "<kind>.create", "record": {...}}             (put; guid optional)
@@ -239,7 +242,10 @@ SlabRecord slab_from_json(const nlohmann::json &j);
 ///                     spaces / slabs move to a, b is removed, the
 ///                     storeys above b move down one idx; both must share
 ///                     one level frame)
-/// with <kind> = wall | opening | space | storey | zone | slab (a slab's
+/// with <kind> = wall | opening | space | storey | zone | slab | stair (a
+/// stair's record: storey, storey_to, kind straight | L | U | spiral,
+/// location, runs [{start, end, width, risers}], landings [{outer,
+/// holes}], z_base, z_top, tread_depth, nosing, cut_slab_above; a slab's
 /// record: storey, kind floor | ceiling | roof, outline {outer, holes},
 /// z_top, thickness, top_planes; a zone's record:
 /// name, use, spaces = member space guids; a space delete also drops it
