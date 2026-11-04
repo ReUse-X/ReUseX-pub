@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Povl Filip Sonne-Frederiksen
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# pr-assets holds review images linked from pull requests (renders of the
+# project's own data); they share the project's licence.
+version = 1
+
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Povl Filip Sonne-Frederiksen"
+SPDX-License-Identifier = "GPL-3.0-or-later"
