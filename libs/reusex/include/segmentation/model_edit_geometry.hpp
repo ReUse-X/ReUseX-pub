@@ -27,7 +27,8 @@
 ///    their wall, split one along a line), previews again.
 ///  - fit_ceiling_plane(): a ceiling plane (core::CeilingPlane) fitted to
 ///    the cloud's points above a plan region within a height band ("fit fra
-///    punkter"): least squares z = a + b x + c y, trimmed to the points
+///    punkter"): a deterministic RANSAC seed (the plane most points lie
+///    on), then least squares z = a + b x + c y, trimmed to the points
 ///    within `inlier_m` of the fit until the inlier set settles. Also a
 ///    preview: the client sends the plane back as ceiling.set.
 ///
@@ -187,14 +188,20 @@ struct CeilingFitOptions {
   int min_points = 30;        ///< fewer (after trimming): no fit
   int max_rounds = 8;         ///< trimming rounds
   double max_slope_deg = 75.; ///< steeper: not a ceiling, no fit
+  /// The trimming starts from the plane (no steeper than max_slope_deg)
+  /// most band points lie on, found by RANSAC over this many 3-point
+  /// samples, rather than from every point in the band (which settles
+  /// between surfaces). 0: start from every point (reusex-g72u).
+  int ransac_iterations = 1000;
+  unsigned ransac_seed = 42; ///< fixed: the same fit every time
   /// A fit whose inliers are a smaller share of the band's points is
   /// refused: the band held more than one surface (a storey above, a
   /// stair, furniture) and the fit is not clearly the ceiling (reusex-y2ed).
   double min_inlier_share = 0.25;
-  /// The space's floor in the level frame. When set (finite), a plane less
-  /// than min_clearance_m over it at the region's middle (its area
-  /// centroid) is refused: no room's ceiling is that low there. Only the
-  /// middle: a sloped attic ceiling may come down low at a knee wall. NaN:
+  /// The space's floor in the level frame. When set (finite), a plane
+  /// whose highest point over the region is less than min_clearance_m over
+  /// it is refused: a room has standing height somewhere. Only the highest
+  /// point: an attic's sloped ceiling sits low over much of the room. NaN:
   /// not checked.
   double z_floor = std::numeric_limits<double>::quiet_NaN();
   double min_clearance_m = 1.9;
@@ -213,7 +220,7 @@ struct CeilingFitResult {
   double slope_deg = 0.0;
   int points = 0;  ///< in the region and band
   int inliers = 0; ///< used by the final fit
-  /// The plane's height over opt.z_floor at the region's middle; -1 when
+  /// The plane's highest point over opt.z_floor across the region; -1 when
   /// z_floor is unset or the fit stopped before it was measured.
   double clearance_m = -1.0;
 };
@@ -222,7 +229,7 @@ struct CeilingFitResult {
 /// fall, in @p storey's level frame, inside @p region (outer ring minus
 /// holes) with z in [@p z_lo, @p z_hi]. Refused (ok false, code + reason)
 /// when too few points or inliers, when steeper than max_slope_deg, when
-/// lower than min_clearance_m over opt.z_floor at the region's middle, or
+/// nowhere min_clearance_m over opt.z_floor across the region, or
 /// when the inliers are under min_inlier_share of the band's points.
 CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
                                    const core::StoreyRecord &storey,
