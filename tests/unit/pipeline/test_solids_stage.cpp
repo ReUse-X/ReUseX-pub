@@ -347,10 +347,13 @@ TEST_CASE("SolidsStage_Stairs_SolidsAndSlabOpening",
   floor1.z_top = upper.z_floor;
   floor1.thickness = 0.2;
   core::apply_model_edit(db, {core::ModelEditOp::put(floor1)});
-  REQUIRE(run(db, project).ok);
+  const auto r3 = run(db, project);
+  INFO(r3.message);
+  REQUIRE(r3.ok);
   bool cut = false;
-  for (const auto &e :
-       json::parse(db.mesh_metadata(kSolidSlabsMesh).parameters).at("elements"))
+  const json slab_meta =
+      json::parse(db.mesh_metadata(kSolidSlabsMesh).parameters);
+  for (const auto &e : slab_meta.at("elements"))
     if (e.value("element_guid", "") == "floor-1") {
       CHECK(e.at("profile").at("holes").size() == 1);
       // 16 m2 minus the 2.5 x 0.9 m run, 0.2 m thick.
