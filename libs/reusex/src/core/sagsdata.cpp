@@ -22,7 +22,10 @@ const std::vector<std::string> &sagsdata_fields() {
                                                "municipality",
                                                "demolition_start",
                                                "demolished_floor_area_m2",
-                                               "screening_approved_at"};
+                                               "screening_approved_at",
+                                               "husnummer_id",
+                                               "bfe_number",
+                                               "bbr_building_id"};
   return fields;
 }
 
@@ -51,7 +54,7 @@ nlohmann::json sagsdata_json(const ProjectDB &db, std::string_view project_id) {
     const auto value = sagsdata_value(db, project_id, field);
     if (!value) {
       out[field] = nullptr;
-    } else if (field == "demolished_floor_area_m2") {
+    } else if (field == "demolished_floor_area_m2" || field == "bfe_number") {
       // Stored as JSON text so the number round-trips exactly.
       const auto n =
           nlohmann::json::parse(*value, nullptr, /*allow_exceptions=*/false);
@@ -80,6 +83,14 @@ bool is_iso_date(std::string_view s) {
   return d <= kDays[m - 1] + (m == 2 && leap ? 1 : 0);
 }
 
+/// A lowercase 8-4-4-4-12 hex UUID, as DAR's husnummer and BBR's id_lokalId
+/// are written.
+static bool is_lowercase_uuid(std::string_view s) {
+  static const std::regex re(
+      R"(^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$)");
+  return std::regex_match(s.begin(), s.end(), re);
+}
+
 bool is_iso_date_time(std::string_view s) {
   static const std::regex re(
       R"(^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d+)?)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$)");
@@ -101,6 +112,12 @@ std::string sagsdata_stored_value(std::string_view field,
                                   "' must be a non-negative number or null");
     return value.dump();
   }
+  if (field == "bfe_number") {
+    if (!value.is_number_integer() || value.get<long long>() < 1)
+      throw std::invalid_argument("'" + name +
+                                  "' must be a positive integer or null");
+    return value.dump();
+  }
   if (!value.is_string())
     throw std::invalid_argument("'" + name + "' must be a string or null");
   auto stored = value.get<std::string>();
@@ -114,6 +131,11 @@ std::string sagsdata_stored_value(std::string_view field,
     throw std::invalid_argument("'" + name +
                                 "' must be a date (YYYY-MM-DD), an ISO 8601 "
                                 "date-time or null");
+  if ((field == "husnummer_id" || field == "bbr_building_id") &&
+      !is_lowercase_uuid(stored))
+    throw std::invalid_argument("'" + name +
+                                "' must be a lowercase UUID (8-4-4-4-12) or "
+                                "null");
   return stored;
 }
 
