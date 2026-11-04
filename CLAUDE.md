@@ -800,7 +800,13 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   edit kind `zone`; `core/zones.hpp` measures them) and widens
   `model_dismissed.kind` to zone / slab / stair; the room tools
   `place_space_at` / `merge_spaces` / `split_space` live in
-  `segmentation/model_edit_geometry.hpp`
+  `segmentation/model_edit_geometry.hpp`. Schema v44 adds slab rows
+  (reusex-d5us): `slabs` (`core::SlabRecord`, `save_slabs` / `slabs()` /
+  `put_slab_row()`; the solids stage writes the derived pieces as detected
+  rows and builds edited / drawn rows with `reconstruction::slab_solid`;
+  edit kind `slab`) and `storeys.is_ground`; storey ops `storey.split` /
+  `storey.merge` and a guarded `storey.delete` are wire ops of
+  `core/model_edits.hpp`
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)

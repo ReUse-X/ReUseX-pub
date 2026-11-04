@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -37,6 +38,8 @@ std::string_view to_string(ModelElementKind kind) {
     return "space";
   case ModelElementKind::zone:
     return "zone";
+  case ModelElementKind::slab:
+    return "slab";
   }
   return "wall";
 }
@@ -52,9 +55,11 @@ ModelElementKind parse_model_element_kind(std::string_view text) {
     return ModelElementKind::space;
   if (text == "zone")
     return ModelElementKind::zone;
-  throw std::invalid_argument("unknown model element kind '" +
-                              std::string(text) +
-                              "' (storey | wall | opening | space | zone)");
+  if (text == "slab")
+    return ModelElementKind::slab;
+  throw std::invalid_argument(
+      "unknown model element kind '" + std::string(text) +
+      "' (storey | wall | opening | space | zone | slab)");
 }
 
 // --- ModelEditOp factories ---------------------------------------------------
@@ -101,6 +106,14 @@ ModelEditOp ModelEditOp::put(ZoneRecord zone) {
   op.kind = ModelElementKind::zone;
   op.guid = zone.guid;
   op.record = std::move(zone);
+  return op;
+}
+
+ModelEditOp ModelEditOp::put(SlabRecord slab) {
+  ModelEditOp op;
+  op.kind = ModelElementKind::slab;
+  op.guid = slab.guid;
+  op.record = std::move(slab);
   return op;
 }
 
@@ -223,6 +236,7 @@ json model_record_json(const StoreyRecord &r) {
   j["z_floor"] = r.z_floor;
   j["z_ceiling"] = r.z_ceiling;
   j["level_transform"] = r.level_transform;
+  j["is_ground"] = r.is_ground;
   common_json(j, r);
   return j;
 }
@@ -309,6 +323,25 @@ json model_record_json(const ZoneRecord &r) {
   return j;
 }
 
+json model_record_json(const SlabRecord &r) {
+  json j;
+  j["guid"] = r.guid;
+  j["storey"] = r.storey;
+  j["kind"] = r.kind;
+  json holes = json::array();
+  for (const auto &h : r.outline.holes)
+    holes.push_back(points_json(h));
+  j["outline"] = {{"outer", points_json(r.outline.outer)}, {"holes", holes}};
+  j["z_top"] = r.z_top;
+  j["thickness"] = r.thickness;
+  json planes = json::array();
+  for (const auto &p : r.top_planes)
+    planes.push_back({{"at", p.at}, {"slope", p.slope}});
+  j["top_planes"] = planes;
+  common_json(j, r);
+  return j;
+}
+
 StoreyRecord storey_from_json(const json &j) {
   StoreyRecord r;
   Fields f(j, "storey");
@@ -318,6 +351,7 @@ StoreyRecord storey_from_json(const json &j) {
   f.get("z_floor", r.z_floor);
   f.get("z_ceiling", r.z_ceiling);
   f.get("level_transform", r.level_transform);
+  f.get("is_ground", r.is_ground);
   f.done();
   return r;
 }
@@ -437,6 +471,55 @@ ZoneRecord zone_from_json(const json &j) {
   return r;
 }
 
+SlabRecord slab_from_json(const json &j) {
+  SlabRecord r;
+  Fields f(j, "slab");
+  common_from(f, r);
+  f.get("storey", r.storey);
+  f.get("kind", r.kind);
+  if (const json *poly = f.raw("outline")) {
+    if (!poly->is_object())
+      throw std::invalid_argument(
+          "slab.outline: expected {\"outer\": [...], \"holes\": [...]}");
+    for (const auto &[key, value] : poly->items())
+      if (key != "outer" && key != "holes")
+        throw std::invalid_argument("slab.outline: unknown field '" + key +
+                                    "'");
+    r.outline = {};
+    if (const auto it = poly->find("outer"); it != poly->end())
+      r.outline.outer = f.read_points(*it, "outline.outer");
+    if (const auto it = poly->find("holes"); it != poly->end()) {
+      if (!it->is_array())
+        throw std::invalid_argument("slab.outline.holes: expected an array");
+      for (const auto &h : *it)
+        r.outline.holes.push_back(f.read_points(h, "outline.holes"));
+    }
+  }
+  f.get("z_top", r.z_top);
+  f.get("thickness", r.thickness);
+  if (const json *planes = f.raw("top_planes")) {
+    if (!planes->is_array())
+      throw std::invalid_argument("slab.top_planes: expected an array");
+    for (const auto &p : *planes) {
+      if (!p.is_object() || !p.contains("at") || !p.contains("slope"))
+        throw std::invalid_argument(
+            "slab.top_planes: expected {\"at\": [x, y, z], \"slope\": "
+            "[dx, dy]}");
+      CeilingPlane c;
+      try {
+        c.at = p.at("at").get<std::array<double, 3>>();
+        c.slope = p.at("slope").get<std::array<double, 2>>();
+      } catch (const json::exception &e) {
+        throw std::invalid_argument(std::string("slab.top_planes: ") +
+                                    e.what());
+      }
+      r.top_planes.push_back(c);
+    }
+  }
+  f.done();
+  return r;
+}
+
 // --- Row state ---------------------------------------------------------------
 
 namespace {
@@ -527,6 +610,10 @@ RowState capture(const ProjectDB &db, ModelElementKind kind,
     if (auto r = db.zone_by_guid(guid))
       st.row = {{"record", model_record_json(*r)}};
     break;
+  case ModelElementKind::slab:
+    if (auto r = db.slab_by_guid(guid))
+      st.row = {{"record", model_record_json(*r)}};
+    break;
   }
   if (auto d = db.dismissed_model_element(guid))
     st.tomb = parse_text_object(d->record);
@@ -559,6 +646,9 @@ void put_record_exact(ProjectDB &db, ModelElementKind kind, const json &rec) {
   case ModelElementKind::zone:
     db.put_zone_row(zone_from_json(rec));
     break;
+  case ModelElementKind::slab:
+    db.put_slab_row(slab_from_json(rec));
+    break;
   }
 }
 
@@ -574,6 +664,8 @@ bool remove_row(ProjectDB &db, ModelElementKind kind, const std::string &g) {
     return db.remove_space_row(g);
   case ModelElementKind::zone:
     return db.remove_zone_row(g);
+  case ModelElementKind::slab:
+    return db.remove_slab_row(g);
   }
   return false;
 }
@@ -668,6 +760,10 @@ std::optional<SpaceRecord> stored_as(const ProjectDB &db,
 template <>
 std::optional<ZoneRecord> stored_as(const ProjectDB &db, const std::string &g) {
   return db.zone_by_guid(g);
+}
+template <>
+std::optional<SlabRecord> stored_as(const ProjectDB &db, const std::string &g) {
+  return db.slab_by_guid(g);
 }
 
 json row_record(const RowState &st) {
@@ -804,10 +900,24 @@ ModelEditResult apply_model_edit(ProjectDB &db,
         k.guid = rec.guid;
         touch(k);
         const auto stored = stored_as<R>(db, rec.guid);
-        rec = mark_edited(std::move(rec), stored);
-        if constexpr (std::is_same_v<R, StoreyRecord>)
+        if (op.exact) {
+          if (stored)
+            rec.id = stored->id;
+        } else {
+          rec = mark_edited(std::move(rec), stored);
+        }
+        if constexpr (std::is_same_v<R, StoreyRecord>) {
+          // One ground storey: another one that has the flag loses it.
+          if (rec.is_ground)
+            for (auto other : db.storeys())
+              if (other.is_ground && other.guid != rec.guid) {
+                touch({ModelElementKind::storey, other.guid});
+                actions[{ModelElementKind::storey, other.guid}] = "updated";
+                other.is_ground = false;
+                db.put_storey_row(other);
+              }
           db.put_storey_row(rec);
-        else if constexpr (std::is_same_v<R, WallRecord>)
+        } else if constexpr (std::is_same_v<R, WallRecord>)
           db.put_wall_row(rec);
         else if constexpr (std::is_same_v<R, OpeningRecord>)
           db.put_opening_row(rec);
@@ -818,7 +928,9 @@ ModelEditResult apply_model_edit(ProjectDB &db,
                   "model edit: zone {} names space {}, which is not stored",
                   rec.guid, sg));
           db.put_zone_row(rec);
-        } else
+        } else if constexpr (std::is_same_v<R, SlabRecord>)
+          db.put_slab_row(rec);
+        else
           db.put_space_row(rec);
         db.undismiss_model_element(rec.guid);
         actions[k] = stored ? "updated" : "created";
@@ -935,6 +1047,33 @@ ModelEditResult apply_model_edit(ProjectDB &db,
     if (!fit_before.count(key))
       result.warnings.push_back(std::move(message));
 
+  // A storey the batch removed may not leave elements behind.
+  for (const auto &k : order) {
+    if (k.kind != ModelElementKind::storey)
+      continue;
+    const RowState &was = before.at(k);
+    if (was.row.is_null() || db.storey_by_guid(k.guid))
+      continue;
+    const int idx = was.row.at("record").value("idx", 0);
+    const auto storeys_now = db.storeys();
+    if (std::any_of(storeys_now.begin(), storeys_now.end(),
+                    [&](const auto &st) { return st.idx == idx; }))
+      continue; // another storey took the idx (a merge renumbered)
+    size_t walls = 0, spaces = 0, slabs = 0;
+    for (const auto &w : db.walls())
+      walls += w.storey == idx;
+    for (const auto &sp : db.spaces())
+      spaces += sp.storey == idx;
+    for (const auto &sl : db.slabs())
+      slabs += sl.storey == idx;
+    if (walls + spaces + slabs > 0)
+      throw std::invalid_argument(fmt::format(
+          "model edit: storey {} (idx {}) still holds {} wall(s), {} "
+          "space(s) and {} slab(s); move them to another storey or delete "
+          "them in the same batch",
+          k.guid, idx, walls, spaces, slabs));
+  }
+
   // Openings left without their host.
   std::set<std::string> walls_now;
   for (const auto &wall : db.walls())
@@ -993,6 +1132,9 @@ void normalise_logged_row(ModelElementKind kind, json &row) {
     break;
   case ModelElementKind::zone:
     rec = model_record_json(zone_from_json(rec));
+    break;
+  case ModelElementKind::slab:
+    rec = model_record_json(slab_from_json(rec));
     break;
   }
 }
@@ -1165,6 +1307,9 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
     case ModelElementKind::zone:
       put = ModelEditOp::put(zone_from_json(rec));
       break;
+    case ModelElementKind::slab:
+      put = ModelEditOp::put(slab_from_json(rec));
+      break;
     }
     return put;
   };
@@ -1312,6 +1457,153 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
         note(first, r.warnings);
       };
 
+  // storey.split / storey.merge: the storeys, renumbered, and the walls,
+  // spaces and slabs that change storey. Only the split / merged storeys
+  // are edits; renumbering and moving elements between storeys that share
+  // a level frame are bookkeeping (exact puts: the elements keep their
+  // source and lock).
+  const auto storeys_overlay = [&]() {
+    auto rows = db.storeys();
+    for (auto &r : rows)
+      if (const auto it = pending.find(r.guid); it != pending.end())
+        r = storey_from_json(it->second);
+    std::sort(rows.begin(), rows.end(),
+              [](const auto &a, const auto &b) { return a.idx < b.idx; });
+    return rows;
+  };
+  const auto put_storey = [&](const StoreyRecord &r, bool exact) {
+    pending[r.guid] = model_record_json(r);
+    auto p = ModelEditOp::put(r);
+    p.exact = exact;
+    out.push_back(std::move(p));
+  };
+  /// Move the elements on storey @p from whose base @p moves to storey
+  /// @p to (same level frame: coordinates unchanged).
+  const auto move_elements = [&](int from, int to, bool exact,
+                                 const std::function<bool(double)> &moves) {
+    for (auto w : overlay(db.walls()))
+      if (w.storey == from && moves(w.z_base)) {
+        w.storey = to;
+        pending[w.guid] = model_record_json(w);
+        auto p = ModelEditOp::put(w);
+        p.exact = exact;
+        out.push_back(std::move(p));
+      }
+    for (auto sp : overlay(db.spaces()))
+      if (sp.storey == from && moves(sp.z_floor)) {
+        sp.storey = to;
+        pending[sp.guid] = model_record_json(sp);
+        auto p = ModelEditOp::put(sp);
+        p.exact = exact;
+        out.push_back(std::move(p));
+      }
+    for (auto sl : db.slabs()) {
+      if (const auto it = pending.find(sl.guid); it != pending.end())
+        sl = slab_from_json(it->second);
+      if (sl.storey == from && moves(sl.z_top - sl.thickness)) {
+        sl.storey = to;
+        pending[sl.guid] = model_record_json(sl);
+        auto p = ModelEditOp::put(sl);
+        p.exact = exact;
+        out.push_back(std::move(p));
+      }
+    }
+  };
+  const auto all = [](double) { return true; };
+  const auto expand_storey = [&](const std::string &verb, const json &op) {
+    auto rows = storeys_overlay();
+    const auto find = [&](const std::string &g) -> StoreyRecord & {
+      for (auto &r : rows)
+        if (r.guid == g)
+          return r;
+      throw std::invalid_argument("model edit ops: storey." + verb +
+                                  ": no storey " + g);
+    };
+    if (verb == "split") {
+      if (!op.contains("guid") || !op.contains("z") || !op.at("z").is_number())
+        throw std::invalid_argument("model edit ops: storey.split needs "
+                                    "\"guid\" and \"z\"");
+      StoreyRecord a = find(op.at("guid").get<std::string>());
+      const double z = op.at("z").get<double>();
+      constexpr double kMin = 0.10; // each part at least this high
+      if (!(z > a.z_floor + kMin && z < a.z_ceiling - kMin))
+        throw std::invalid_argument(fmt::format(
+            "model edit ops: storey.split: z {:.3f} is not inside storey {} "
+            "({:.3f} .. {:.3f}) by at least {} m",
+            z, a.guid, a.z_floor, a.z_ceiling, kMin));
+      // Make room: the storeys above move up one idx, top first.
+      for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+        if (it->idx <= a.idx)
+          break;
+        StoreyRecord up = *it;
+        move_elements(up.idx, up.idx + 1, true, all);
+        up.idx += 1;
+        put_storey(up, true);
+      }
+      StoreyRecord b = a;
+      b.id = -1;
+      b.guid = op.value("new_guid", std::string());
+      if (b.guid.empty())
+        b.guid = generate_guid();
+      b.idx = a.idx + 1;
+      b.name =
+          op.value("name", a.name.empty() ? std::string() : a.name + " (2)");
+      b.z_floor = z;
+      b.is_ground = false;
+      b.metadata.clear();
+      b.source = "manual";
+      a.z_ceiling = z;
+      put_storey(a, false);
+      put_storey(b, false);
+      move_elements(a.idx, b.idx, true,
+                    [&](double base) { return base >= z - 1e-6; });
+      return;
+    }
+    if (!op.contains("guids") || !op.at("guids").is_array() ||
+        op.at("guids").size() != 2)
+      throw std::invalid_argument(
+          "model edit ops: storey.merge needs \"guids\": [a, b]");
+    StoreyRecord a = find(op.at("guids")[0].get<std::string>());
+    const StoreyRecord b = find(op.at("guids")[1].get<std::string>());
+    if (a.guid == b.guid)
+      throw std::invalid_argument(
+          "model edit ops: storey.merge: a storey cannot merge with itself");
+    for (size_t i = 0; i < 16; ++i)
+      if (std::abs(a.level_transform[i] - b.level_transform[i]) > 1e-9)
+        throw std::invalid_argument(fmt::format(
+            "model edit ops: storey.merge: storeys {} and {} have different "
+            "level frames; move b's elements to a one by one (an update of "
+            "their storey keeps them in place) and delete b",
+            a.guid, b.guid));
+    if (std::abs(a.idx - b.idx) != 1)
+      throw std::invalid_argument(fmt::format(
+          "model edit ops: storey.merge: storeys {} (idx {}) and {} (idx {}) "
+          "are not adjacent",
+          a.guid, a.idx, b.guid, b.idx));
+    a.z_floor = std::min(a.z_floor, b.z_floor);
+    a.z_ceiling = std::max(a.z_ceiling, b.z_ceiling);
+    a.is_ground = a.is_ground || b.is_ground;
+    // a below b: b's elements go to a's idx. a above b: a takes b's idx
+    // below, so b's elements stay where they are and a's follow it.
+    if (a.idx < b.idx)
+      move_elements(b.idx, a.idx, true, all);
+    pending.erase(b.guid);
+    out.push_back(ModelEditOp::remove(ModelElementKind::storey, b.guid));
+    // Close the gap: the storeys above b move down one idx, bottom first.
+    for (const auto &r : rows) {
+      if (r.idx <= b.idx)
+        continue;
+      StoreyRecord down = r.guid == a.guid ? a : r;
+      move_elements(down.idx, down.idx - 1, true, all);
+      down.idx -= 1;
+      if (r.guid == a.guid)
+        a = down;
+      put_storey(down, r.guid != a.guid);
+    }
+    if (a.idx < b.idx)
+      put_storey(a, false);
+  };
+
   for (const auto &op : ops) {
     if (!op.is_object() || !op.contains("op") || !op.at("op").is_string())
       throw std::invalid_argument(
@@ -1329,6 +1621,10 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
       return op.at("guid").get<std::string>();
     };
     try {
+      if (head == "storey" && (verb == "split" || verb == "merge")) {
+        expand_storey(verb, op);
+        continue;
+      }
       if (head == "ceiling" && verb == "set") {
         const std::string g = guid_of();
         json rec = current(ModelElementKind::space, g);
@@ -1556,6 +1852,9 @@ ModelHolds model_holds(const ProjectDB &db, ModelElementKind kind) {
     break;
   case ModelElementKind::zone:
     add_edited(db.zones());
+    break;
+  case ModelElementKind::slab:
+    add_edited(db.slabs());
     break;
   }
   return h;

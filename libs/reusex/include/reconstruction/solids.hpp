@@ -114,6 +114,9 @@ struct ElementSolid {
   /// The element it was built from: the wall's, the space's or (for a slab)
   /// the storey's guid.
   std::string source_guid;
+  /// The element's own guid when it has one apart from source_guid: a
+  /// slab's row guid (core::SlabRecord, schema v44). Empty otherwise.
+  std::string element_guid;
   int storey = 0; ///< core::StoreyRecord::idx
   /// IFC predefined type: wall "STANDARD"; slab "FLOOR" | "ROOF"; space its
   /// kind (room | corridor | open_plan | unknown).
@@ -190,5 +193,15 @@ struct SolidsResult {
 /// piece area (largest first); roof slabs likewise by ceiling level.
 SolidsResult build_solids(const core::SolidModel &model,
                           const SolidsOptions &options = {});
+
+/// The solid of one slab row (reusex-d5us; an edited or drawn slab the
+/// solids stage builds from its fields): @p slab's outline (holes cut)
+/// extruded from z_top - thickness to z_top in @p storey's level frame,
+/// its top clipped by top_planes when there are any (a clip that fails
+/// leaves it flat, with a warning). source_guid is the storey's guid,
+/// element_guid the slab's, predefined FLOOR | ROOF (a ceiling slab is FLOOR,
+/// IFC has no ceiling slab type), part 0.
+ElementSolid slab_solid(const core::SlabRecord &slab,
+                        const core::StoreyRecord &storey);
 
 } // namespace reusex::geometry

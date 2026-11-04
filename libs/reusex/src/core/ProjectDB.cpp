@@ -454,9 +454,13 @@ class ProjectDB::Impl {
   bool hasOpeningLeafColumns = false;
   /// zones and zone_members exist (v43).
   bool hasZonesTable = false;
+  /// storeys.is_ground exists (v44).
+  bool hasStoreyGroundColumn = false;
+  /// slabs exists (v44).
+  bool hasSlabsTable = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 43;
+  static constexpr int LATEST_SCHEMA_VERSION = 44;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -596,6 +600,8 @@ class ProjectDB::Impl {
         tableExists("model_dismissed") && tableExists("model_edits");
     hasOpeningLeafColumns = columnExists("openings", "frame_depth");
     hasZonesTable = tableExists("zones") && tableExists("zone_members");
+    hasStoreyGroundColumn = columnExists("storeys", "is_ground");
+    hasSlabsTable = tableExists("slabs");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -951,6 +957,10 @@ class ProjectDB::Impl {
 
     if (current < 43) {
       migrateToV43();
+    }
+
+    if (current < 44) {
+      migrateToV44();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -3359,7 +3369,13 @@ class ProjectDB::Impl {
       "id, guid, idx, name, z_floor, z_ceiling, level_transform, source, "
       "locked, confidence, metadata";
 
-  static core::StoreyRecord readStorey(sqlite3_stmt *s) {
+  /// kStoreyColumns plus is_ground when the column exists (v44).
+  std::string storeyColumns() const {
+    return std::string(kStoreyColumns) +
+           (hasStoreyGroundColumn ? ", is_ground" : "");
+  }
+
+  core::StoreyRecord readStorey(sqlite3_stmt *s) const {
     core::StoreyRecord r;
     r.id = sqlite3_column_int64(s, 0);
     r.guid = column_text(s, 1);
@@ -3373,6 +3389,8 @@ class ProjectDB::Impl {
     r.locked = sqlite3_column_int(s, 8) != 0;
     r.confidence = sqlite3_column_double(s, 9);
     r.metadata = column_text(s, 10);
+    if (hasStoreyGroundColumn)
+      r.is_ground = sqlite3_column_int(s, 11) != 0;
     return r;
   }
 
@@ -3399,7 +3417,7 @@ class ProjectDB::Impl {
     if (!hasStoreysTable)
       return out;
     const std::string sql =
-        std::string("SELECT ") + kStoreyColumns + " FROM storeys ORDER BY idx;";
+        "SELECT " + storeyColumns() + " FROM storeys ORDER BY idx;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "storeys");
     StmtGuard guard(s);
     int rc;
@@ -3413,8 +3431,8 @@ class ProjectDB::Impl {
   std::optional<core::StoreyRecord> storeyByGuid(std::string_view guid) const {
     if (!hasStoreysTable)
       return std::nullopt;
-    const std::string sql = std::string("SELECT ") + kStoreyColumns +
-                            " FROM storeys WHERE guid = ?;";
+    const std::string sql =
+        "SELECT " + storeyColumns() + " FROM storeys WHERE guid = ?;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "storey_by_guid");
     StmtGuard guard(s);
     bind_text(s, 1, guid);
@@ -3603,6 +3621,8 @@ class ProjectDB::Impl {
         throw std::runtime_error("save_storeys: insert of storey " +
                                  std::to_string(r.idx) +
                                  " failed: " + sqlite3_errmsg(db));
+      if (r.is_ground)
+        setStoreyGround(r.guid, true, "save_storeys");
       if (imp)
         undismissModelElement(r.guid);
       ++written;
@@ -4946,6 +4966,230 @@ class ProjectDB::Impl {
     reusex::info("Migration to schema version 43 complete");
   }
 
+  void migrateToV44() {
+    reusex::info("Migrating database to schema version 44");
+    // Rediger editor slice S7 (reusex-d5us): slabs as rows -- the floor /
+    // ceiling / roof pieces the solids stage derives, written as detected
+    // rows, and the ones drawn or edited by hand (locked) that the stage
+    // builds from instead -- and the ground storey flag. Outline and top
+    // planes use the spaces' codecs (core/space_polygon.hpp,
+    // core/sloped_ceiling.hpp). `storey` is the storey idx (the walls rule).
+    Savepoint sp(db, "migrate_v44");
+    if (tableExists("storeys") && !columnExists("storeys", "is_ground"))
+      execOrThrow("ALTER TABLE storeys ADD COLUMN is_ground INTEGER NOT NULL "
+                  "DEFAULT 0 CHECK (is_ground IN (0, 1));");
+    execOrThrow(R"(
+      CREATE TABLE IF NOT EXISTS slabs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        guid        TEXT    NOT NULL UNIQUE,
+        storey      INTEGER NOT NULL,
+        kind        TEXT    NOT NULL DEFAULT 'floor'
+          CHECK (kind IN ('floor', 'ceiling', 'roof')),
+        outline     BLOB    NOT NULL,
+        z_top       REAL    NOT NULL DEFAULT 0,
+        thickness   REAL    NOT NULL DEFAULT 0.2,
+        top_planes  TEXT    NOT NULL DEFAULT '',
+        source      TEXT    NOT NULL DEFAULT 'detected'
+          CHECK (source IN ('detected', 'manual', 'imported')),
+        locked      INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+        confidence  REAL    NOT NULL DEFAULT -1,
+        metadata    TEXT    NOT NULL DEFAULT '',
+        run_id      INTEGER,
+        created_at  TEXT    NOT NULL
+          DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_slabs_storey ON slabs(storey);
+    )");
+    insertSchemaVersion(44, "Solid model: slabs table (floor / ceiling / "
+                            "roof rows) and storeys.is_ground");
+    sp.release();
+    hasStoreyGroundColumn = true;
+    hasSlabsTable = true;
+    reusex::info("Migration to schema version 44 complete");
+  }
+
+  // ── Slabs (v44) ──────────────────────────────────────────────────────────
+
+  static constexpr const char *kSlabColumns =
+      "id, guid, storey, kind, outline, z_top, thickness, top_planes, "
+      "source, locked, confidence, metadata";
+
+  static core::SlabRecord readSlab(sqlite3_stmt *s) {
+    core::SlabRecord r;
+    r.id = sqlite3_column_int64(s, 0);
+    r.guid = column_text(s, 1);
+    r.storey = sqlite3_column_int(s, 2);
+    r.kind = column_text(s, 3);
+    {
+      const auto *data =
+          static_cast<const uint8_t *>(sqlite3_column_blob(s, 4));
+      const int bytes = sqlite3_column_bytes(s, 4);
+      std::vector<uint8_t> blob;
+      if (data && bytes > 0)
+        blob.assign(data, data + bytes);
+      try {
+        r.outline = core::decode_space_polygon(blob);
+      } catch (const std::exception &e) {
+        throw std::runtime_error("slab " + r.guid + ": " + e.what());
+      }
+    }
+    r.z_top = sqlite3_column_double(s, 5);
+    r.thickness = sqlite3_column_double(s, 6);
+    try {
+      r.top_planes = core::decode_ceiling_planes(column_text(s, 7));
+    } catch (const std::exception &e) {
+      throw std::runtime_error("slab " + r.guid + ": " + e.what());
+    }
+    r.source = column_text(s, 8);
+    r.locked = sqlite3_column_int(s, 9) != 0;
+    r.confidence = sqlite3_column_double(s, 10);
+    r.metadata = column_text(s, 11);
+    return r;
+  }
+
+  std::vector<core::SlabRecord> listSlabs(std::string_view guid) const {
+    std::vector<core::SlabRecord> out;
+    if (!hasSlabsTable)
+      return out;
+    const std::string sql = std::string("SELECT ") + kSlabColumns +
+                            " FROM slabs WHERE (?1 = '' OR guid = ?1) "
+                            "ORDER BY storey, id;";
+    sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "slabs");
+    StmtGuard guard(s);
+    bind_text(s, 1, guid);
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW)
+      out.push_back(readSlab(s));
+    if (rc != SQLITE_DONE)
+      throw std::runtime_error("slabs: " + std::string(sqlite3_errmsg(db)));
+    return out;
+  }
+
+  /// The validated outline blob of @p r.
+  std::vector<uint8_t> checkedSlab(const core::SlabRecord &r,
+                                   const std::string &who) const {
+    const std::string where = who + ": slab " + r.guid;
+    if (r.guid.empty())
+      throw std::invalid_argument(who + ": a slab of storey " +
+                                  std::to_string(r.storey) + " has no guid");
+    if (r.kind != "floor" && r.kind != "ceiling" && r.kind != "roof")
+      throw std::invalid_argument(where + " has invalid kind '" + r.kind +
+                                  "' (floor | ceiling | roof)");
+    checkSource(r.source, where);
+    if (!(r.thickness > 0.0) || !std::isfinite(r.thickness) ||
+        !std::isfinite(r.z_top))
+      throw std::invalid_argument(where +
+                                  ": thickness must be > 0 and z_top finite");
+    {
+      // The top planes obey a ceiling's rules over the outline (the slab's
+      // bottom as its floor).
+      core::SpaceRecord top;
+      top.polygon = r.outline;
+      top.z_floor = r.z_top - r.thickness;
+      top.z_ceiling = r.z_top;
+      top.ceiling_planes = r.top_planes;
+      if (const auto bad = core::check_ceiling_planes(top); !bad.empty())
+        throw std::invalid_argument(where + ": " + bad);
+    }
+    try {
+      return core::encode_space_polygon(r.outline);
+    } catch (const std::exception &e) {
+      throw std::invalid_argument(where + ": " + e.what());
+    }
+  }
+
+  void bindSlab(sqlite3_stmt *s, const core::SlabRecord &r,
+                const std::vector<uint8_t> &blob, int runId) const {
+    bind_text(s, 1, r.guid);
+    sqlite3_bind_int(s, 2, r.storey);
+    bind_text(s, 3, r.kind);
+    sqlite3_bind_blob(s, 4, blob.data(), static_cast<int>(blob.size()),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_double(s, 5, r.z_top);
+    sqlite3_bind_double(s, 6, r.thickness);
+    bind_text(s, 7, core::encode_ceiling_planes(r.top_planes));
+    bind_text(s, 8, r.source);
+    sqlite3_bind_int(s, 9, r.locked ? 1 : 0);
+    sqlite3_bind_double(s, 10, r.confidence);
+    bind_text(s, 11, r.metadata);
+    if (runId >= 0)
+      sqlite3_bind_int(s, 12, runId);
+    else
+      sqlite3_bind_null(s, 12);
+  }
+
+  static constexpr const char *kSlabUpsert =
+      "INSERT INTO slabs (guid, storey, kind, outline, z_top, thickness, "
+      "top_planes, source, locked, confidence, metadata, run_id) "
+      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) "
+      "ON CONFLICT (guid) DO UPDATE SET storey = excluded.storey, "
+      "kind = excluded.kind, outline = excluded.outline, "
+      "z_top = excluded.z_top, thickness = excluded.thickness, "
+      "top_planes = excluded.top_planes, source = excluded.source, "
+      "locked = excluded.locked, confidence = excluded.confidence, "
+      "metadata = excluded.metadata;";
+
+  void putSlabRow(const core::SlabRecord &r) {
+    constexpr const char *who = "put_slab_row";
+    checkWritable();
+    if (!hasSlabsTable)
+      throw std::runtime_error("put_slab_row: project schema predates v44");
+    const auto blob = checkedSlab(r, who);
+    sqlite3_stmt *s = prepare_or_throw(db, kSlabUpsert, who);
+    StmtGuard guard(s);
+    bindSlab(s, r, blob, -1);
+    stepDone(s, std::string(who) + ": slab " + r.guid);
+  }
+
+  /// The derivation's writer: replace every unlocked slab row by @p slabs
+  /// (tombstoned guids skipped, a locked row with the same guid kept).
+  size_t saveSlabs(const std::vector<core::SlabRecord> &slabsIn, int runId) {
+    constexpr const char *who = "save_slabs";
+    checkWritable();
+    if (!hasSlabsTable)
+      throw std::runtime_error("save_slabs: project schema predates v44");
+    const auto slabs = withoutDismissed(slabsIn, "slab", false, who);
+    std::set<std::string> guids;
+    std::vector<std::vector<uint8_t>> blobs;
+    for (const auto &r : slabs) {
+      blobs.push_back(checkedSlab(r, who));
+      if (!guids.insert(r.guid).second)
+        throw std::invalid_argument("save_slabs: duplicate guid " + r.guid);
+    }
+    Savepoint sp(db, who);
+    const auto lockedGuids =
+        selectGuids("SELECT guid FROM slabs WHERE locked = 1;", who);
+    execOrThrow("DELETE FROM slabs WHERE locked = 0;");
+    sqlite3_stmt *ins = prepare_or_throw(db, kSlabUpsert, who);
+    StmtGuard guard(ins);
+    size_t written = 0, kept = 0;
+    for (size_t i = 0; i < slabs.size(); ++i) {
+      if (lockedGuids.count(slabs[i].guid)) {
+        ++kept;
+        continue;
+      }
+      sqlite3_reset(ins);
+      sqlite3_clear_bindings(ins);
+      bindSlab(ins, slabs[i], blobs[i], runId);
+      stepDone(ins, std::string(who) + ": slab " + slabs[i].guid);
+      ++written;
+    }
+    bumpModelRevision();
+    sp.release();
+    if (kept > 0)
+      reusex::info("save_slabs: {} slab(s) are locked; kept the stored rows",
+                   kept);
+    return written;
+  }
+
+  void deleteSlabs() {
+    checkWritable();
+    if (hasSlabsTable) {
+      execOrThrow("DELETE FROM slabs;");
+      bumpModelRevision();
+    }
+  }
+
   // ── Zones (v43) ──────────────────────────────────────────────────────────
 
   std::vector<core::ZoneRecord> listZones(std::string_view guid) const {
@@ -5572,8 +5816,10 @@ class ProjectDB::Impl {
         who);
     StmtGuard upGuard(up);
     bindCommon(up);
-    if (stepDone(up, std::string(who) + ": update of storey " + r.guid) > 0)
+    if (stepDone(up, std::string(who) + ": update of storey " + r.guid) > 0) {
+      setStoreyGround(r.guid, r.is_ground, who);
       return;
+    }
     sqlite3_stmt *ins = prepare_or_throw(
         db,
         "INSERT INTO storeys (idx, name, z_floor, z_ceiling, level_transform, "
@@ -5583,6 +5829,24 @@ class ProjectDB::Impl {
     StmtGuard insGuard(ins);
     bindCommon(ins);
     stepDone(ins, std::string(who) + ": insert of storey " + r.guid);
+    setStoreyGround(r.guid, r.is_ground, who);
+  }
+
+  /// storeys.is_ground of one row (v44; a no-op before, where only false
+  /// can be stored, and an error for true).
+  void setStoreyGround(const std::string &guid, bool ground, const char *who) {
+    if (!hasStoreyGroundColumn) {
+      if (ground)
+        throw std::runtime_error(std::string(who) +
+                                 ": is_ground needs schema v44");
+      return;
+    }
+    sqlite3_stmt *s = prepare_or_throw(
+        db, "UPDATE storeys SET is_ground = ? WHERE guid = ?;", who);
+    StmtGuard guard(s);
+    sqlite3_bind_int(s, 1, ground ? 1 : 0);
+    bind_text(s, 2, guid);
+    stepDone(s, std::string(who) + ": is_ground of storey " + guid);
   }
 
   void putWallRow(const core::WallRecord &r) {
@@ -11019,6 +11283,36 @@ bool ProjectDB::remove_zone_row(std::string_view guid) {
 }
 
 void ProjectDB::delete_zones() { impl_->deleteZones(); }
+
+std::vector<core::SlabRecord> ProjectDB::slabs() const {
+  return impl_->listSlabs("");
+}
+
+std::optional<core::SlabRecord>
+ProjectDB::slab_by_guid(std::string_view guid) const {
+  if (guid.empty())
+    return std::nullopt;
+  auto all = impl_->listSlabs(guid);
+  if (all.empty())
+    return std::nullopt;
+  return std::move(all.front());
+}
+
+size_t ProjectDB::save_slabs(const std::vector<core::SlabRecord> &slabs,
+                             int run_id) {
+  return impl_->saveSlabs(slabs, run_id);
+}
+
+void ProjectDB::put_slab_row(const core::SlabRecord &slab) {
+  impl_->putSlabRow(slab);
+}
+
+bool ProjectDB::remove_slab_row(std::string_view guid) {
+  return impl_->removeRow("slabs", impl_->hasSlabsTable, guid,
+                          "remove_slab_row");
+}
+
+void ProjectDB::delete_slabs() { impl_->deleteSlabs(); }
 
 void ProjectDB::replace_wall_joins_of(
     std::string_view wall, const std::vector<core::WallJoinRecord> &joins) {

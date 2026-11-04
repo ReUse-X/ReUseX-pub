@@ -59,9 +59,9 @@
 
 namespace reusex::core {
 
-enum class ModelElementKind { storey, wall, opening, space, zone };
+enum class ModelElementKind { storey, wall, opening, space, zone, slab };
 
-/// "storey" | "wall" | "opening" | "space" | "zone".
+/// "storey" | "wall" | "opening" | "space" | "zone" | "slab".
 std::string_view to_string(ModelElementKind kind);
 /// @throws std::invalid_argument for anything else.
 ModelElementKind parse_model_element_kind(std::string_view text);
@@ -80,7 +80,7 @@ struct ModelEditOp {
   /// remove / revert: the row's guid (put: the record's).
   std::string guid;
   std::variant<std::monostate, StoreyRecord, WallRecord, OpeningRecord,
-               SpaceRecord, ZoneRecord>
+               SpaceRecord, ZoneRecord, SlabRecord>
       record;
   /// put wall: replace the joins touching it (each must name it); nullopt
   /// keeps the stored ones.
@@ -91,6 +91,10 @@ struct ModelEditOp {
   /// had to drop); apply_model_edit() passes them on in
   /// ModelEditResult::warnings.
   std::vector<std::string> warnings;
+  /// put: write the record exactly as given, without the edit marks
+  /// (manual, locked, metadata.edited): bookkeeping a tool does to rows the
+  /// user did not edit, e.g. renumbering the storeys above a split.
+  bool exact = false;
 
   static ModelEditOp put(StoreyRecord storey);
   static ModelEditOp
@@ -103,6 +107,7 @@ struct ModelEditOp {
   /// A zone's members must be stored spaces once the batch's earlier ops
   /// are applied (apply_model_edit() refuses the batch otherwise).
   static ModelEditOp put(ZoneRecord zone);
+  static ModelEditOp put(SlabRecord slab);
   static ModelEditOp remove(ModelElementKind kind, std::string guid);
   static ModelEditOp revert(ModelElementKind kind, std::string guid);
 };
@@ -194,6 +199,7 @@ nlohmann::json model_record_json(const WallRecord &r);
 nlohmann::json model_record_json(const OpeningRecord &r);
 nlohmann::json model_record_json(const SpaceRecord &r);
 nlohmann::json model_record_json(const ZoneRecord &r);
+nlohmann::json model_record_json(const SlabRecord &r);
 /// The inverse; a missing field keeps the record's default, so
 /// `wall_from_json(model_record_json(w).merge_patch(partial))` applies a
 /// partial update. @throws std::invalid_argument for an unknown key or a
@@ -203,6 +209,7 @@ WallRecord wall_from_json(const nlohmann::json &j);
 OpeningRecord opening_from_json(const nlohmann::json &j);
 SpaceRecord space_from_json(const nlohmann::json &j);
 ZoneRecord zone_from_json(const nlohmann::json &j);
+SlabRecord slab_from_json(const nlohmann::json &j);
 
 /// Ops in the ruxd wire form, read against @p db's current rows:
 ///   {"op": "<kind>.create", "record": {...}}             (put; guid optional)
@@ -222,7 +229,19 @@ ZoneRecord zone_from_json(const nlohmann::json &j);
 ///   {"op": "wall.offset", "guid": g, "distance": m, "copy"?: bool (true),
 ///    "new_guid"?: g2}   (move / copy g sideways; + = left of start -> end)
 ///   {"op": "storey.update", "guid": g, "set": {...}}
-/// with <kind> = wall | opening | space | storey | zone (a zone's record:
+///   {"op": "storey.split", "guid": g, "z": level z, "new_guid"?: g2,
+///    "name"?: text}   (g keeps [z_floor, z), a new storey g2 above it
+///                     takes [z, z_ceiling), idx g.idx + 1, g's level
+///                     frame; the storeys above move up one idx; g's walls
+///                     / spaces / slabs whose base is at or above z move
+///                     to g2)
+///   {"op": "storey.merge", "guids": [a, b]}   (a spans both; b's walls /
+///                     spaces / slabs move to a, b is removed, the
+///                     storeys above b move down one idx; both must share
+///                     one level frame)
+/// with <kind> = wall | opening | space | storey | zone | slab (a slab's
+/// record: storey, kind floor | ceiling | roof, outline {outer, holes},
+/// z_top, thickness, top_planes; a zone's record:
 /// name, use, spaces = member space guids; a space delete also drops it
 /// from every zone, logged as an update of that zone, so undo restores it).
 /// "joins" (wall) and "boundaries" (space) may ride along on create / update.
