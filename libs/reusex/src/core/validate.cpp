@@ -3,6 +3,7 @@
 
 #include "core/validate.hpp"
 #include "core/ProjectDB.hpp"
+#include "core/band_grid_inputs.hpp"
 #include "core/label_encoding.hpp"
 #include "core/pose_fingerprint.hpp"
 
@@ -222,6 +223,29 @@ void check_stale_cloud_poses(const ProjectDB &db,
        "re-run `rux create clouds` to rebuild it from the current poses",
        /*artifact=*/std::string(kCloud),
        /*commands=*/{"rux create clouds"}});
+}
+
+/// The `rooms` cloud's band grid was cut by other storeys / walls /
+/// openings than the project has now (reusex-14aj): the spaces stage will
+/// refuse it. A warning, because a changed table need not move a room; the
+/// stage's own label check decides.
+static void check_stale_rooms_grid(const ProjectDB &db,
+                                   std::vector<ValidationIssue> &out) {
+  const auto changed = stale_band_grid_inputs(db);
+  if (changed.empty())
+    return;
+  out.push_back(
+      {"stale_rooms_grid",
+       fmt::format("the 'rooms' cloud was cut by other {} than the project "
+                   "has now (an edit or a re-run since the rooms stage "
+                   "ran); the spaces stage rebuilds that grid and refuses "
+                   "the cloud when a room moved — re-run the rooms stage "
+                   "first",
+                   fmt::join(changed, " / ")),
+       ValidationSeverity::warning,
+       /*hint=*/"re-run `rux create rooms`, then `rux create spaces`",
+       /*artifact=*/"rooms",
+       /*commands=*/{"rux create rooms"}});
 }
 
 void check_dangling_space_boundaries(const ProjectDB &db,
@@ -585,6 +609,9 @@ void check_stage_inputs(const ProjectDB &db, PipelineStage stage,
           missing_message(name, *artifact, names, input, state, db),
           names.front().declared));
   }
+
+  if (stage == PipelineStage::spaces)
+    check_stale_rooms_grid(db, out);
 
   for (const auto &[alignment, members] : groups) {
     (void)alignment;

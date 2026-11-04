@@ -254,7 +254,10 @@ const std::vector<StageContract> &contracts() {
        // ids are the cloud's labels, and polygonises it against `walls`.
        // walls and openings are optional (raster outlines without walls),
        // but sit earlier in this table: run walls -> openings -> rooms ->
-       // spaces. `planes` + `plane_classes` give the sloped-ceiling
+       // spaces, and rooms again after any change to storeys / walls /
+       // openings (validate warns `stale_rooms_grid` from the fingerprints
+       // rooms stamps, core/band_grid_inputs.hpp, reusex-14aj).
+       // `planes` + `plane_classes` give the sloped-ceiling
        // candidates (reusex-546); without them every ceiling stays flat.
        {{{"cloud"}},
         {{"normals"}},

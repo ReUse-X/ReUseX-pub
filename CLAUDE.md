@@ -515,7 +515,9 @@ and deleted the shims. `include/geometry/` now holds only the real
   a room; metrics, kind, space boundaries. Stored by the `spaces` stage
   (W4.3, `rux create spaces`, after rooms), which rebuilds the band grid
   with the `rooms` cloud's own parameters and refuses when it no longer
-  gives back that cloud's labels (re-run rooms); parameters in one table,
+  gives back that cloud's labels (re-run rooms after any storeys / walls /
+  openings change; `rux validate --stage spaces` warns from the grid-input
+  fingerprints rooms stamps, `core/band_grid_inputs.hpp`, reusex-14aj); parameters in one table,
   `pipeline/space_parameters.hpp`. `rux create rooms --spaces-json
   out.json` still writes the same spaces to a file (debug)
 - `segment_rooms.hpp`: room partitioning via Leiden clustering (igraph);
@@ -724,9 +726,10 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   spaces`, `JobStage::spaces`; the polygon is a blob,
   `core/space_polygon.hpp`; a boundary goes with its space but names its
   wall by GUID; a re-detected space keeps the GUID of the stored one whose
-  footprint it overlaps in world coordinates, and a named / locked one's
-  name, kind and lock, else uuid5 of storey + centroid at 5 cm,
-  `core/space_identity.hpp`; the storeys stage moves stored spaces into the
+  footprint it overlaps in world coordinates, and an unlocked named one's
+  name and kind, else uuid5 of storey + centroid at 5 cm; a locked stored
+  space is kept as stored and the detection matching it dropped
+  (reusex-s4mm), `core/space_identity.hpp`; the storeys stage moves stored spaces into the
   new level frames, `core::reframe_spaces`, reusex-djf). An imported model (`rux edit plan
   --import`, `rux import speckle`, `rux import ifc`) goes into these four
   tables through

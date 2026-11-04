@@ -13,9 +13,11 @@
 #include <reusex/core/ProjectDB.hpp>
 #include <reusex/core/guid.hpp>
 #include <reusex/core/model_edits.hpp>
+#include <reusex/core/sloped_ceiling.hpp>
 #include <reusex/core/space_identity.hpp>
 #include <reusex/core/space_polygon.hpp>
 #include <reusex/core/stage_contract.hpp>
+#include <reusex/core/validate.hpp>
 #include <reusex/io/solid_model_json.hpp>
 #include <reusex/pipeline/space_parameters.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
@@ -324,6 +326,83 @@ TEST_CASE("SpacesStage_LockedRow_SurvivesARerun",
   CHECK(kept->name == "Køkken");
 }
 
+TEST_CASE("SpacesStage_LockedRow_KeepsItsGeometry_AfterAWallEdit",
+          "[pipeline][stages][spaces][model_edits]") {
+  // reusex-s4mm: a space named and locked by hand (`rux set`, no editor
+  // marks) whose outline, heights and ceiling plane differ from what
+  // detection finds; then a wall edit in the editor and the chain walls ->
+  // openings -> rooms -> spaces. The locked row comes back as stored.
+  TempPath project("test_spaces_stage_locked_geometry");
+  ProjectDB db(project.path);
+  seed_band_rooms(db, project);
+  REQUIRE(run(db, project, JobStage::spaces).ok);
+  auto rows = db.spaces();
+  REQUIRE(rows.size() == 2);
+  auto locked = rows.front();
+  locked.name = "S0-01 Køkken";
+  locked.source = "manual";
+  locked.locked = true;
+  // A hand-made outline: the room's bounding box shrunk by 0.2 m.
+  double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const auto &p : locked.polygon.outer) {
+    x0 = std::min(x0, p[0]);
+    y0 = std::min(y0, p[1]);
+    x1 = std::max(x1, p[0]);
+    y1 = std::max(y1, p[1]);
+  }
+  locked.polygon.outer = {{x0 + 0.2, y0 + 0.2},
+                          {x1 - 0.2, y0 + 0.2},
+                          {x1 - 0.2, y1 - 0.2},
+                          {x0 + 0.2, y1 - 0.2}};
+  locked.polygon.holes.clear();
+  locked.z_ceiling = 2.3;
+  locked.ceiling_planes = {
+      core::CeilingPlane{{0.5 * (x0 + x1), 0.5 * (y0 + y1), 2.2}, {0.05, 0.0}}};
+  db.update_spaces({locked});
+  const auto before = *db.space_by_guid(locked.guid);
+
+  // One wall edit in the editor (written back as it is: manual, locked).
+  const auto walls = db.walls();
+  REQUIRE_FALSE(walls.empty());
+  core::apply_model_edit(db, {core::ModelEditOp::put(walls.front())});
+
+  for (auto stage : {JobStage::walls, JobStage::openings, JobStage::rooms,
+                     JobStage::spaces}) {
+    const auto r = run(db, project, stage);
+    INFO(to_string(stage) << ": " << r.message);
+    REQUIRE(r.ok);
+  }
+  const auto after = db.space_by_guid(locked.guid);
+  REQUIRE(after.has_value());
+  CHECK(after->name == before.name);
+  CHECK(after->locked);
+  CHECK(after->source == "manual");
+  CHECK(after->polygon.outer == before.polygon.outer);
+  CHECK(after->polygon.holes == before.polygon.holes);
+  CHECK(after->z_floor == before.z_floor);
+  CHECK(after->z_ceiling == before.z_ceiling);
+  CHECK(core::encode_ceiling_planes(after->ceiling_planes) ==
+        core::encode_ceiling_planes(before.ceiling_planes));
+  CHECK(after->area == before.area);
+  // Still two spaces: the detection of the locked room was dropped, not
+  // added next to it.
+  CHECK(db.spaces().size() == 2);
+  // Its room_label names a room of today's rooms cloud.
+  const auto labels = db.point_cloud_label("rooms");
+  std::set<int> room_ids;
+  for (const auto &l : labels->points)
+    if (l.label > 0)
+      room_ids.insert(static_cast<int>(l.label));
+  CHECK(room_ids.count(after->room_label) == 1);
+  // Its boundaries are the stored ones on walls that still exist.
+  std::set<std::string> wall_guids;
+  for (const auto &w : db.walls())
+    wall_guids.insert(w.guid);
+  for (const auto &b : db.space_boundaries())
+    CHECK(wall_guids.count(b.wall) == 1);
+  CHECK(db.dangling_space_boundaries() == 0);
+}
+
 TEST_CASE("SpacesStage_StaleRooms_IsRefused", "[pipeline][stages][spaces]") {
   // The band grid is rebuilt from today's tables: without the walls and
   // openings nothing cuts the wide doorway, so the grid has one room where
@@ -341,6 +420,64 @@ TEST_CASE("SpacesStage_StaleRooms_IsRefused", "[pipeline][stages][spaces]") {
   CHECK(r.invalid_input);
   CHECK(r.message.find("re-run `rux create rooms`") != std::string::npos);
   CHECK_FALSE(db.has_spaces());
+}
+
+TEST_CASE("SpacesStage_WallEditWithoutRooms_NamesTheRoomsStage",
+          "[pipeline][stages][spaces][model_edits]") {
+  // reusex-14aj: after a wall edit the rooms cloud's grid is stale. `rux
+  // validate --stage spaces` says so up front and names the rooms stage; the
+  // spaces stage refuses with the changed table; walls -> rooms -> spaces
+  // runs.
+  TempPath project("test_spaces_stage_stale_walls");
+  ProjectDB db(project.path);
+  seed_band_rooms(db, project);
+  auto stale = [&] {
+    std::vector<core::ValidationIssue> issues;
+    for (const auto &i :
+         core::validate_stage(db, core::PipelineStage::spaces).issues)
+      if (i.check == "stale_rooms_grid")
+        issues.push_back(i);
+    return issues;
+  };
+  CHECK(stale().empty());
+  REQUIRE(run(db, project, JobStage::spaces).ok);
+  CHECK(stale().empty()); // writing spaces does not touch the grid's inputs
+
+  // Move the partition 0.4 m east.
+  auto walls = db.walls();
+  auto partition = std::find_if(walls.begin(), walls.end(), [](const auto &w) {
+    return std::abs(w.x0 - 2.0) < 0.2 && std::abs(w.x1 - 2.0) < 0.2;
+  });
+  REQUIRE(partition != walls.end());
+  partition->x0 += 0.4;
+  partition->x1 += 0.4;
+  core::apply_model_edit(db, {core::ModelEditOp::put(*partition)});
+
+  const auto issues = stale();
+  REQUIRE(issues.size() == 1);
+  CHECK(issues[0].severity == core::ValidationSeverity::warning);
+  CHECK(issues[0].artifact == "rooms");
+  CHECK(issues[0].message.find("walls") != std::string::npos);
+  CHECK(issues[0].commands == std::vector<std::string>{"rux create rooms"});
+
+  const auto refused = run(db, project, JobStage::spaces);
+  INFO(refused.message);
+  CHECK_FALSE(refused.ok);
+  CHECK(refused.invalid_input);
+  CHECK(refused.message.find("changed since rooms ran: walls") !=
+        std::string::npos);
+  CHECK(refused.message.find("re-run `rux create rooms`") != std::string::npos);
+
+  // The walls stage keeps the edited wall and finds the rest again: same
+  // inputs, so rooms then spaces run and the warning is gone.
+  for (auto stage : {JobStage::walls, JobStage::rooms, JobStage::spaces}) {
+    const auto r = run(db, project, stage);
+    INFO(to_string(stage) << ": " << r.message);
+    REQUIRE(r.ok);
+  }
+  CHECK(stale().empty());
+  REQUIRE(run(db, project, JobStage::walls).ok);
+  CHECK(stale().empty()); // re-detected the same: still fresh
 }
 
 TEST_CASE("SpacesStage_LeidenRooms_IsRefused", "[pipeline][stages][spaces]") {

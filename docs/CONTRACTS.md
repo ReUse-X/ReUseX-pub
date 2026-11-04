@@ -706,7 +706,7 @@ asking for band by name is an instruction, not a preference.
 |---|---|
 | Consumes | `cloud`, `planes`, `plane_centroids`, `plane_normals` |
 | Optional | `normals`, `storeys` (band), `walls`, `openings` (band: wall graph and door cuts) |
-| Produces | `rooms` (`Label`) |
+| Produces | `rooms` (`Label`; `band`: `parameters.band_grid_inputs`, the fingerprints of the storeys / walls / openings the grid read, see the spaces stage) |
 | Options  | `SegmentRoomsOptions` (`libs/reusex/include/segmentation/segment_rooms.hpp`); `band`: `BandRoomsOptions` (`segmentation/band_rooms.hpp`), parameter keys `band_*` (incl. `band_use_walls`, `band_cut_at_doors`) |
 | Checks   | `cloud`/`planes` present + aligned; `plane_centroids`/`plane_normals` present + aligned; `band`: `storeys` has rows (refused if explicit, else falls back to leiden with a warning) and `normals` is aligned with `cloud` (checked by the stage) |
 
@@ -728,11 +728,28 @@ parameters `rooms` was saved with (`band_*`, `filter`), runs the band
 partition again over `cloud` / `normals` / `storeys` and the walls / openings
 tables, and checks that the room ids it gets are the `rooms` cloud's labels
 — the partition is deterministic, so they agree unless something it reads
-changed since `rooms` ran (walls, openings, storeys re-run). Then it is
-refused as invalid input with the share of points that disagree: re-run
-`rux create rooms` first. `rooms` made with `--method leiden` is refused
-the same way (no grid). So the recommended order is **walls -> openings ->
-rooms -> spaces**.
+changed since `rooms` ran (walls, openings, storeys re-run, or edited in
+the Rediger editor). Then it is refused as invalid input with the share of
+points that disagree and the tables that changed: re-run `rux create
+rooms` first. `rooms` made with `--method leiden` is refused the same way
+(no grid). So the order is **walls -> openings -> rooms -> spaces**, and
+**rooms must run again after any change to the storeys, walls or openings
+before spaces** — a job chain `storeys, classify, walls, openings, spaces`
+(no rooms) fails at spaces after any wall edit, and usually even without
+one, since walls / openings re-detected by a newer build differ from the
+ones the stored `rooms` cloud was cut by (reusex-14aj: the shipped
+Sygehusgrunden demo, made 2026-10-24: its grid read 292 walls and 101 door
+cuts; walls and openings re-detected today give 241 and 80, so 133 rooms
+instead of 143; the room ids shift, so 73 % of the points carry another id
+although only 4 % lie in another room). The rooms stage stamps a fingerprint of each table its grid read
+into the cloud's `parameters` (`"band_grid_inputs"`: storeys, and walls /
+openings when the grid used them; only the fields the grid reads, so a
+rename, a lock or a re-run with the same result changes nothing,
+`core/band_grid_inputs.hpp`), and `rux validate --stage spaces` (and the
+spaces stage's input check, in its log) warns `stale_rooms_grid` naming
+the changed tables and the command `rux create rooms`. A warning, not an
+error: a changed table need not move a room, and the stage's own label
+check decides.
 
 | | |
 |---|---|
@@ -740,7 +757,7 @@ rooms -> spaces**.
 | Optional | `walls` (without it every space is its raster outline), `openings` (the door cuts of the rebuilt grid), `planes` + `plane_classes` (the sloped-ceiling candidates; without them every ceiling stays flat) |
 | Produces | `spaces`, `space_boundaries` (tables, schema v35: one row per space with a stable GUID, one per bounding wall stretch; `spaces.ceiling_planes`, schema v39) |
 | Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio`, `guid_min_overlap` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
-| Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; the rebuilt grid's room ids match `rooms` (checked by the stage) |
+| Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; warning `stale_rooms_grid` when the storeys / walls / openings changed since `rooms` ran (re-run `rux create rooms`); the rebuilt grid's room ids match `rooms` (checked by the stage) |
 
 Each row: `storey` (the storey's idx), `name` ("Space <room label>" until
 naming lands), `kind`, `polygon` (a blob: outer ring + holes, open rings,
@@ -761,8 +778,7 @@ min(cap, planes) by `ceiling_min_gain`; then `z_ceiling` is the fitted cap:
 the flat part, or the highest point of the planes over the space, and
 `volume` is integrated under the sloped ceiling; the fit is in `metadata` as
 `ceiling_fit`; `fit_ceiling_planes` off, or no candidate, leaves the ceiling
-flat; a detected space that carries a stored row's lock is fitted too, a
-locked row kept as stored keeps its own; eaves, reusex-ow8p: a plane a
+flat; a locked row is kept as stored and keeps its own; eaves, reusex-ow8p: a plane a
 neighbour took (within 0.6 m) runs on into a space whose seen ceiling does
 not contradict it, `ceiling_fit.extended_from`, so the strip between a knee
 partition and the facade slopes down to the facade; then the roof is
@@ -807,13 +823,28 @@ overlap by at least `guid_min_overlap` (half) of the larger footprint, or
 whose centroids lie within `guid_match_m` (1 m) with areas within
 `guid_min_area_ratio` (half); then, among the rest, pairs that overlap by
 half of the smaller footprint (a split or merged room's remnant). Greedy,
-largest share first, one-to-one, so a stored space is never doubled. A space
-matched to a row a person named (`locked = 1` or `source = manual`) also
-takes its name, kind, source, lock and metadata keys; its outline, heights
-and boundaries are the new ones (the row is replaced in place). A locked row
-nothing matches is kept as stored, with its boundaries on walls that still
-exist, flagged `"unmatched": true` in `metadata` and named at `warn`. Only an
-unmatched new space gets a fresh GUID, `uuid5(project_guid,
+largest share first, one-to-one, so a stored space is never doubled.
+**A locked row is never overwritten** (reusex-s4mm), whether the lock
+came from the editor, `rux set` or an import: a new space that matches it
+is dropped, and so is an otherwise unmatched new space lying mostly
+(`guid_min_overlap` of its own area) inside it (the rest of a room split
+under it); the row is written back as stored — outline, `z_floor` /
+`z_ceiling`, `ceiling_planes`, area, name, metadata — with only
+`room_label` taken from the matching new space (the link into today's
+`rooms` cloud) and an old `"unmatched"` flag cleared, and its boundaries
+are the stored ones on walls that still exist (a boundary is not
+re-measured against a moved wall). A locked row nothing matches is kept
+the same way, flagged `"unmatched": true` in `metadata` and named at
+`warn`. A new space matched to an UNLOCKED row a person named (`source =
+manual`, `locked = 0`: named with `rux set`, then `rux set
+spaces.<id>.locked false`) takes its name, kind, source, lock and metadata
+keys; its outline, heights and boundaries are the new ones (the row is
+replaced). So to let detection re-measure a named room, unlock it. Before
+reusex-s4mm a named or locked row took the re-detected outline and
+ceiling (reusex-djf), and only a row edited in the editor kept its own;
+the S10 scenario of rux-frontend re-measured 70 of 135 such rooms on a
+re-run after one storey's edits. Only an unmatched new space gets a fresh
+GUID, `uuid5(project_guid,
 "spaces/<storey>/<cx>,<cy>")` (the polygon's centroid rounded to 5 cm),
 suffixed until unique. Writing the table deletes boundary rows whose space
 row is gone (a tool that deleted spaces with foreign keys off;
@@ -1128,8 +1159,9 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   `save_spaces` skip tombstoned GUIDs too (and joins / boundaries to them).
   The walls stage's plan regularisation and the openings stage's grid only
   move fresh detections; locked rows are kept as stored. A space edited
-  here keeps its outline, unlike one only named or locked (`rux set`),
-  which takes the re-detected outline (reusex-djf). An import writes a
+  here keeps its outline, and so does one only named or locked with `rux
+  set` (reusex-s4mm; before, it took the re-detected outline, reusex-djf).
+  An import writes a
   tombstoned element back and drops the tombstone.
 - **Revision**: every write to the four tables (whole-run writers, deletes,
   imports, each batch / undo / redo once) raises `model.revision`. A new
