@@ -94,8 +94,7 @@ TEST_CASE("Sagsdata_StoredValue_ValidatesEachField", "[sagsdata]") {
 
 TEST_CASE("Sagsdata_StoredValue_RegisterIds", "[sagsdata]") {
   // The ids the ruxd lookups give (rux-frontend contract gap 17).
-  CHECK(core::sagsdata_stored_value("bfe_number", json(6033528)) ==
-        "6033528");
+  CHECK(core::sagsdata_stored_value("bfe_number", json(6033528)) == "6033528");
   CHECK(core::sagsdata_stored_value("bfe_number", json(nullptr)).empty());
   CHECK_THROWS_WITH(core::sagsdata_stored_value("bfe_number", json(0)),
                     ContainsSubstring("positive integer"));
