@@ -52,6 +52,12 @@ seeded(const reusex::test_support::TempPath &tmp) {
     o.z_sill = i == 0 ? 0.0 : 0.9;
     o.z_head = 2.1;
     o.metadata = i == 0 ? R"({"crossings":2})" : "";
+    if (i == 0) {
+      o.swing_side = "b";
+      o.hinge = "end";
+      o.operation = "single_swing";
+      o.type_name = "Enkeltdør 90";
+    }
   }
   db->save_openings(ops);
   return db;
@@ -83,6 +89,12 @@ TEST_CASE("OpeningRouter_Get_ListsAndDrillsDown",
   CHECK(door["metadata"]["crossings"] == 2);
   CHECK(win["metadata"].is_null());
   CHECK(door["source_instance_guid"].is_null());
+  CHECK(door["swing_side"] == "b");
+  CHECK(door["hinge"] == "end");
+  CHECK(door["operation"] == "single_swing");
+  CHECK(door["type_name"] == "Enkeltdør 90");
+  CHECK(door["frame_depth"] == -1.0);
+  CHECK(win["swing_side"] == "unknown");
   const auto id = win["id"].get<int64_t>();
   CHECK(get(registry, "openings." + std::to_string(id) + ".z_sill") == 0.9);
   const std::string guid = door["guid"];

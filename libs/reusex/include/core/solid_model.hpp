@@ -23,9 +23,11 @@
 //    not overwrite the row; `confidence` 0..1, -1 unknown; `metadata` opaque
 //    JSON text for evidence that has no field yet ("" = none).
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace reusex::core {
@@ -154,11 +156,42 @@ struct OpeningRecord {
   std::string state = "unknown"; ///< open | closed | unknown (doors)
   bool is_external = false;
   std::string source_instance_guid;
+  /// The leaf (schema v42, reusex-w6jc); "unknown" / "" / -1 for what
+  /// nobody said, which is what the detection stages write.
+  /// swing_side: a | b | unknown -- the side of the host wall the leaf
+  /// opens to: a = left of the axis walking (x0,y0) -> (x1,y1) (+t, the
+  /// wall's face_a side, as SpaceBoundaryRecord::side), b = right. Revit's
+  /// "flip facing" toggles it.
+  std::string swing_side = "unknown";
+  /// hinge: start | end | unknown -- the jamb the leaf is hung on: start =
+  /// at s_start, end = at s_end. Revit's "flip hand" toggles it. Meaningless
+  /// for a double / sliding leaf (kept as set).
+  std::string hinge = "unknown";
+  /// How it opens (core::kOpeningOperations): doors single_swing |
+  /// double_swing | sliding | folding | revolving; windows fixed | casement |
+  /// tilt_turn | top_hung | bottom_hung | pivot | sliding; or unknown.
+  std::string operation = "unknown";
+  /// A type label, e.g. "Enkeltdør 90"; "" none. Free text.
+  std::string type_name;
+  /// Frame depth across the wall [m]; -1 unknown.
+  double frame_depth = -1.0;
   std::string source = "detected";
   bool locked = false;
   double confidence = -1.0;
   std::string metadata;
 };
+
+/// The values OpeningRecord::operation may take.
+inline constexpr std::array<std::string_view, 13> kOpeningOperations = {
+    "unknown",     "single_swing", "double_swing", "sliding",   "folding",
+    "revolving",   "fixed",        "casement",     "tilt_turn", "top_hung",
+    "bottom_hung", "pivot",        "other"};
+
+/// Whether @p v is one of kOpeningOperations.
+[[nodiscard]] inline bool is_opening_operation(std::string_view v) {
+  return std::find(kOpeningOperations.begin(), kOpeningOperations.end(), v) !=
+         kOpeningOperations.end();
+}
 
 /// The role one plane of the "planes" cloud plays (one row per plane label;
 /// the plane_classes table, schema v31, keys it by cloud + plane_label).

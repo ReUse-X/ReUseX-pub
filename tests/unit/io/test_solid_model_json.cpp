@@ -1311,8 +1311,8 @@ TEST_CASE("SolidModelFromJson_InvalidSlopes_ThrowNamingTheElement",
         nlohmann::json::array({nlohmann::json::array({0.0, 1.0})});
     throws(doc, "at least 2 points");
   }
-  SECTION("model_version 3") {
-    doc["model_version"] = 3;
+  SECTION("model_version 4") {
+    doc["model_version"] = 4;
     throws(doc, "not supported");
   }
 }
@@ -1330,4 +1330,71 @@ TEST_CASE("StoreSolidModel_AtticFixture_KeepsSlopesThroughTheTables",
   const reusex::ProjectDB db(tmp.path, /*readOnly*/ true);
   const SolidModel back = reusex::io::load_solid_model(db);
   CHECK(canonical(back) == canonical(m));
+}
+
+// ── Opening leaf (model_version 3, reusex-w6jc) ─────────────────────────────
+
+TEST_CASE("SolidModelJson_OpeningLeaf_RoundTripsAsVersion3",
+          "[io][solid_model][leaf]") {
+  auto doc = minimal_doc();
+  doc["model_version"] = 3;
+  doc["openings"][0]["swing_side"] = "b";
+  doc["openings"][0]["hinge"] = "end";
+  doc["openings"][0]["operation"] = "single_swing";
+  doc["openings"][0]["type_name"] = "Enkeltdør 90";
+  doc["openings"][0]["frame_depth"] = 0.11;
+  const SolidModel m = solid_model_from_json(doc.dump());
+  REQUIRE(m.openings.size() == 1);
+  const auto &o = m.openings[0];
+  CHECK(o.swing_side == "b");
+  CHECK(o.hinge == "end");
+  CHECK(o.operation == "single_swing");
+  CHECK(o.type_name == "Enkeltdør 90");
+  CHECK(o.frame_depth == 0.11);
+
+  const std::string first = solid_model_to_json(m);
+  CHECK(solid_model_to_json(solid_model_from_json(first)) == first);
+  const auto j = nlohmann::json::parse(first);
+  CHECK(j.at("model_version") == 3);
+  CHECK(j.at("openings")[0].at("hinge") == "end");
+  const SolidModel y =
+      reusex::io::solid_model_from_yaml(reusex::io::solid_model_to_yaml(m));
+  CHECK(solid_model_to_json(y) == first);
+
+  // Defaults are not written, and need no version 3.
+  const auto plain = nlohmann::json::parse(
+      solid_model_to_json(solid_model_from_json(minimal_doc().dump())));
+  CHECK(plain.at("model_version") == 1);
+  CHECK_FALSE(plain.at("openings")[0].contains("swing_side"));
+  CHECK_FALSE(plain.at("openings")[0].contains("frame_depth"));
+}
+
+TEST_CASE("SolidModelFromJson_InvalidOpeningLeaf_Throws",
+          "[io][solid_model][leaf]") {
+  auto doc = minimal_doc();
+  doc["model_version"] = 3;
+  const auto throws = [](const nlohmann::json &d, const char *what) {
+    CHECK_THROWS_WITH(solid_model_from_json(d.dump()), ContainsSubstring(what));
+  };
+  SECTION("a leaf field in a version-1 document") {
+    doc["model_version"] = 1;
+    doc["openings"][0]["hinge"] = "start";
+    throws(doc, "needs model_version 3");
+  }
+  SECTION("swing_side") {
+    doc["openings"][0]["swing_side"] = "in";
+    throws(doc, "'swing_side' must be");
+  }
+  SECTION("hinge") {
+    doc["openings"][0]["hinge"] = "left";
+    throws(doc, "'hinge' must be");
+  }
+  SECTION("operation") {
+    doc["openings"][0]["operation"] = "swingy";
+    throws(doc, "'operation' 'swingy'");
+  }
+  SECTION("frame_depth") {
+    doc["openings"][0]["frame_depth"] = 0;
+    throws(doc, "'frame_depth' must be > 0");
+  }
 }

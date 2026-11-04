@@ -301,10 +301,22 @@ ojson ring_json(const std::vector<core::PlanPoint> &ring) {
 // one reader. `solid_model_to_yaml` emits the same ordered document
 // `solid_model_to_json` builds, so both front ends agree on key order.
 
-/// The lowest model_version that holds @p m: 2 when a space has ceiling
-/// planes or a wall a top profile (reusex-546), else 1, so a flat model is
-/// still read by a version-1 build.
+/// Whether @p o carries a leaf field (model_version 3) off its default.
+bool has_leaf(const core::OpeningRecord &o) {
+  const core::OpeningRecord d;
+  return o.swing_side != d.swing_side || o.hinge != d.hinge ||
+         o.operation != d.operation || o.type_name != d.type_name ||
+         o.frame_depth != d.frame_depth;
+}
+
+/// The lowest model_version that holds @p m: 3 when an opening has a leaf
+/// field (reusex-w6jc), 2 when a space has ceiling planes or a wall a top
+/// profile (reusex-546), else 1, so a flat model is still read by a
+/// version-1 build.
 int needed_version(const core::SolidModel &m) {
+  for (const auto &o : m.openings)
+    if (has_leaf(o))
+      return 3;
   for (const auto &s : m.spaces)
     if (!s.ceiling_planes.empty())
       return 2;
@@ -444,6 +456,17 @@ ojson build_document(const core::SolidModel &m) {
       o["is_external"] = op.is_external;
       if (!op.source_instance_guid.empty())
         o["source_instance_guid"] = op.source_instance_guid;
+      const core::OpeningRecord d;
+      if (op.swing_side != d.swing_side)
+        o["swing_side"] = op.swing_side;
+      if (op.hinge != d.hinge)
+        o["hinge"] = op.hinge;
+      if (op.operation != d.operation)
+        o["operation"] = op.operation;
+      if (op.type_name != d.type_name)
+        o["type_name"] = op.type_name;
+      if (op.frame_depth != d.frame_depth)
+        o["frame_depth"] = op.frame_depth;
       write_common(o, op,
                    record_name("openings", &op - m.openings.data(), op.guid));
       arr.push_back(std::move(o));
@@ -521,6 +544,7 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
     fail("document", "'model_version' must be an integer");
   const int model_version = version.dump() == "1"   ? 1
                             : version.dump() == "2" ? 2
+                            : version.dump() == "3" ? 3
                                                     : 0;
   if (model_version < 1 || model_version > kSolidModelJsonVersion)
     fail("document",
@@ -532,6 +556,10 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
   const auto needs_v2 = [&](const Reader &r, const char *key) {
     if (r.has(key) && model_version < 2)
       fail(r.where(), fmt::format("'{}' needs model_version 2", key));
+  };
+  const auto needs_v3 = [&](const Reader &r, const char *key) {
+    if (r.has(key) && model_version < 3)
+      fail(r.where(), fmt::format("'{}' needs model_version 3", key));
   };
   if (top.text("units", "m") != "m")
     fail("document", "'units' must be \"m\"");
@@ -724,8 +752,12 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
 
   m.provided.openings = for_each_element(doc, "openings", [&](const Reader &r) {
     r.only({"guid", "wall", "kind", "s_start", "s_end", "z_sill", "z_head",
-            "state", "is_external", "source_instance_guid", "source", "locked",
-            "confidence", "metadata"});
+            "state", "is_external", "source_instance_guid", "swing_side",
+            "hinge", "operation", "type_name", "frame_depth", "source",
+            "locked", "confidence", "metadata"});
+    for (const char *key :
+         {"swing_side", "hinge", "operation", "type_name", "frame_depth"})
+      needs_v3(r, key);
     core::OpeningRecord o;
     o.guid = r.text("guid", "");
     check_unique_guid(guids, o.guid, r.where());
@@ -749,6 +781,27 @@ static core::SolidModel solid_model_from_json_value(const json &doc) {
     o.state = r.text("state", o.state);
     o.is_external = r.boolean("is_external", o.is_external);
     o.source_instance_guid = r.text("source_instance_guid", "");
+    o.swing_side = r.text("swing_side", o.swing_side);
+    if (o.swing_side != "a" && o.swing_side != "b" && o.swing_side != "unknown")
+      fail(r.where(), fmt::format("'swing_side' must be a, b or unknown, "
+                                  "not '{}'",
+                                  o.swing_side));
+    o.hinge = r.text("hinge", o.hinge);
+    if (o.hinge != "start" && o.hinge != "end" && o.hinge != "unknown")
+      fail(r.where(), fmt::format("'hinge' must be start, end or unknown, "
+                                  "not '{}'",
+                                  o.hinge));
+    o.operation = r.text("operation", o.operation);
+    if (!core::is_opening_operation(o.operation))
+      fail(r.where(),
+           fmt::format("'operation' '{}' is not one of {}", o.operation,
+                       fmt::join(core::kOpeningOperations, ", ")));
+    o.type_name = r.text("type_name", o.type_name);
+    o.frame_depth = r.number("frame_depth", o.frame_depth);
+    if (!(o.frame_depth == -1.0 || o.frame_depth > 0.0))
+      fail(r.where(), fmt::format("'frame_depth' must be > 0 (or -1 for "
+                                  "unknown), not {}",
+                                  o.frame_depth));
     read_common(r, o.source, o.locked, o.confidence, o.metadata);
     m.openings.push_back(std::move(o));
   });
