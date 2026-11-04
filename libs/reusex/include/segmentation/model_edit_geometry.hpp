@@ -41,6 +41,7 @@
 #include <reusex/core/solid_model.hpp>
 #include <reusex/types/point_types.hpp>
 
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -186,25 +187,73 @@ struct CeilingFitOptions {
   int min_points = 30;        ///< fewer (after trimming): no fit
   int max_rounds = 8;         ///< trimming rounds
   double max_slope_deg = 75.; ///< steeper: not a ceiling, no fit
+  /// A fit whose inliers are a smaller share of the band's points is
+  /// refused: the band held more than one surface (a storey above, a
+  /// stair, furniture) and the fit is not clearly the ceiling (reusex-y2ed).
+  double min_inlier_share = 0.25;
+  /// The space's floor in the level frame. When set (finite), a plane less
+  /// than min_clearance_m over it at the region's middle (its area
+  /// centroid) is refused: no room's ceiling is that low there. Only the
+  /// middle: a sloped attic ceiling may come down low at a knee wall. NaN:
+  /// not checked.
+  double z_floor = std::numeric_limits<double>::quiet_NaN();
+  double min_clearance_m = 1.9;
 };
 
 struct CeilingFitResult {
   bool ok = false;
-  std::string reason;       ///< why not, when !ok
-  core::CeilingPlane plane; ///< `at` at the inliers' centroid
+  /// Why not, when !ok, as one stable token a client can translate:
+  /// "bad_region", "too_few_points", "few_inliers", "low_inlier_share",
+  /// "too_steep", "too_low". Empty when ok.
+  std::string code;
+  std::string reason;       ///< why not, when !ok, in English with numbers
+  core::CeilingPlane plane; ///< `at` at the inliers' centroid; also set when
+                            ///< refused for share, slope or height
   double rms_m = -1.0;      ///< of the inliers
   double slope_deg = 0.0;
   int points = 0;  ///< in the region and band
   int inliers = 0; ///< used by the final fit
+  /// The plane's height over opt.z_floor at the region's middle; -1 when
+  /// z_floor is unset or the fit stopped before it was measured.
+  double clearance_m = -1.0;
 };
 
 /// Fit a ceiling plane to the points of @p cloud (world coordinates) that
 /// fall, in @p storey's level frame, inside @p region (outer ring minus
-/// holes) with z in [@p z_lo, @p z_hi].
+/// holes) with z in [@p z_lo, @p z_hi]. Refused (ok false, code + reason)
+/// when too few points or inliers, when steeper than max_slope_deg, when
+/// lower than min_clearance_m over opt.z_floor at the region's middle, or
+/// when the inliers are under min_inlier_share of the band's points.
 CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
                                    const core::StoreyRecord &storey,
                                    const core::SpacePolygon &region,
                                    double z_lo, double z_hi,
                                    const CeilingFitOptions &opt = {});
+
+struct CeilingBandOptions {
+  /// The band reaches this far over the space's ceiling [m] when no storey
+  /// lies above, so a sloped roof's high side is in.
+  double above_ceiling_m = 3.0;
+  /// And stops this far under the next storey's floor [m] when one does.
+  double below_next_floor_m = 0.15;
+};
+
+struct CeilingBand {
+  double z_lo = 0.0;   ///< level frame
+  double z_hi = 0.0;   ///< level frame
+  bool capped = false; ///< z_hi was lowered to stay under the next storey
+};
+
+/// The default height band fit_ceiling_plane() searches for a space (or a
+/// storey) with floor @p z_floor and ceiling @p z_ceiling: from halfway up
+/// to above_ceiling_m over the ceiling, but never into the storey above
+/// (the lowest of @p storeys whose floor lies over @p z_ceiling): there the
+/// band stops below_next_floor_m under that floor, and never lower than
+/// 5 cm over the ceiling itself. All heights in the storeys' shared level
+/// frame (as detect_storeys() writes them).
+CeilingBand
+default_ceiling_fit_band(double z_floor, double z_ceiling,
+                         const std::vector<core::StoreyRecord> &storeys,
+                         const CeilingBandOptions &opt = {});
 
 } // namespace reusex::segmentation
