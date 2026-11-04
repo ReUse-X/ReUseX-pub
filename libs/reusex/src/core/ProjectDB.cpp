@@ -449,9 +449,12 @@ class ProjectDB::Impl {
   bool hasPoseRepairTables = false;
   /// model_dismissed and model_edits exist (v41).
   bool hasModelEditTables = false;
+  /// openings.swing_side / hinge / operation / type_name / frame_depth
+  /// exist (v42).
+  bool hasOpeningLeafColumns = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 41;
+  static constexpr int LATEST_SCHEMA_VERSION = 42;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -589,6 +592,7 @@ class ProjectDB::Impl {
         tableExists("pose_blocks") && tableExists("pose_versions");
     hasModelEditTables =
         tableExists("model_dismissed") && tableExists("model_edits");
+    hasOpeningLeafColumns = columnExists("openings", "frame_depth");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -936,6 +940,10 @@ class ProjectDB::Impl {
 
     if (current < 41) {
       migrateToV41();
+    }
+
+    if (current < 42) {
+      migrateToV42();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -4273,7 +4281,34 @@ class ProjectDB::Impl {
       "id, guid, wall_guid, kind, s_start, s_end, z_sill, z_head, state, "
       "is_external, source_instance_guid, source, locked, confidence, metadata";
 
-  static core::OpeningRecord readOpening(sqlite3_stmt *s) {
+  /// kOpeningColumns, plus the leaf columns when the table has them (v42).
+  std::string openingColumns() const {
+    return std::string(kOpeningColumns) +
+           (hasOpeningLeafColumns
+                ? ", swing_side, hinge, operation, type_name, frame_depth"
+                : "");
+  }
+
+  /// The leaf fields' values (v42); throws std::invalid_argument.
+  static void checkOpeningLeaf(const core::OpeningRecord &r,
+                               const std::string &where) {
+    if (r.swing_side != "a" && r.swing_side != "b" && r.swing_side != "unknown")
+      throw std::invalid_argument(where + " has invalid swing_side '" +
+                                  r.swing_side + "' (a, b or unknown)");
+    if (r.hinge != "start" && r.hinge != "end" && r.hinge != "unknown")
+      throw std::invalid_argument(where + " has invalid hinge '" + r.hinge +
+                                  "' (start, end or unknown)");
+    if (!core::is_opening_operation(r.operation))
+      throw std::invalid_argument(where + " has invalid operation '" +
+                                  r.operation + "'");
+    if (!(r.frame_depth == -1.0 ||
+          (std::isfinite(r.frame_depth) && r.frame_depth > 0.0)))
+      throw std::invalid_argument(where + " has invalid frame_depth " +
+                                  std::to_string(r.frame_depth) +
+                                  " (> 0, or -1 for unknown)");
+  }
+
+  static core::OpeningRecord readOpening(sqlite3_stmt *s, bool leaf) {
     core::OpeningRecord r;
     r.id = sqlite3_column_int64(s, 0);
     r.guid = column_text(s, 1);
@@ -4290,6 +4325,13 @@ class ProjectDB::Impl {
     r.locked = sqlite3_column_int(s, 12) != 0;
     r.confidence = sqlite3_column_double(s, 13);
     r.metadata = column_text(s, 14);
+    if (leaf) {
+      r.swing_side = column_text(s, 15);
+      r.hinge = column_text(s, 16);
+      r.operation = column_text(s, 17);
+      r.type_name = column_text(s, 18);
+      r.frame_depth = sqlite3_column_double(s, 19);
+    }
     return r;
   }
 
@@ -4297,13 +4339,13 @@ class ProjectDB::Impl {
     std::vector<core::OpeningRecord> out;
     if (!hasOpeningsTable)
       return out;
-    const std::string sql = std::string("SELECT ") + kOpeningColumns +
+    const std::string sql = "SELECT " + openingColumns() +
                             " FROM openings ORDER BY wall_guid, s_start, id;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "openings");
     StmtGuard guard(s);
     int rc;
     while ((rc = sqlite3_step(s)) == SQLITE_ROW)
-      out.push_back(readOpening(s));
+      out.push_back(readOpening(s, hasOpeningLeafColumns));
     if (rc != SQLITE_DONE)
       throw std::runtime_error("openings: " + std::string(sqlite3_errmsg(db)));
     return out;
@@ -4313,14 +4355,14 @@ class ProjectDB::Impl {
   openingByGuid(std::string_view guid) const {
     if (!hasOpeningsTable)
       return std::nullopt;
-    const std::string sql = std::string("SELECT ") + kOpeningColumns +
-                            " FROM openings WHERE guid = ?;";
+    const std::string sql =
+        "SELECT " + openingColumns() + " FROM openings WHERE guid = ?;";
     sqlite3_stmt *s = prepare_or_throw(db, sql.c_str(), "opening_by_guid");
     StmtGuard guard(s);
     bind_text(s, 1, guid);
     if (sqlite3_step(s) != SQLITE_ROW)
       return std::nullopt;
-    return readOpening(s);
+    return readOpening(s, hasOpeningLeafColumns);
   }
 
   size_t saveOpenings(const std::vector<core::OpeningRecord> &openingsIn,
@@ -4357,6 +4399,7 @@ class ProjectDB::Impl {
             where + " is empty (s " + std::to_string(r.s_start) + ".." +
             std::to_string(r.s_end) + ", z " + std::to_string(r.z_sill) + ".." +
             std::to_string(r.z_head) + ")");
+      checkOpeningLeaf(r, where);
       if (!guids.insert(r.guid).second)
         throw std::invalid_argument("save_openings: duplicate guid " + r.guid);
     }
@@ -4374,8 +4417,9 @@ class ProjectDB::Impl {
         db,
         "INSERT INTO openings (guid, wall_guid, kind, s_start, s_end, z_sill, "
         "z_head, state, is_external, source_instance_guid, source, locked, "
-        "confidence, metadata, run_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "confidence, metadata, run_id, swing_side, hinge, operation, "
+        "type_name, frame_depth) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         "save_openings");
     StmtGuard guard(ins);
     size_t written = 0, skipped = 0;
@@ -4406,6 +4450,11 @@ class ProjectDB::Impl {
         sqlite3_bind_int(ins, 15, runId);
       else
         sqlite3_bind_null(ins, 15);
+      bind_text(ins, 16, r.swing_side);
+      bind_text(ins, 17, r.hinge);
+      bind_text(ins, 18, r.operation);
+      bind_text(ins, 19, r.type_name);
+      sqlite3_bind_double(ins, 20, r.frame_depth);
       if (sqlite3_step(ins) != SQLITE_DONE)
         throw std::runtime_error("save_openings: insert of opening " + r.guid +
                                  " failed: " + sqlite3_errmsg(db));
@@ -4799,6 +4848,34 @@ class ProjectDB::Impl {
     sp.release();
     hasModelEditTables = true;
     reusex::info("Migration to schema version 41 complete");
+  }
+
+  void migrateToV42() {
+    reusex::info("Migrating database to schema version 42");
+    // Door / window leaf (reusex-w6jc, Rediger editor slice S5): which wall
+    // side a leaf swings to, which jamb it hangs on, how it opens, a type
+    // label and the frame depth (core::OpeningRecord). Every stored row
+    // gets "unknown" / '' / -1, which is what detection writes too.
+    // operation is checked in C++ (core::kOpeningOperations), not by a
+    // CHECK, so a new value needs no migration.
+    Savepoint sp(db, "migrate_v42");
+    if (tableExists("openings") && !columnExists("openings", "frame_depth"))
+      execOrThrow(R"(
+        ALTER TABLE openings ADD COLUMN swing_side TEXT NOT NULL
+          DEFAULT 'unknown' CHECK (swing_side IN ('a', 'b', 'unknown'));
+        ALTER TABLE openings ADD COLUMN hinge TEXT NOT NULL
+          DEFAULT 'unknown' CHECK (hinge IN ('start', 'end', 'unknown'));
+        ALTER TABLE openings ADD COLUMN operation TEXT NOT NULL
+          DEFAULT 'unknown';
+        ALTER TABLE openings ADD COLUMN type_name TEXT NOT NULL DEFAULT '';
+        ALTER TABLE openings ADD COLUMN frame_depth REAL NOT NULL DEFAULT -1;
+      )");
+    insertSchemaVersion(42, "Solid model: door / window leaf on openings "
+                            "(swing_side, hinge, operation, type_name, "
+                            "frame_depth)");
+    sp.release();
+    hasOpeningLeafColumns = true;
+    reusex::info("Migration to schema version 42 complete");
   }
 
   // ── Spaces (v35) ─────────────────────────────────────────────────────────
@@ -5388,6 +5465,7 @@ class ProjectDB::Impl {
     checkSource(r.source, where);
     if (!(r.s_end > r.s_start) || !(r.z_head > r.z_sill))
       throw std::invalid_argument(where + " is empty");
+    checkOpeningLeaf(r, where);
     const auto bindCommon = [&](sqlite3_stmt *s) {
       bind_text(s, 1, r.wall);
       bind_text(s, 2, r.kind);
@@ -5402,14 +5480,20 @@ class ProjectDB::Impl {
       sqlite3_bind_int(s, 11, r.locked ? 1 : 0);
       sqlite3_bind_double(s, 12, r.confidence);
       bind_text(s, 13, r.metadata);
-      bind_text(s, 14, r.guid);
+      bind_text(s, 14, r.swing_side);
+      bind_text(s, 15, r.hinge);
+      bind_text(s, 16, r.operation);
+      bind_text(s, 17, r.type_name);
+      sqlite3_bind_double(s, 18, r.frame_depth);
+      bind_text(s, 19, r.guid);
     };
     sqlite3_stmt *up = prepare_or_throw(
         db,
         "UPDATE openings SET wall_guid = ?, kind = ?, s_start = ?, s_end = ?, "
         "z_sill = ?, z_head = ?, state = ?, is_external = ?, "
         "source_instance_guid = ?, source = ?, locked = ?, confidence = ?, "
-        "metadata = ? WHERE guid = ?;",
+        "metadata = ?, swing_side = ?, hinge = ?, operation = ?, "
+        "type_name = ?, frame_depth = ? WHERE guid = ?;",
         who);
     StmtGuard upGuard(up);
     bindCommon(up);
@@ -5419,8 +5503,9 @@ class ProjectDB::Impl {
         db,
         "INSERT INTO openings (wall_guid, kind, s_start, s_end, z_sill, "
         "z_head, state, is_external, source_instance_guid, source, locked, "
-        "confidence, metadata, guid) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "confidence, metadata, swing_side, hinge, operation, type_name, "
+        "frame_depth, guid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         who);
     StmtGuard insGuard(ins);
     bindCommon(ins);

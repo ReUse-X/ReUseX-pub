@@ -74,6 +74,11 @@ core::SolidModel two_rooms() {
   door.s_end = 1.9;
   door.z_sill = 0.0;
   door.z_head = 2.1;
+  door.swing_side = "b";
+  door.hinge = "end";
+  door.operation = "single_swing";
+  door.type_name = "Enkeltdør 90";
+  door.frame_depth = 0.1;
   core::OpeningRecord window = door;
   window.guid = "d0000000-0000-4000-8000-000000000002";
   window.wall = "a0000000-0000-4000-8000-00000000000s";
@@ -82,6 +87,9 @@ core::SolidModel two_rooms() {
   window.s_end = 6.5;
   window.z_sill = 0.9;
   window.z_head = 2.0;
+  window.swing_side = window.hinge = window.operation = "unknown";
+  window.type_name.clear();
+  window.frame_depth = -1.0;
   core::OpeningRecord hole = window;
   hole.guid = "d0000000-0000-4000-8000-000000000003";
   hole.wall = "a0000000-0000-4000-8000-00000000000n";
@@ -181,6 +189,16 @@ void check_elements(const io::ExportScene &scene) {
   CHECK(door.properties.at("height") == "2.100");
   CHECK(door.properties.at("host_wall") ==
         "a0000000-0000-4000-8000-00000000000p");
+  // The leaf (reusex-w6jc), only when known.
+  CHECK(door.properties.at("swing_side") == "b");
+  CHECK(door.properties.at("hinge") == "end");
+  CHECK(door.properties.at("operation") == "single_swing");
+  CHECK(door.properties.at("type_name") == "Enkeltdør 90");
+  CHECK(door.properties.at("frame_depth") == "0.100");
+  const auto &win = by_guid(scene, "d0000000-0000-4000-8000-000000000002");
+  CHECK_FALSE(win.properties.count("swing_side"));
+  CHECK_FALSE(win.properties.count("type_name"));
+  CHECK_FALSE(win.properties.count("frame_depth"));
   // The door box sits within the partition (x = 4 +- 0.1), not past it.
   pcl::PointCloud<pcl::PointXYZ> v;
   pcl::fromPCLPointCloud2(door.mesh->cloud, v);

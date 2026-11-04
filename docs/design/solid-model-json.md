@@ -194,6 +194,16 @@ presentation details like key order in a hand-edited file.
 - **Openings** sit in their host wall's face: `s_start` < `s_end` measured
   along the host axis from its first endpoint, `z_sill` < `z_head` in the
   level frame. `kind` is `door`, `window` or `opening`.
+- **Opening leaf** (`model_version` 3, reusex-w6jc), each optional and
+  written only when known: `swing_side` (`a` | `b`: the side of the host
+  wall the leaf opens to; `a` is left of the axis walking from its first
+  endpoint to its second, the same side as a space boundary's `a`),
+  `hinge` (`start` | `end`: the jamb at `s_start` or `s_end` the leaf
+  hangs on), `operation` (doors `single_swing`, `double_swing`, `sliding`,
+  `folding`, `revolving`; windows `fixed`, `casement`, `tilt_turn`,
+  `top_hung`, `bottom_hung`, `pivot`, `sliding`; or `other`), `type_name`
+  (free text, e.g. `"Enkeltdør 90"`) and `frame_depth` (m, > 0). Absent
+  means unknown (`"unknown"`, `""`, -1 in the record).
 - **Provenance** on every element: `source` (`detected`, `manual`,
   `imported`), `locked` (a re-run must not overwrite it), `confidence` (0..1,
   -1 unknown), `metadata` (any JSON value; evidence without a field yet). In
@@ -219,7 +229,8 @@ opening with `s_end <= s_start` or `z_head <= z_sill`, a ceiling plane that
 is steeper than 80 deg, has an unknown key or takes the ceiling below
 `z_floor` at a vertex, a wall `top` with fewer than 2 points, an s that does
 not increase or a z at or below `z_base`, `ceiling_planes` or `top` in a
-version-1 document, a reference to a wall,
+version-1 document, an opening leaf field in a document below version 3 or
+with a value outside the lists above, a reference to a wall,
 space or storey the document does not contain, and a duplicate `guid` or
 storey `idx`.
 
@@ -232,15 +243,17 @@ element, so `JSON -> records -> JSON` is a fixed point (tested in
 `model_version` is bumped on any change a version-1 reader would
 misinterpret (a renamed or re-meant field). Adding an optional field is also
 a bump, because the reader is strict about unknown keys. The reader accepts
-1 up to `io::kSolidModelJsonVersion` (2).
+1 up to `io::kSolidModelJsonVersion` (3).
 
 | Version | Adds |
 |---|---|
 | 1 | storeys, walls, wall joins, spaces, space boundaries, openings, plane classes, scene relations |
 | 2 | a space's `ceiling_planes`, a wall's `top` (sloped ceilings and wall tops, reusex-546) |
+| 3 | an opening's leaf: `swing_side`, `hinge`, `operation`, `type_name`, `frame_depth` (reusex-w6jc) |
 
 The writer emits the **lowest** version that holds the model: a model with
-no sloped ceiling and no sloped wall top is written as version 1, byte for
+no opening leaf, no sloped ceiling and no sloped wall top is written as
+version 1, byte for
 byte as before, so a version-1 build still reads it.
 
 ## Metrics

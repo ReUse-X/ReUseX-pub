@@ -47,6 +47,11 @@ nlohmann::json opening_to_json(const reusex::core::OpeningRecord &o) {
   j["height"] = o.z_head - o.z_sill;
   j["state"] = o.state;
   j["is_external"] = o.is_external;
+  j["swing_side"] = o.swing_side;
+  j["hinge"] = o.hinge;
+  j["operation"] = o.operation;
+  j["type_name"] = o.type_name;
+  j["frame_depth"] = o.frame_depth;
   j["source_instance_guid"] = o.source_instance_guid.empty()
                                   ? nlohmann::json(nullptr)
                                   : nlohmann::json(o.source_instance_guid);

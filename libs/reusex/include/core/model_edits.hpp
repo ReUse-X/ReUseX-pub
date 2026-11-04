@@ -124,7 +124,10 @@ struct ModelEditResult {
   int64_t edit_id = -1; ///< the log entry applied, undone or redone
   std::vector<ModelChange> changes;
   /// Things left for the caller to fix, e.g. an opening whose host wall the
-  /// batch removed, or an opening put on a wall that is not stored.
+  /// batch removed, or an opening put on a wall that is not stored, and
+  /// each misfit the batch introduced (an opening past its wall's ends,
+  /// above its top, or overlapping another; core/opening_fit.hpp -- a
+  /// misfit the model already had is not repeated).
   std::vector<std::string> warnings;
 };
 

@@ -633,7 +633,14 @@ sweeps), `is_external` (the host wall's, until spaces exist),
 at most 0.7, raised by agreeing evidence: labels, the instance, glass, camera
 path crossings) and `metadata` (the evidence: fill, jambs, local levels,
 label shares, crossings, glass share, the leaf and `swing` left | right seen
-from the side it opens to). Openings are found against each wall's
+from the side it opens to). The leaf columns (schema v42, reusex-w6jc:
+`swing_side` a | b | unknown, the host side the leaf opens to, a = left of
+the axis walking (x0, y0) -> (x1, y1); `hinge` start | end | unknown, the
+jamb at `s_start` / `s_end` it hangs on; `operation`, one of
+`core::kOpeningOperations`; `type_name`; `frame_depth`, m or -1) are written
+as unknown / '' / -1 by this stage and set by hand (the Rediger editor's
+`opening.update`, below); a locked, edited row keeps them across a re-run.
+Openings are found against each wall's
 measured axis (`geometry::measured_walls()`: the `"regularised"."measured"`
 metadata of the walls stage) and then put onto the stored, regularised axis
 (`openings_onto_walls()`). Window alignment (`regularise_openings`,
@@ -1083,6 +1090,14 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   the record as detected (`edited_from` when edited); a row drawn by hand
   is not, since its tombstone could suppress a real element later detected
   there. Openings left on a removed wall are reported, not deleted.
+- **Opening fit** (reusex-w6jc): after a batch, every opening is checked
+  against its host (`core::opening_fit_issues()`, `core/opening_fit.hpp`:
+  `s_start` >= 0, `s_end` <= the wall's length, `z_sill` >= `z_base`,
+  `z_head` <= the wall's top at both jambs, no overlap with another opening
+  on the same wall, 5 mm slack). A misfit the batch introduced is a
+  warning in the result, not a refusal (the editor works in steps, and
+  detected / imported models carry small misfits); one the model already
+  had is not repeated.
 - **Revert** gives an edited row its `edited_from` record back (a detected
   row is then unlocked again and the next run replaces it), unlocks a row
   drawn by hand (the next run deletes it), or writes a tombstoned element

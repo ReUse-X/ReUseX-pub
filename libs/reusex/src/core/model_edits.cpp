@@ -6,6 +6,7 @@
 
 #include "core/guid.hpp"
 #include "core/logging.hpp"
+#include "core/opening_fit.hpp"
 #include "core/wall_edit_ops.hpp"
 
 #include <fmt/format.h>
@@ -252,6 +253,11 @@ json model_record_json(const OpeningRecord &r) {
   j["state"] = r.state;
   j["is_external"] = r.is_external;
   j["source_instance_guid"] = r.source_instance_guid;
+  j["swing_side"] = r.swing_side;
+  j["hinge"] = r.hinge;
+  j["operation"] = r.operation;
+  j["type_name"] = r.type_name;
+  j["frame_depth"] = r.frame_depth;
   common_json(j, r);
   return j;
 }
@@ -334,6 +340,11 @@ OpeningRecord opening_from_json(const json &j) {
   f.get("state", r.state);
   f.get("is_external", r.is_external);
   f.get("source_instance_guid", r.source_instance_guid);
+  f.get("swing_side", r.swing_side);
+  f.get("hinge", r.hinge);
+  f.get("operation", r.operation);
+  f.get("type_name", r.type_name);
+  f.get("frame_depth", r.frame_depth);
   f.done();
   return r;
 }
@@ -671,6 +682,32 @@ struct Key {
   }
 };
 
+/// Every opening's fit issues (core/opening_fit.hpp), keyed so an issue
+/// the model had before an edit can be told from one it introduced. An
+/// overlap is listed once per pair, under the smaller guid.
+std::map<std::string, std::string> fit_issues(const ProjectDB &db) {
+  std::map<std::string, std::string> out;
+  if (!db.has_openings())
+    return out;
+  std::map<std::string, WallRecord> walls;
+  for (auto &w : db.walls())
+    walls.emplace(w.guid, std::move(w));
+  std::map<std::string, std::vector<OpeningRecord>> by_wall;
+  for (auto &o : db.openings())
+    by_wall[o.wall].push_back(std::move(o));
+  for (const auto &[wall, os] : by_wall) {
+    const auto host = walls.find(wall);
+    if (host == walls.end())
+      continue; // reported as "not stored" / "deleted" instead
+    for (const auto &o : os)
+      for (auto &i : opening_fit_issues(o, host->second, os))
+        if (i.code != "overlaps" || o.guid < i.other)
+          out.emplace(o.guid + '|' + i.code + '|' + i.other,
+                      std::move(i.message));
+  }
+  return out;
+}
+
 json change_json(const Key &k, const std::string &action, const RowState &a,
                  const RowState &b) {
   return {
@@ -688,6 +725,7 @@ ModelEditResult apply_model_edit(ProjectDB &db,
   if (ops.empty())
     throw std::invalid_argument("model edit: no ops");
   Writer w(db);
+  const auto fit_before = fit_issues(db);
 
   std::vector<Key> order;
   std::map<Key, RowState> before;
@@ -830,6 +868,11 @@ ModelEditResult apply_model_edit(ProjectDB &db,
     changes.push_back(change_json(k, action, was, after));
   }
 
+  // Openings the edit left outside their host or on top of another one.
+  for (auto &[key, message] : fit_issues(db))
+    if (!fit_before.count(key))
+      result.warnings.push_back(std::move(message));
+
   // Openings left without their host.
   std::set<std::string> walls_now;
   for (const auto &wall : db.walls())
@@ -866,6 +909,29 @@ struct LoggedChange {
   RowState before, after;
 };
 
+/// @p row's record as this build writes it: a field added since the entry
+/// was logged (e.g. the v42 opening leaf) gets its default, so the entry
+/// still compares equal to the row it left.
+void normalise_logged_row(ModelElementKind kind, json &row) {
+  if (row.is_null() || !row.contains("record"))
+    return;
+  json &rec = row.at("record");
+  switch (kind) {
+  case ModelElementKind::storey:
+    rec = model_record_json(storey_from_json(rec));
+    break;
+  case ModelElementKind::wall:
+    rec = model_record_json(wall_from_json(rec));
+    break;
+  case ModelElementKind::opening:
+    rec = model_record_json(opening_from_json(rec));
+    break;
+  case ModelElementKind::space:
+    rec = model_record_json(space_from_json(rec));
+    break;
+  }
+}
+
 std::vector<LoggedChange> logged_changes(const ProjectDB::ModelEditRecord &e) {
   std::vector<LoggedChange> out;
   const json changes = json::parse(e.changes);
@@ -876,6 +942,8 @@ std::vector<LoggedChange> logged_changes(const ProjectDB::ModelEditRecord &e) {
     lc.action = c.value("action", std::string());
     lc.before = {c.at("before"), c.at("tomb_before")};
     lc.after = {c.at("after"), c.at("tomb_after")};
+    normalise_logged_row(lc.key.kind, lc.before.row);
+    normalise_logged_row(lc.key.kind, lc.after.row);
     out.push_back(std::move(lc));
   }
   return out;

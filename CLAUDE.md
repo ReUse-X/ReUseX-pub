@@ -788,7 +788,13 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   helpers in `core/wall_edit_ops.hpp` (split / merge / join walls, extend
   / trim one to a boundary wall, move / rotate / copy a selection) and
   `segmentation/model_edit_geometry.hpp` (rebuild a storey's spaces from
-  its walls, fit a ceiling plane to cloud points)
+  its walls, fit a ceiling plane to cloud points). Schema v42 adds an
+  opening's leaf (reusex-w6jc): `openings.swing_side` (a | b, the host
+  side it opens to) / `hinge` (start | end) / `operation` / `type_name` /
+  `frame_depth`, unknown when detected, set by `opening.update`; the
+  solid-model JSON carries them as `model_version` 3, and
+  `core/opening_fit.hpp` warns when an edit leaves an opening off its wall
+  or on another one
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)

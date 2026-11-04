@@ -18,8 +18,9 @@ namespace rux::database {
  * - openings[i]            → the i-th opening
  * - openings.<id>.<prop>   → one field: id, guid, wall, kind, s_start, s_end,
  *                            width, z_sill, z_head, height, state,
- *                            is_external, source_instance_guid, source,
- *                            locked, confidence, metadata
+ *                            is_external, swing_side, hinge, operation,
+ *                            type_name, frame_depth, source_instance_guid,
+ *                            source, locked, confidence, metadata
  *
  * The openings of one wall: `rux get walls.<id|guid>.openings`. s runs along
  * the host wall's axis from its (x0, y0); z is in its storey's level frame.

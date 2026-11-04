@@ -515,6 +515,18 @@ void gather_typed_elements(const ProjectDB &db, ExportScene &scene,
     p["sill"] = num(o.z_sill);
     p["host_wall"] = o.wall;
     p["state"] = o.state;
+    // The leaf (reusex-w6jc): only what is known. swing_side a = left of
+    // the host axis (x0,y0) -> (x1,y1); hinge start = at s_start.
+    if (o.swing_side != "unknown")
+      p["swing_side"] = o.swing_side;
+    if (o.hinge != "unknown")
+      p["hinge"] = o.hinge;
+    if (o.operation != "unknown")
+      p["operation"] = o.operation;
+    if (!o.type_name.empty())
+      p["type_name"] = o.type_name;
+    if (o.frame_depth > 0.0)
+      p["frame_depth"] = num(o.frame_depth);
     p["is_external"] = o.is_external ? "true" : "false";
     p["source"] = o.source;
     add(category, o.guid, "", w.storey, mesh, std::move(p));
