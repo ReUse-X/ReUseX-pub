@@ -350,34 +350,88 @@ TEST_CASE("FitCeilingPlane_RefusesALowInlierShare",
 
 TEST_CASE("FitCeilingPlane_RefusesAPlaneTooCloseToTheFloor",
           "[segmentation][model_edit_geometry]") {
-  // A clean plane, 26.6 deg, 1.75 m over the floor at the room's middle
-  // (x = 1.5): a stair flight, not this room's ceiling.
+  // A clean plane, 26.6 deg, from 1.0 to 2.5 m over the floor: an attic's
+  // sloped ceiling with standing height at its high side passes.
   Cloud cloud;
   for (double x = 0.05; x < 3.0; x += 0.1)
     for (double y = 0.05; y < 3.0; y += 0.1)
       add_point(cloud, x, y, 1.0 + 0.5 * x);
   segmentation::CeilingFitOptions opt;
   opt.z_floor = 0.0;
+  const auto attic = segmentation::fit_ceiling_plane(
+      cloud, storey_at(0, 0, 2.4), square_region(3.0), 0.5, 4.0, opt);
+  INFO(attic.reason);
+  CHECK(attic.ok);
+  CHECK_THAT(attic.clearance_m, WithinAbs(2.5, 1e-3));
+
+  // The same plane 0.7 m lower nowhere reaches 1.9 m: a stair flight or a
+  // table, not this room's ceiling.
+  opt.z_floor = 0.7;
   const auto r = segmentation::fit_ceiling_plane(
       cloud, storey_at(0, 0, 2.4), square_region(3.0), 0.5, 4.0, opt);
   INFO(r.reason);
   CHECK_FALSE(r.ok);
   CHECK(r.code == "too_low");
   CHECK(r.inliers == 900);
-  CHECK_THAT(r.clearance_m, WithinAbs(1.75, 1e-3));
+  CHECK_THAT(r.clearance_m, WithinAbs(1.8, 1e-3));
 
-  // Without a floor to measure from, the same plane passes.
+  // Without a floor to measure from, the plane passes.
   const auto r2 = segmentation::fit_ceiling_plane(cloud, storey_at(0, 0, 2.4),
                                                   square_region(3.0), 0.5, 4.0);
   CHECK(r2.ok);
-  // A floor far enough below lets it pass too, though the plane's low
-  // edge (1.0 m over it at x = 0) is under the clearance: an attic's
-  // sloped ceiling over a knee wall.
-  opt.z_floor = -0.3;
-  const auto r3 = segmentation::fit_ceiling_plane(
-      cloud, storey_at(0, 0, 2.4), square_region(3.0), 0.5, 4.0, opt);
-  CHECK(r3.ok);
-  CHECK_THAT(r3.clearance_m, WithinAbs(2.05, 1e-3));
+  CHECK(r2.clearance_m == -1.0);
+}
+
+TEST_CASE("FitCeilingPlane_SlopedAtticAmongClutter_FindsTheRoof",
+          "[segmentation][model_edit_geometry]") {
+  // An attic room (reusex-g72u, after Sygehusgrunden S2-27): a 38.7 deg
+  // roof z = 4.0 - 0.8 x over x 0..3, a knee wall at x = 2.95 and a gable
+  // wall at y = 0.05 (both vertical, in the band), and a 1 m deep built-in
+  // cupboard top at 2.1 m. Least squares over every band point settles
+  // between them; the seeded fit finds the roof.
+  Cloud cloud;
+  for (double x = 0.05; x < 3.0; x += 0.1)
+    for (double y = 0.05; y < 3.0; y += 0.1) {
+      add_point(cloud, x, y, 0.0);
+      add_point(cloud, x, y, 4.0 - 0.8 * x);
+    }
+  // Walls and cupboard as densely scanned as the roof (0.1 m spacing).
+  for (double y = 0.05; y < 3.0; y += 0.1)
+    for (double z = 0.0; z < 1.65; z += 0.1)
+      add_point(cloud, 2.95, y, z); // knee wall
+  for (double x = 0.05; x < 3.0; x += 0.1)
+    for (double z = 0.0; z < 4.0 - 0.8 * x; z += 0.1)
+      add_point(cloud, x, 0.05, z); // gable wall
+  for (double x = 0.05; x < 1.0; x += 0.1)
+    for (double y = 0.05; y < 3.0; y += 0.1)
+      add_point(cloud, x, y, 2.1); // cupboard top
+  segmentation::CeilingFitOptions opt;
+  opt.z_floor = 0.0;
+  const auto band = segmentation::default_ceiling_fit_band(0.0, 2.8, {});
+  const auto r = segmentation::fit_ceiling_plane(cloud, storey_at(0, 0, 2.8),
+                                                 square_region(3.0), band.z_lo,
+                                                 band.z_hi, opt);
+  INFO(r.reason);
+  REQUIRE(r.ok);
+  CHECK_THAT(r.plane.slope[0], WithinAbs(-0.8, 5e-3));
+  CHECK_THAT(r.plane.slope[1], WithinAbs(0.0, 5e-3));
+  CHECK_THAT(r.plane.z_at(1.5, 1.5), WithinAbs(2.8, 5e-3));
+  CHECK_THAT(r.slope_deg,
+             WithinAbs(std::atan(0.8) * 180.0 / std::numbers::pi, 0.2));
+
+  // Deterministic: the same fit again.
+  const auto again = segmentation::fit_ceiling_plane(
+      cloud, storey_at(0, 0, 2.8), square_region(3.0), band.z_lo, band.z_hi,
+      opt);
+  CHECK(again.inliers == r.inliers);
+  CHECK(again.plane.at == r.plane.at);
+
+  // Unseeded (every band point as the start), the fit misses the roof.
+  opt.ransac_iterations = 0;
+  const auto unseeded = segmentation::fit_ceiling_plane(
+      cloud, storey_at(0, 0, 2.8), square_region(3.0), band.z_lo, band.z_hi,
+      opt);
+  CHECK_FALSE((unseeded.ok && std::abs(unseeded.plane.slope[0] + 0.8) < 0.05));
 }
 
 TEST_CASE("FitCeilingPlane_ReasonCodes",

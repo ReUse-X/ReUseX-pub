@@ -28,6 +28,7 @@
 #include <map>
 #include <numbers>
 #include <optional>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -451,7 +452,46 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
     return r;
   }
 
+  // Seed (reusex-g72u): least squares over every band point settles between
+  // surfaces (walls, furniture, a sloped roof); start the trimming from the
+  // best plane of a deterministic RANSAC instead, the one most points lie
+  // on within inlier_m (vertical residual, as the trimming measures it).
   std::vector<char> in(pts.size(), 1);
+  if (opt.ransac_iterations > 0 && pts.size() >= 3) {
+    std::mt19937 rng(opt.ransac_seed); // fixed seed: deterministic (§6)
+    const auto n = static_cast<std::uint32_t>(pts.size());
+    const double cos_max = std::cos(opt.max_slope_deg * std::numbers::pi / 180);
+    int best = 0;
+    Eigen::Vector3d best_p = Eigen::Vector3d::Zero(),
+                    best_n = Eigen::Vector3d::UnitZ();
+    for (int it = 0; it < opt.ransac_iterations; ++it) {
+      const auto i = rng() % n, j = rng() % n, k = rng() % n;
+      if (i == j || j == k || i == k)
+        continue;
+      Eigen::Vector3d nrm = (pts[j] - pts[i]).cross(pts[k] - pts[i]);
+      const double len = nrm.norm();
+      if (len < 1e-9)
+        continue;
+      nrm /= len;
+      if (std::abs(nrm.z()) < cos_max)
+        continue; // too steep (or vertical): never a ceiling
+      int count = 0;
+      for (const auto &q : pts)
+        if (std::abs(nrm.dot(q - pts[i]) / nrm.z()) <= opt.inlier_m)
+          ++count;
+      if (count > best) {
+        best = count;
+        best_p = pts[i];
+        best_n = nrm;
+      }
+    }
+    if (best >= 3)
+      for (size_t q = 0; q < pts.size(); ++q)
+        in[q] =
+            std::abs(best_n.dot(pts[q] - best_p) / best_n.z()) <= opt.inlier_m
+                ? 1
+                : 0;
+  }
   Eigen::Vector3d coef = Eigen::Vector3d::Zero(); // a, b, c about (cx, cy)
   double cx = 0.0, cy = 0.0;
   for (int round = 0; round < std::max(1, opt.max_rounds); ++round) {
@@ -526,30 +566,19 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
     return r;
   }
   if (std::isfinite(opt.z_floor)) {
-    // At the region's middle (its outer ring's area centroid): a sloped
-    // attic ceiling may come down to a low knee wall at its edge, but no
-    // room's ceiling is that low over its middle.
-    double a2 = 0.0, mx = 0.0, my = 0.0;
-    const auto &o = region.outer;
-    for (size_t i = 0, j = o.size() - 1; i < o.size(); j = i++) {
-      const double c = o[j][0] * o[i][1] - o[i][0] * o[j][1];
-      a2 += c;
-      mx += (o[j][0] + o[i][0]) * c;
-      my += (o[j][1] + o[i][1]) * c;
-    }
-    if (std::abs(a2) > 1e-12) {
-      mx /= 3.0 * a2;
-      my /= 3.0 * a2;
-    } else {
-      mx = cx;
-      my = cy;
-    }
-    r.clearance_m = r.plane.z_at(mx, my) - opt.z_floor;
+    // The plane's highest point over the region (it is linear, so at a
+    // vertex of the outer ring): a room has standing height somewhere,
+    // while an attic's sloped ceiling may sit low over most of it (S2-27
+    // Sygehusgrunden: 1.8 m over the floor at its middle, 3.1 m at the
+    // ridge side; reusex-g72u).
+    double highest = -std::numeric_limits<double>::infinity();
+    for (const auto &v : region.outer)
+      highest = std::max(highest, r.plane.z_at(v[0], v[1]));
+    r.clearance_m = highest - opt.z_floor;
     if (r.clearance_m < opt.min_clearance_m) {
       r.code = "too_low";
-      r.reason = fmt::format("the fit lies {:.2f} m over the floor at the "
-                             "room's middle (min {:.2f} m): not this room's "
-                             "ceiling",
+      r.reason = fmt::format("the fit lies at most {:.2f} m over the floor "
+                             "(min {:.2f} m): not this room's ceiling",
                              r.clearance_m, opt.min_clearance_m);
       return r;
     }
