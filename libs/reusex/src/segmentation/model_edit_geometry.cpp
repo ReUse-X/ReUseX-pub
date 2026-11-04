@@ -24,6 +24,7 @@
 #include <array>
 #include <cmath>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <optional>
@@ -425,6 +426,7 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
                                    const CeilingFitOptions &opt) {
   CeilingFitResult r;
   if (region.outer.size() < 3) {
+    r.code = "bad_region";
     r.reason = "the region has fewer than 3 points";
     return r;
   }
@@ -442,6 +444,7 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
   }
   r.points = static_cast<int>(pts.size());
   if (r.points < opt.min_points) {
+    r.code = "too_few_points";
     r.reason = fmt::format("{} point(s) in the region between z {:.2f} and "
                            "{:.2f} m (need {})",
                            r.points, z_lo, z_hi, opt.min_points);
@@ -461,6 +464,7 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
         ++n;
       }
     if (n < opt.min_points) {
+      r.code = "few_inliers";
       r.reason = fmt::format("only {} point(s) lie within {:.3f} m of a "
                              "plane (need {})",
                              n, opt.inlier_m, opt.min_points);
@@ -503,6 +507,7 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
     }
   r.inliers = n;
   if (n < opt.min_points) {
+    r.code = "few_inliers";
     r.reason = fmt::format("only {} point(s) lie within {:.3f} m of the fit "
                            "(need {})",
                            n, opt.inlier_m, opt.min_points);
@@ -514,13 +519,78 @@ CeilingFitResult fit_ceiling_plane(const Cloud &cloud,
   r.plane.at = {cx, cy, coef[0]};
   r.plane.slope = {coef[1], coef[2]};
   if (r.slope_deg > opt.max_slope_deg) {
+    r.code = "too_steep";
     r.reason = fmt::format("the fit slopes {:.1f} deg (max {:.1f}): not a "
                            "ceiling",
                            r.slope_deg, opt.max_slope_deg);
     return r;
   }
+  if (std::isfinite(opt.z_floor)) {
+    // At the region's middle (its outer ring's area centroid): a sloped
+    // attic ceiling may come down to a low knee wall at its edge, but no
+    // room's ceiling is that low over its middle.
+    double a2 = 0.0, mx = 0.0, my = 0.0;
+    const auto &o = region.outer;
+    for (size_t i = 0, j = o.size() - 1; i < o.size(); j = i++) {
+      const double c = o[j][0] * o[i][1] - o[i][0] * o[j][1];
+      a2 += c;
+      mx += (o[j][0] + o[i][0]) * c;
+      my += (o[j][1] + o[i][1]) * c;
+    }
+    if (std::abs(a2) > 1e-12) {
+      mx /= 3.0 * a2;
+      my /= 3.0 * a2;
+    } else {
+      mx = cx;
+      my = cy;
+    }
+    r.clearance_m = r.plane.z_at(mx, my) - opt.z_floor;
+    if (r.clearance_m < opt.min_clearance_m) {
+      r.code = "too_low";
+      r.reason = fmt::format("the fit lies {:.2f} m over the floor at the "
+                             "room's middle (min {:.2f} m): not this room's "
+                             "ceiling",
+                             r.clearance_m, opt.min_clearance_m);
+      return r;
+    }
+  }
+  const double share = static_cast<double>(n) / r.points;
+  if (share < opt.min_inlier_share) {
+    r.code = "low_inlier_share";
+    r.reason =
+        fmt::format("only {} of {} point(s) ({:.0f} %) lie on the fit "
+                    "(need {:.0f} %): the band holds more than one "
+                    "surface",
+                    n, r.points, 100.0 * share, 100.0 * opt.min_inlier_share);
+    return r;
+  }
   r.ok = true;
   return r;
+}
+
+CeilingBand
+default_ceiling_fit_band(double z_floor, double z_ceiling,
+                         const std::vector<core::StoreyRecord> &storeys,
+                         const CeilingBandOptions &opt) {
+  CeilingBand b;
+  b.z_lo = z_floor + 0.5 * std::max(0.0, z_ceiling - z_floor);
+  b.z_hi = std::max(z_ceiling, b.z_lo) + opt.above_ceiling_m;
+  // The next storey: the lowest whose floor lies over this ceiling. One
+  // whose floor is under it (a split level, a mis-measured storey) is no
+  // reason to cut the band short.
+  double next = std::numeric_limits<double>::infinity();
+  for (const auto &s : storeys)
+    if (s.z_floor > z_ceiling)
+      next = std::min(next, s.z_floor);
+  if (std::isfinite(next)) {
+    const double cap = std::max(next - opt.below_next_floor_m,
+                                std::max(z_ceiling, b.z_lo) + 0.05);
+    if (cap < b.z_hi) {
+      b.z_hi = cap;
+      b.capped = true;
+    }
+  }
+  return b;
 }
 
 // --- Room tools (reusex-pccw)
