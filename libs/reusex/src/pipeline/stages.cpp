@@ -15,6 +15,7 @@
 
 #include "reusex/core/ProjectDB.hpp"
 #include "reusex/core/SensorIntrinsics.hpp"
+#include "reusex/core/band_grid_inputs.hpp"
 #include "reusex/core/class_role_map.hpp"
 #include "reusex/core/filter_expression.hpp"
 #include "reusex/core/guid.hpp"
@@ -488,7 +489,15 @@ StageResult run_band_rooms(ProjectDB &db, const StageContext &ctx,
   if (ctx.is_cancelled())
     return StageResult::cancel("room segmentation cancelled");
 
-  db.save_point_cloud("rooms", *r.labels, "segment_rooms", ctx.parameters);
+  // What the grid was cut by (reusex-14aj): the spaces stage and `rux
+  // validate --stage spaces` compare it with today's tables.
+  json saved = json::parse(ctx.parameters, nullptr, false);
+  if (!saved.is_object())
+    saved = json::object();
+  saved[std::string(core::kBandGridInputsKey)] =
+      core::band_grid_input_fingerprints(db, o.use_wall_graph || o.cut_at_doors,
+                                         o.cut_at_doors);
+  db.save_point_cloud("rooms", *r.labels, "segment_rooms", saved.dump());
 
   // Debug path (W4.2, reusex-z1v.6.2): the rooms as space polygons against
   // the wall graph, written as a solid-model document for `rux analyze
@@ -1696,16 +1705,22 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
   for (size_t i = 0; i < cloud->size(); ++i)
     if ((*r.labels)[i].label != (*stored)[i].label)
       ++differ;
-  if (differ > 0)
+  if (differ > 0) {
+    const auto changed = core::stale_band_grid_inputs(db);
     return StageResult::invalid(fmt::format(
         "spaces: the 'rooms' cloud no longer matches its band grid: {} of {} "
         "points ({:.2f} %) get another room when the grid is rebuilt from "
-        "today's storeys / walls / openings ({} wall(s), {} opening(s)); "
-        "re-run `rux create rooms`",
+        "today's storeys / walls / openings ({} wall(s), {} opening(s){}); "
+        "re-run `rux create rooms` (the rooms stage) after any change to "
+        "the storeys, walls or openings, then spaces",
         differ, cloud->size(),
         100.0 * static_cast<double>(differ) /
             static_cast<double>(std::max<size_t>(cloud->size(), 1)),
-        plan.walls.size(), plan.openings.size()));
+        plan.walls.size(), plan.openings.size(),
+        changed.empty() ? std::string()
+                        : fmt::format("; changed since rooms ran: {}",
+                                      fmt::join(changed, ", "))));
+  }
 
   const auto walls = db.walls();
   if (so.spaces.use_walls && walls.empty())

@@ -706,7 +706,7 @@ asking for band by name is an instruction, not a preference.
 |---|---|
 | Consumes | `cloud`, `planes`, `plane_centroids`, `plane_normals` |
 | Optional | `normals`, `storeys` (band), `walls`, `openings` (band: wall graph and door cuts) |
-| Produces | `rooms` (`Label`) |
+| Produces | `rooms` (`Label`; `band`: `parameters.band_grid_inputs`, the fingerprints of the storeys / walls / openings the grid read, see the spaces stage) |
 | Options  | `SegmentRoomsOptions` (`libs/reusex/include/segmentation/segment_rooms.hpp`); `band`: `BandRoomsOptions` (`segmentation/band_rooms.hpp`), parameter keys `band_*` (incl. `band_use_walls`, `band_cut_at_doors`) |
 | Checks   | `cloud`/`planes` present + aligned; `plane_centroids`/`plane_normals` present + aligned; `band`: `storeys` has rows (refused if explicit, else falls back to leiden with a warning) and `normals` is aligned with `cloud` (checked by the stage) |
 
@@ -728,11 +728,28 @@ parameters `rooms` was saved with (`band_*`, `filter`), runs the band
 partition again over `cloud` / `normals` / `storeys` and the walls / openings
 tables, and checks that the room ids it gets are the `rooms` cloud's labels
 — the partition is deterministic, so they agree unless something it reads
-changed since `rooms` ran (walls, openings, storeys re-run). Then it is
-refused as invalid input with the share of points that disagree: re-run
-`rux create rooms` first. `rooms` made with `--method leiden` is refused
-the same way (no grid). So the recommended order is **walls -> openings ->
-rooms -> spaces**.
+changed since `rooms` ran (walls, openings, storeys re-run, or edited in
+the Rediger editor). Then it is refused as invalid input with the share of
+points that disagree and the tables that changed: re-run `rux create
+rooms` first. `rooms` made with `--method leiden` is refused the same way
+(no grid). So the order is **walls -> openings -> rooms -> spaces**, and
+**rooms must run again after any change to the storeys, walls or openings
+before spaces** — a job chain `storeys, classify, walls, openings, spaces`
+(no rooms) fails at spaces after any wall edit, and usually even without
+one, since walls / openings re-detected by a newer build differ from the
+ones the stored `rooms` cloud was cut by (reusex-14aj: the shipped
+Sygehusgrunden demo, made 2026-10-24: its grid read 292 walls and 101 door
+cuts; walls and openings re-detected today give 241 and 80, so 133 rooms
+instead of 143; the room ids shift, so 73 % of the points carry another id
+although only 4 % lie in another room). The rooms stage stamps a fingerprint of each table its grid read
+into the cloud's `parameters` (`"band_grid_inputs"`: storeys, and walls /
+openings when the grid used them; only the fields the grid reads, so a
+rename, a lock or a re-run with the same result changes nothing,
+`core/band_grid_inputs.hpp`), and `rux validate --stage spaces` (and the
+spaces stage's input check, in its log) warns `stale_rooms_grid` naming
+the changed tables and the command `rux create rooms`. A warning, not an
+error: a changed table need not move a room, and the stage's own label
+check decides.
 
 | | |
 |---|---|
@@ -740,7 +757,7 @@ rooms -> spaces**.
 | Optional | `walls` (without it every space is its raster outline), `openings` (the door cuts of the rebuilt grid), `planes` + `plane_classes` (the sloped-ceiling candidates; without them every ceiling stays flat) |
 | Produces | `spaces`, `space_boundaries` (tables, schema v35: one row per space with a stable GUID, one per bounding wall stretch; `spaces.ceiling_planes`, schema v39) |
 | Options  | `SpacesOptions` (`libs/reusex/include/segmentation/spaces.hpp`), parameter keys are its field names; plus `guid_match_m`, `guid_min_area_ratio`, `guid_min_overlap` (`core::SpaceIdentityOptions`, `core/space_identity.hpp`). One table, `pipeline::space_parameter_table()`, defines the keys, the CLI flags and their bounds |
-| Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; the rebuilt grid's room ids match `rooms` (checked by the stage) |
+| Checks   | `cloud`, `normals`, `rooms` present + aligned; ≥1 storey; warning `stale_rooms_grid` when the storeys / walls / openings changed since `rooms` ran (re-run `rux create rooms`); the rebuilt grid's room ids match `rooms` (checked by the stage) |
 
 Each row: `storey` (the storey's idx), `name` ("Space <room label>" until
 naming lands), `kind`, `polygon` (a blob: outer ring + holes, open rings,

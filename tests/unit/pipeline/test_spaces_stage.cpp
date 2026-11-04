@@ -422,6 +422,64 @@ TEST_CASE("SpacesStage_StaleRooms_IsRefused", "[pipeline][stages][spaces]") {
   CHECK_FALSE(db.has_spaces());
 }
 
+TEST_CASE("SpacesStage_WallEditWithoutRooms_NamesTheRoomsStage",
+          "[pipeline][stages][spaces][model_edits]") {
+  // reusex-14aj: after a wall edit the rooms cloud's grid is stale. `rux
+  // validate --stage spaces` says so up front and names the rooms stage; the
+  // spaces stage refuses with the changed table; walls -> rooms -> spaces
+  // runs.
+  TempPath project("test_spaces_stage_stale_walls");
+  ProjectDB db(project.path);
+  seed_band_rooms(db, project);
+  auto stale = [&] {
+    std::vector<core::ValidationIssue> issues;
+    for (const auto &i :
+         core::validate_stage(db, core::PipelineStage::spaces).issues)
+      if (i.check == "stale_rooms_grid")
+        issues.push_back(i);
+    return issues;
+  };
+  CHECK(stale().empty());
+  REQUIRE(run(db, project, JobStage::spaces).ok);
+  CHECK(stale().empty()); // writing spaces does not touch the grid's inputs
+
+  // Move the partition 0.4 m east.
+  auto walls = db.walls();
+  auto partition = std::find_if(walls.begin(), walls.end(), [](const auto &w) {
+    return std::abs(w.x0 - 2.0) < 0.2 && std::abs(w.x1 - 2.0) < 0.2;
+  });
+  REQUIRE(partition != walls.end());
+  partition->x0 += 0.4;
+  partition->x1 += 0.4;
+  core::apply_model_edit(db, {core::ModelEditOp::put(*partition)});
+
+  const auto issues = stale();
+  REQUIRE(issues.size() == 1);
+  CHECK(issues[0].severity == core::ValidationSeverity::warning);
+  CHECK(issues[0].artifact == "rooms");
+  CHECK(issues[0].message.find("walls") != std::string::npos);
+  CHECK(issues[0].commands == std::vector<std::string>{"rux create rooms"});
+
+  const auto refused = run(db, project, JobStage::spaces);
+  INFO(refused.message);
+  CHECK_FALSE(refused.ok);
+  CHECK(refused.invalid_input);
+  CHECK(refused.message.find("changed since rooms ran: walls") !=
+        std::string::npos);
+  CHECK(refused.message.find("re-run `rux create rooms`") != std::string::npos);
+
+  // The walls stage keeps the edited wall and finds the rest again: same
+  // inputs, so rooms then spaces run and the warning is gone.
+  for (auto stage : {JobStage::walls, JobStage::rooms, JobStage::spaces}) {
+    const auto r = run(db, project, stage);
+    INFO(to_string(stage) << ": " << r.message);
+    REQUIRE(r.ok);
+  }
+  CHECK(stale().empty());
+  REQUIRE(run(db, project, JobStage::walls).ok);
+  CHECK(stale().empty()); // re-detected the same: still fresh
+}
+
 TEST_CASE("SpacesStage_LeidenRooms_IsRefused", "[pipeline][stages][spaces]") {
   TempPath project("test_spaces_stage_leiden");
   ProjectDB db(project.path);

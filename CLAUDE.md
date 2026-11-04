@@ -515,7 +515,9 @@ and deleted the shims. `include/geometry/` now holds only the real
   a room; metrics, kind, space boundaries. Stored by the `spaces` stage
   (W4.3, `rux create spaces`, after rooms), which rebuilds the band grid
   with the `rooms` cloud's own parameters and refuses when it no longer
-  gives back that cloud's labels (re-run rooms); parameters in one table,
+  gives back that cloud's labels (re-run rooms after any storeys / walls /
+  openings change; `rux validate --stage spaces` warns from the grid-input
+  fingerprints rooms stamps, `core/band_grid_inputs.hpp`, reusex-14aj); parameters in one table,
   `pipeline/space_parameters.hpp`. `rux create rooms --spaces-json
   out.json` still writes the same spaces to a file (debug)
 - `segment_rooms.hpp`: room partitioning via Leiden clustering (igraph);
