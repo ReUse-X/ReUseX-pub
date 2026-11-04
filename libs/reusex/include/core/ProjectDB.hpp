@@ -1056,6 +1056,29 @@ class ProjectDB {
       std::string_view space,
       const std::vector<core::SpaceBoundaryRecord> &boundaries);
 
+  // --- Zones (schema v43, reusex-pccw) ---
+  //
+  // A zone groups spaces (core::ZoneRecord); members are space guids, not
+  // row ids, so they survive a spaces re-run that gives the space back
+  // under its guid. A space that is gone after a write (remove_space_row,
+  // save_spaces, delete_spaces, an import) leaves every zone. Written by
+  // the Rediger editor only (core::apply_model_edit, kind zone).
+
+  /// Every zone, row id ascending, members in their stored order. Empty
+  /// before v43.
+  std::vector<core::ZoneRecord> zones() const;
+  std::optional<core::ZoneRecord> zone_by_guid(std::string_view guid) const;
+  /// Write one zone row and its members exactly as given (see put_*_row
+  /// above: no transaction, no revision bump). Members are not checked
+  /// against the spaces table here (core::apply_model_edit does that).
+  /// @throws std::invalid_argument for an empty guid, a source other than
+  ///         detected | manual | imported, an empty or repeated member;
+  ///         std::runtime_error on a read-only or pre-v43 project.
+  void put_zone_row(const core::ZoneRecord &zone);
+  bool remove_zone_row(std::string_view guid);
+  /// Delete every zone (an explicit user action); raises model_revision().
+  void delete_zones();
+
   /// A deleted (dismissed) solid-model element's tombstone
   /// (model_dismissed, schema v41): the walls / openings / spaces detection
   /// stages do not write a record with its guid, and match re-detected
@@ -1063,7 +1086,7 @@ class ProjectDB {
   /// core::model_record_json()) so a phantom that comes back takes this
   /// guid and is dropped.
   struct DismissedModelElement {
-    std::string kind; ///< storey | wall | opening | space
+    std::string kind; ///< storey | wall | opening | space | zone | slab | stair
     std::string guid;
     std::string record; ///< JSON of the element as last detected / imported
     std::string dismissed_at;

@@ -794,7 +794,13 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   `frame_depth`, unknown when detected, set by `opening.update`; the
   solid-model JSON carries them as `model_version` 3, and
   `core/opening_fit.hpp` warns when an edit leaves an opening off its wall
-  or on another one
+  or on another one. Schema v43 adds zones (reusex-pccw): `zones` +
+  `zone_members` (`core::ZoneRecord`, `zones()` / `zone_by_guid()` /
+  `put_zone_row()`; members by space guid, pruned when a space is gone;
+  edit kind `zone`; `core/zones.hpp` measures them) and widens
+  `model_dismissed.kind` to zone / slab / stair; the room tools
+  `place_space_at` / `merge_spaces` / `split_space` live in
+  `segmentation/model_edit_geometry.hpp`
 - Migrating schema; `LATEST_SCHEMA_VERSION` is defined in
   `src/core/ProjectDB.cpp` — read it there rather than trusting a doc (it moves
   most releases)

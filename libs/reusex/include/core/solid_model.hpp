@@ -193,6 +193,24 @@ inline constexpr std::array<std::string_view, 13> kOpeningOperations = {
          kOpeningOperations.end();
 }
 
+/// A zone: a named group of spaces on one or more storeys (a dwelling, a
+/// fire cell, a use; IfcZone). Drawn by hand in the Rediger editor
+/// (reusex-pccw); no stage detects one. Its area and volume are its
+/// members' (core::zone_measures()).
+struct ZoneRecord {
+  int64_t id = -1;
+  std::string guid;
+  std::string name;
+  std::string use; ///< free-text category, e.g. "bolig", "brandcelle"
+  /// Member SpaceRecord::guid, in the order given; a deleted space leaves
+  /// every zone it was in.
+  std::vector<std::string> spaces;
+  std::string source = "manual";
+  bool locked = false;
+  double confidence = -1.0;
+  std::string metadata;
+};
+
 /// The role one plane of the "planes" cloud plays (one row per plane label;
 /// the plane_classes table, schema v31, keys it by cloud + plane_label).
 struct PlaneClassRecord {

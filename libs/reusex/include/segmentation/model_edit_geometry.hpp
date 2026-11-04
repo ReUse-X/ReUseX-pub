@@ -22,6 +22,9 @@
 ///    detected walls often leave rooms open, and a rebuild must not delete what
 ///    it cannot see. A preview: nothing is written; rebuild_spaces_ops() turns
 ///    the result into one edit batch.
+///  - place_space_at() / merge_spaces() / split_space(): the room tools
+///    (place a room by a click in a closed area, merge two rooms across
+///    their wall, split one along a line), previews again.
 ///  - fit_ceiling_plane(): a ceiling plane (core::CeilingPlane) fitted to
 ///    the cloud's points above a plan region within a height band ("fit fra
 ///    punkter"): least squares z = a + b x + c y, trimmed to the points
@@ -92,6 +95,91 @@ rebuild_spaces_from_walls(const std::vector<core::WallRecord> &walls,
 std::vector<core::ModelEditOp>
 rebuild_spaces_ops(const RebuildSpacesResult &result,
                    bool remove_unmatched = false);
+
+// --- Room tools (Rediger slice S6, reusex-pccw) ------------------------------
+
+/// "Placér i lukket område" (Revit: click inside a closed area): the room
+/// rebuild_spaces_from_walls() finds around @p seed. A preview like the
+/// rebuild; place_space_ops() makes it one edit batch.
+struct PlaceSpaceResult {
+  bool ok = false;
+  std::string reason; ///< why not, when !ok
+  core::SpaceRecord space;
+  std::vector<core::SpaceBoundaryRecord> boundaries;
+  /// The region is (mostly) a stored space, whose guid, name, kind and
+  /// heights it took: applying it re-fits that space to its walls.
+  bool existing = false;
+};
+
+/// @p seed in @p storey's level frame. Not ok when the point lies in a wall
+/// body or in no bounded face the walls close.
+PlaceSpaceResult place_space_at(const std::vector<core::WallRecord> &walls,
+                                const std::vector<core::SpaceRecord> &stored,
+                                const core::StoreyRecord &storey,
+                                std::string_view project_guid,
+                                const core::PlanPoint &seed,
+                                const RebuildSpacesOptions &opt = {});
+/// One put of the space with its boundaries (empty when !ok).
+std::vector<core::ModelEditOp> place_space_ops(const PlaceSpaceResult &r);
+
+struct RoomToolOptions {
+  /// An edge of a space within this distance of a wall face, parallel to
+  /// it, bounds the space on that wall [m] (rebuild's boundary_tolerance_m).
+  double boundary_tolerance_m = 0.02;
+  /// merge: two spaces on opposite faces of a wall, overlapping along it at
+  /// least this much, are merged across that wall's body [m].
+  double min_shared_m = 0.10;
+  /// split: the line is extended this far past both given points [m], so a
+  /// line snapped to the room's edges still crosses them.
+  double split_extension_m = 0.05;
+  /// Vertices closer than this to the line through their neighbours are
+  /// dropped from a result ring [m] (collinear runs, slivers of the union).
+  double simplify_m = 1e-4;
+};
+
+/// "Flet rum": @p b joined into @p a across the walls between them (the
+/// wall body is part of the result; Revit: delete the room separation).
+/// The result keeps @p a's guid, name, kind, heights and ceiling planes;
+/// metrics are measured again, boundaries found again from @p walls (the
+/// storey's), @p b is removed.
+struct MergeSpacesResult {
+  bool ok = false;
+  std::string reason;
+  core::SpaceRecord space;
+  std::vector<core::SpaceBoundaryRecord> boundaries;
+  std::string removed;                    ///< b's guid
+  std::vector<std::string> bridged_walls; ///< walls whose body joined them
+};
+/// Not ok for spaces on different storeys, or whose union (with the bodies
+/// of the walls they share) is not one polygon.
+MergeSpacesResult merge_spaces(const core::SpaceRecord &a,
+                               const core::SpaceRecord &b,
+                               const std::vector<core::WallRecord> &walls,
+                               const RoomToolOptions &opt = {});
+/// Put a (with its boundaries), remove b.
+std::vector<core::ModelEditOp> merge_spaces_ops(const MergeSpacesResult &r);
+
+/// "Del rum": @p space cut along the segment p0 -> p1 (level frame; extended
+/// by split_extension_m). The largest piece keeps the space's guid; the
+/// others copy its name (with " (2)", " (3)" ...), kind, heights and
+/// ceiling planes under fresh guids (core::deterministic_guid of
+/// @p project_guid and "spaces/split/<guid>/<k>", skipping @p taken).
+struct SplitSpaceResult {
+  bool ok = false;
+  std::string reason;
+  std::vector<core::SpaceRecord> spaces; ///< largest first
+  std::vector<core::SpaceBoundaryRecord> boundaries;
+};
+/// Not ok when the segment does not cut the space in two.
+SplitSpaceResult split_space(const core::SpaceRecord &space,
+                             const core::PlanPoint &p0,
+                             const core::PlanPoint &p1,
+                             const std::vector<core::WallRecord> &walls,
+                             std::string_view project_guid,
+                             const std::vector<std::string> &taken = {},
+                             const RoomToolOptions &opt = {});
+/// A put per piece, with its boundaries.
+std::vector<core::ModelEditOp> split_space_ops(const SplitSpaceResult &r);
 
 struct CeilingFitOptions {
   double inlier_m = 0.05;     ///< points farther from the fit are dropped

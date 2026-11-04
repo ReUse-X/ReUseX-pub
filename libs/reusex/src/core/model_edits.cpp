@@ -35,6 +35,8 @@ std::string_view to_string(ModelElementKind kind) {
     return "opening";
   case ModelElementKind::space:
     return "space";
+  case ModelElementKind::zone:
+    return "zone";
   }
   return "wall";
 }
@@ -48,9 +50,11 @@ ModelElementKind parse_model_element_kind(std::string_view text) {
     return ModelElementKind::opening;
   if (text == "space")
     return ModelElementKind::space;
+  if (text == "zone")
+    return ModelElementKind::zone;
   throw std::invalid_argument("unknown model element kind '" +
                               std::string(text) +
-                              "' (storey | wall | opening | space)");
+                              "' (storey | wall | opening | space | zone)");
 }
 
 // --- ModelEditOp factories ---------------------------------------------------
@@ -89,6 +93,14 @@ ModelEditOp::put(SpaceRecord space,
   op.guid = space.guid;
   op.record = std::move(space);
   op.boundaries = std::move(boundaries);
+  return op;
+}
+
+ModelEditOp ModelEditOp::put(ZoneRecord zone) {
+  ModelEditOp op;
+  op.kind = ModelElementKind::zone;
+  op.guid = zone.guid;
+  op.record = std::move(zone);
   return op;
 }
 
@@ -287,6 +299,16 @@ json model_record_json(const SpaceRecord &r) {
   return j;
 }
 
+json model_record_json(const ZoneRecord &r) {
+  json j;
+  j["guid"] = r.guid;
+  j["name"] = r.name;
+  j["use"] = r.use;
+  j["spaces"] = r.spaces;
+  common_json(j, r);
+  return j;
+}
+
 StoreyRecord storey_from_json(const json &j) {
   StoreyRecord r;
   Fields f(j, "storey");
@@ -404,6 +426,17 @@ SpaceRecord space_from_json(const json &j) {
   return r;
 }
 
+ZoneRecord zone_from_json(const json &j) {
+  ZoneRecord r;
+  Fields f(j, "zone");
+  common_from(f, r);
+  f.get("name", r.name);
+  f.get("use", r.use);
+  f.get("spaces", r.spaces);
+  f.done();
+  return r;
+}
+
 // --- Row state ---------------------------------------------------------------
 
 namespace {
@@ -490,6 +523,10 @@ RowState capture(const ProjectDB &db, ModelElementKind kind,
       st.row = {{"record", model_record_json(*r)}, {"boundaries", bs}};
     }
     break;
+  case ModelElementKind::zone:
+    if (auto r = db.zone_by_guid(guid))
+      st.row = {{"record", model_record_json(*r)}};
+    break;
   }
   if (auto d = db.dismissed_model_element(guid))
     st.tomb = parse_text_object(d->record);
@@ -519,6 +556,9 @@ void put_record_exact(ProjectDB &db, ModelElementKind kind, const json &rec) {
   case ModelElementKind::space:
     db.put_space_row(space_from_json(rec));
     break;
+  case ModelElementKind::zone:
+    db.put_zone_row(zone_from_json(rec));
+    break;
   }
 }
 
@@ -532,6 +572,8 @@ bool remove_row(ProjectDB &db, ModelElementKind kind, const std::string &g) {
     return db.remove_opening_row(g);
   case ModelElementKind::space:
     return db.remove_space_row(g);
+  case ModelElementKind::zone:
+    return db.remove_zone_row(g);
   }
   return false;
 }
@@ -622,6 +664,10 @@ template <>
 std::optional<SpaceRecord> stored_as(const ProjectDB &db,
                                      const std::string &g) {
   return db.space_by_guid(g);
+}
+template <>
+std::optional<ZoneRecord> stored_as(const ProjectDB &db, const std::string &g) {
+  return db.zone_by_guid(g);
 }
 
 json row_record(const RowState &st) {
@@ -765,7 +811,14 @@ ModelEditResult apply_model_edit(ProjectDB &db,
           db.put_wall_row(rec);
         else if constexpr (std::is_same_v<R, OpeningRecord>)
           db.put_opening_row(rec);
-        else
+        else if constexpr (std::is_same_v<R, ZoneRecord>) {
+          for (const auto &sg : rec.spaces)
+            if (!db.space_by_guid(sg))
+              throw std::invalid_argument(fmt::format(
+                  "model edit: zone {} names space {}, which is not stored",
+                  rec.guid, sg));
+          db.put_zone_row(rec);
+        } else
           db.put_space_row(rec);
         db.undismiss_model_element(rec.guid);
         actions[k] = stored ? "updated" : "created";
@@ -794,6 +847,15 @@ ModelEditResult apply_model_edit(ProjectDB &db,
         throw std::invalid_argument(fmt::format(
             "model edit: no {} {} to delete", to_string(op.kind), op.guid));
       const json rec = row_record(now);
+      // A space leaves its zones (remove_space_row prunes the members):
+      // log those zones too, so undo puts the space back in them.
+      if (k.kind == ModelElementKind::space)
+        for (const auto &z : db.zones())
+          if (std::find(z.spaces.begin(), z.spaces.end(), k.guid) !=
+              z.spaces.end()) {
+            touch({ModelElementKind::zone, z.guid});
+            actions[{ModelElementKind::zone, z.guid}] = "updated";
+          }
       remove_row(db, k.kind, k.guid);
       if (needs_tomb(rec))
         db.dismiss_model_element(to_string(k.kind), k.guid,
@@ -928,6 +990,9 @@ void normalise_logged_row(ModelElementKind kind, json &row) {
     break;
   case ModelElementKind::space:
     rec = model_record_json(space_from_json(rec));
+    break;
+  case ModelElementKind::zone:
+    rec = model_record_json(zone_from_json(rec));
     break;
   }
 }
@@ -1097,6 +1162,9 @@ std::vector<ModelEditOp> model_edit_ops_from_json(const ProjectDB &db,
       put = ModelEditOp::put(space_from_json(rec), std::move(bs));
       break;
     }
+    case ModelElementKind::zone:
+      put = ModelEditOp::put(zone_from_json(rec));
+      break;
     }
     return put;
   };
@@ -1485,6 +1553,9 @@ ModelHolds model_holds(const ProjectDB &db, ModelElementKind kind) {
     break;
   case ModelElementKind::space:
     add_edited(db.spaces());
+    break;
+  case ModelElementKind::zone:
+    add_edited(db.zones());
     break;
   }
   return h;

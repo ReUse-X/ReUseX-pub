@@ -452,9 +452,11 @@ class ProjectDB::Impl {
   /// openings.swing_side / hinge / operation / type_name / frame_depth
   /// exist (v42).
   bool hasOpeningLeafColumns = false;
+  /// zones and zone_members exist (v43).
+  bool hasZonesTable = false;
 
   // cppcheck-suppress unusedStructMember
-  static constexpr int LATEST_SCHEMA_VERSION = 42;
+  static constexpr int LATEST_SCHEMA_VERSION = 43;
 
   // How long one statement waits for a lock another connection holds before
   // failing with SQLITE_BUSY. sqlite's default is not to wait at all.
@@ -593,6 +595,7 @@ class ProjectDB::Impl {
     hasModelEditTables =
         tableExists("model_dismissed") && tableExists("model_edits");
     hasOpeningLeafColumns = columnExists("openings", "frame_depth");
+    hasZonesTable = tableExists("zones") && tableExists("zone_members");
   }
 
   /// True the first time this process opens dbPath read-only at schema
@@ -944,6 +947,10 @@ class ProjectDB::Impl {
 
     if (current < 42) {
       migrateToV42();
+    }
+
+    if (current < 43) {
+      migrateToV43();
     }
 
     reusex::trace("Schema version: {}", getCurrentSchemaVersion());
@@ -4878,6 +4885,198 @@ class ProjectDB::Impl {
     reusex::info("Migration to schema version 42 complete");
   }
 
+  void migrateToV43() {
+    reusex::info("Migrating database to schema version 43");
+    // Zones (reusex-pccw, Rediger editor slice S6): a named group of spaces
+    // (a dwelling, a fire cell, a use). Members name their space by guid,
+    // not by a foreign key to spaces(id): a spaces re-run deletes and
+    // re-inserts its unlocked rows under the same guid, and a cascading key
+    // would empty every zone (the openings rule, v34). A member whose space
+    // is gone after a write is pruned in C++ (pruneZoneMembers).
+    // model_dismissed's kind CHECK is widened for the editor's newer kinds
+    // (zone, slab, stair): SQLite cannot alter a CHECK, so the table is
+    // copied.
+    Savepoint sp(db, "migrate_v43");
+    execOrThrow(R"(
+      CREATE TABLE IF NOT EXISTS zones (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        guid       TEXT    NOT NULL UNIQUE,
+        name       TEXT    NOT NULL DEFAULT '',
+        use        TEXT    NOT NULL DEFAULT '',
+        source     TEXT    NOT NULL DEFAULT 'manual'
+          CHECK (source IN ('detected', 'manual', 'imported')),
+        locked     INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+        confidence REAL    NOT NULL DEFAULT -1,
+        metadata   TEXT    NOT NULL DEFAULT '',
+        created_at TEXT    NOT NULL
+          DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      );
+      CREATE TABLE IF NOT EXISTS zone_members (
+        zone_id    INTEGER NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
+        space_guid TEXT    NOT NULL,
+        ord        INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (zone_id, space_guid)
+      );
+      CREATE INDEX IF NOT EXISTS idx_zone_members_space
+        ON zone_members(space_guid);
+    )");
+    if (tableExists("model_dismissed"))
+      execOrThrow(R"(
+        CREATE TABLE model_dismissed_v43 (
+          guid         TEXT PRIMARY KEY,
+          kind         TEXT NOT NULL
+            CHECK (kind IN ('storey', 'wall', 'opening', 'space', 'zone',
+                            'slab', 'stair')),
+          record       TEXT NOT NULL DEFAULT '',
+          dismissed_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        );
+        INSERT INTO model_dismissed_v43 (guid, kind, record, dismissed_at)
+          SELECT guid, kind, record, dismissed_at FROM model_dismissed;
+        DROP TABLE model_dismissed;
+        ALTER TABLE model_dismissed_v43 RENAME TO model_dismissed;
+        CREATE INDEX IF NOT EXISTS idx_model_dismissed_kind
+          ON model_dismissed(kind);
+      )");
+    insertSchemaVersion(43, "Solid model: zones and zone_members (groups of "
+                            "spaces); model_dismissed takes zone / slab / "
+                            "stair");
+    sp.release();
+    hasZonesTable = true;
+    reusex::info("Migration to schema version 43 complete");
+  }
+
+  // ── Zones (v43) ──────────────────────────────────────────────────────────
+
+  std::vector<core::ZoneRecord> listZones(std::string_view guid) const {
+    std::vector<core::ZoneRecord> out;
+    if (!hasZonesTable)
+      return out;
+    sqlite3_stmt *s = prepare_or_throw(
+        db,
+        "SELECT id, guid, name, use, source, locked, confidence, metadata "
+        "FROM zones WHERE (?1 = '' OR guid = ?1) ORDER BY id;",
+        "zones");
+    StmtGuard guard(s);
+    bind_text(s, 1, guid);
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+      core::ZoneRecord z;
+      z.id = sqlite3_column_int64(s, 0);
+      z.guid = column_text(s, 1);
+      z.name = column_text(s, 2);
+      z.use = column_text(s, 3);
+      z.source = column_text(s, 4);
+      z.locked = sqlite3_column_int(s, 5) != 0;
+      z.confidence = sqlite3_column_double(s, 6);
+      z.metadata = column_text(s, 7);
+      out.push_back(std::move(z));
+    }
+    if (rc != SQLITE_DONE)
+      throw std::runtime_error("zones: " + std::string(sqlite3_errmsg(db)));
+    if (out.empty())
+      return out;
+    sqlite3_stmt *m =
+        prepare_or_throw(db,
+                         "SELECT zone_id, space_guid FROM zone_members "
+                         "ORDER BY zone_id, ord, space_guid;",
+                         "zones");
+    StmtGuard mGuard(m);
+    std::map<int64_t, core::ZoneRecord *> byId;
+    for (auto &z : out)
+      byId[z.id] = &z;
+    while ((rc = sqlite3_step(m)) == SQLITE_ROW)
+      if (const auto it = byId.find(sqlite3_column_int64(m, 0));
+          it != byId.end())
+        it->second->spaces.push_back(column_text(m, 1));
+    if (rc != SQLITE_DONE)
+      throw std::runtime_error("zones: " + std::string(sqlite3_errmsg(db)));
+    return out;
+  }
+
+  void putZoneRow(const core::ZoneRecord &z) {
+    constexpr const char *who = "put_zone_row";
+    checkWritable();
+    if (!hasZonesTable)
+      throw std::runtime_error("put_zone_row: project schema predates v43");
+    if (z.guid.empty())
+      throw std::invalid_argument("put_zone_row: empty guid");
+    if (z.source != "detected" && z.source != "manual" &&
+        z.source != "imported")
+      throw std::invalid_argument("put_zone_row: zone " + z.guid +
+                                  " has invalid source '" + z.source + "'");
+    {
+      std::set<std::string, std::less<>> seen;
+      for (const auto &g : z.spaces) {
+        if (g.empty())
+          throw std::invalid_argument("put_zone_row: zone " + z.guid +
+                                      " names an empty space guid");
+        if (!seen.insert(g).second)
+          throw std::invalid_argument("put_zone_row: zone " + z.guid +
+                                      " names space " + g + " twice");
+      }
+    }
+    sqlite3_stmt *up = prepare_or_throw(
+        db,
+        "INSERT INTO zones (guid, name, use, source, locked, confidence, "
+        "metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) "
+        "ON CONFLICT (guid) DO UPDATE SET name = excluded.name, "
+        "use = excluded.use, source = excluded.source, "
+        "locked = excluded.locked, confidence = excluded.confidence, "
+        "metadata = excluded.metadata;",
+        who);
+    StmtGuard guard(up);
+    bind_text(up, 1, z.guid);
+    bind_text(up, 2, z.name);
+    bind_text(up, 3, z.use);
+    bind_text(up, 4, z.source);
+    sqlite3_bind_int(up, 5, z.locked ? 1 : 0);
+    sqlite3_bind_double(up, 6, z.confidence);
+    bind_text(up, 7, z.metadata);
+    stepDone(up, std::string(who) + ": zone " + z.guid);
+    {
+      sqlite3_stmt *del =
+          prepare_or_throw(db,
+                           "DELETE FROM zone_members WHERE zone_id = "
+                           "(SELECT id FROM zones WHERE guid = ?);",
+                           who);
+      StmtGuard delGuard(del);
+      bind_text(del, 1, z.guid);
+      stepDone(del, std::string(who) + ": members of zone " + z.guid);
+    }
+    sqlite3_stmt *ins =
+        prepare_or_throw(db,
+                         "INSERT INTO zone_members (zone_id, space_guid, ord) "
+                         "SELECT id, ?, ? FROM zones WHERE guid = ?;",
+                         who);
+    StmtGuard insGuard(ins);
+    int ord = 0;
+    for (const auto &g : z.spaces) {
+      sqlite3_reset(ins);
+      sqlite3_clear_bindings(ins);
+      bind_text(ins, 1, g);
+      sqlite3_bind_int(ins, 2, ord++);
+      bind_text(ins, 3, z.guid);
+      stepDone(ins, std::string(who) + ": member " + g + " of zone " + z.guid);
+    }
+  }
+
+  void deleteZones() {
+    checkWritable();
+    if (hasZonesTable) {
+      execOrThrow("DELETE FROM zone_members; DELETE FROM zones;");
+      bumpModelRevision();
+    }
+  }
+
+  /// Drop zone members whose space row no longer exists. @returns how many.
+  size_t pruneZoneMembers() {
+    if (!hasZonesTable || !hasSpacesTable)
+      return 0;
+    return execChanges("DELETE FROM zone_members WHERE space_guid NOT IN "
+                       "(SELECT guid FROM spaces);");
+  }
+
   // ── Spaces (v35) ─────────────────────────────────────────────────────────
 
   static constexpr const char *kSpaceColumns =
@@ -5251,6 +5450,10 @@ class ProjectDB::Impl {
       reusex::warn("save_spaces: deleted {} space boundar(y/ies) whose space "
                    "row no longer exists (written with foreign keys off)",
                    dangling);
+    if (const size_t pruned = pruneZoneMembers(); pruned > 0)
+      reusex::info("save_spaces: {} space(s) left their zone(s): not given "
+                   "back by this run",
+                   pruned);
     bumpModelRevision();
     sp.release();
     if (skipped > 0)
@@ -5278,6 +5481,7 @@ class ProjectDB::Impl {
     checkWritable();
     if (hasSpacesTable) {
       execOrThrow("DELETE FROM space_boundaries; DELETE FROM spaces;");
+      pruneZoneMembers();
       bumpModelRevision();
     }
   }
@@ -5686,7 +5890,7 @@ class ProjectDB::Impl {
     if (guid.empty())
       throw std::invalid_argument("dismiss_model_element: empty guid");
     if (kind != "storey" && kind != "wall" && kind != "opening" &&
-        kind != "space")
+        kind != "space" && kind != "zone" && kind != "slab" && kind != "stair")
       throw std::invalid_argument("dismiss_model_element: invalid kind '" +
                                   std::string(kind) + "'");
     sqlite3_stmt *s = prepare_or_throw(
@@ -10784,9 +10988,37 @@ bool ProjectDB::remove_opening_row(std::string_view guid) {
 }
 
 bool ProjectDB::remove_space_row(std::string_view guid) {
-  return impl_->removeRow("spaces", impl_->hasSpacesTable, guid,
-                          "remove_space_row");
+  const bool removed = impl_->removeRow("spaces", impl_->hasSpacesTable, guid,
+                                        "remove_space_row");
+  if (removed)
+    impl_->pruneZoneMembers();
+  return removed;
 }
+
+std::vector<core::ZoneRecord> ProjectDB::zones() const {
+  return impl_->listZones("");
+}
+
+std::optional<core::ZoneRecord>
+ProjectDB::zone_by_guid(std::string_view guid) const {
+  if (guid.empty())
+    return std::nullopt;
+  auto all = impl_->listZones(guid);
+  if (all.empty())
+    return std::nullopt;
+  return std::move(all.front());
+}
+
+void ProjectDB::put_zone_row(const core::ZoneRecord &zone) {
+  impl_->putZoneRow(zone);
+}
+
+bool ProjectDB::remove_zone_row(std::string_view guid) {
+  return impl_->removeRow("zones", impl_->hasZonesTable, guid,
+                          "remove_zone_row");
+}
+
+void ProjectDB::delete_zones() { impl_->deleteZones(); }
 
 void ProjectDB::replace_wall_joins_of(
     std::string_view wall, const std::vector<core::WallJoinRecord> &joins) {
