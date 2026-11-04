@@ -11,6 +11,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <reusex/core/ProjectDB.hpp>
+#include <reusex/core/model_edits.hpp>
 #include <reusex/core/stage_contract.hpp>
 #include <reusex/pipeline/solid_parameters.hpp>
 #include <reusex/pipeline/stage_parameters.hpp>
@@ -207,4 +208,24 @@ TEST_CASE("SolidsStage_Rerun_WithoutSpaces_DropsTheStaleSpacesMesh",
   const json slabs = json::parse(db.mesh_metadata(kSolidSlabsMesh).parameters);
   CHECK(slabs.at("elements").size() == 1); // the walls' hull, no roof
   CHECK(slabs.at("parameters").at("roof") == false);
+}
+
+TEST_CASE("SolidsStage_RecordsTheModelRevision", "[pipeline][solids]") {
+  TempPath project("test_solids_stage_model_revision");
+  ProjectDB db(project.path);
+  store(db, two_rooms());
+  REQUIRE(run(db, project).ok);
+  const auto stored = [&](std::string_view name) {
+    return json::parse(db.mesh_metadata(name).parameters)
+        .at("model_revision")
+        .get<int64_t>();
+  };
+  for (auto name : {kSolidWallsMesh, kSolidSlabsMesh, kSolidSpacesMesh})
+    CHECK(stored(name) == db.model_revision());
+
+  // A model edit after the solids were built leaves them stale.
+  core::apply_model_edit(
+      db, {core::ModelEditOp::remove(core::ModelElementKind::opening, "d")});
+  for (auto name : {kSolidWallsMesh, kSolidSlabsMesh, kSolidSpacesMesh})
+    CHECK(stored(name) != db.model_revision());
 }

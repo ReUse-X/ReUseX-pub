@@ -877,7 +877,10 @@ corner or tee run on to the far face of the wall they meet.
 
 Each mesh is world coordinates (the level frames mapped back), triangles,
 outward faces. Its `parameters` column is a JSON object `{solids_version: 1,
-type, parameters, elements}`; each element has `guid` (the source wall's,
+type, parameters, model_revision, elements}`; `model_revision` is
+`ProjectDB::model_revision()` when the solids were built, so the meshes are
+stale iff it differs from the project's current one (every model edit raises
+it); each element has `guid` (the source wall's,
 space's or -- for a slab -- storey's GUID), `type`, `storey`, `predefined`
 (wall `STANDARD`, slab `FLOOR` / `ROOF`, space its kind), `part` (slab piece,
 largest first), `closed` (`CGAL::is_closed`), `volume`, `faces` / `vertices`

@@ -1919,6 +1919,10 @@ StageResult run_solids(ProjectDB &db, const json &params) {
 
   std::vector<StageArtifact> outputs;
   const std::string stage_params = solid_parameters_json(so);
+  // The model revision the solids were built from: a reader (ruxd's
+  // solids_stale) compares it with ProjectDB::model_revision(), which every
+  // model edit raises. save_mesh does not touch the model tables.
+  const int64_t model_revision = db.model_revision();
   const auto store = [&](std::string_view name,
                          const std::vector<geometry::ElementSolid> &elements,
                          std::string_view type) {
@@ -1935,6 +1939,7 @@ StageResult run_solids(ProjectDB &db, const json &params) {
     const json meta = {{"solids_version", 1},
                        {"type", type},
                        {"parameters", json::parse(stage_params)},
+                       {"model_revision", model_revision},
                        {"elements", std::move(index)}};
     db.save_mesh(name, mesh, "solids", meta.dump());
     outputs.push_back({"mesh", std::string(name),
