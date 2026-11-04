@@ -51,7 +51,7 @@ not filled in:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `project` | object | `id`, `name`, `building_address`, `year_of_construction`, `survey_date` (`14.09.2026`), `survey_organisation`, `notes`, plus the BEK 496 Sagsdata fields `bbr_number`, `cadastral`, `client`, `client_contact`, `coordinator`, `municipality`, `demolition_start`, `demolished_floor_area_m2` (`"2.480 m²"`), `screening_approved_at`. The first project of the file; the Sagsdata fields live in project_settings under `sagsdata/<project id>/<field>` (`core/sagsdata.hpp`) |
+| `project` | object | `id`, `name`, `building_address`, `year_of_construction`, `survey_date` (`14.09.2026`), `survey_organisation`, `notes`, plus the BEK 496 Sagsdata fields `bbr_number`, `cadastral`, `client`, `client_contact`, `coordinator`, `municipality`, `demolition_start`, `demolished_floor_area_m2` (`"2.480 m²"`), `screening_approved_at`, and the register ids `husnummer_id`, `bfe_number`, `bbr_building_id` (as text; the texts above are what the report prints). The first project of the file; the Sagsdata fields live in project_settings under `sagsdata/<project id>/<field>` (`core/sagsdata.hpp`) |
 | `sagsdata[]` | `{label, value}` | The Sagsdata page's rows, in the GUI's order |
 | `types[]` | `{id, name, approved, eak, treatment, quantity, mass, mass_needed, environment}` | Every non-rejected survey type (Ressourcekortlægning), approved or not; `mass` null = no tonnes (`mass_needed` false for bevaring) |
 | `types_summary` | `{count, approved, total, line}` | `line` = `"7 typer · 406,3 t i alt · 5 godkendt"` |

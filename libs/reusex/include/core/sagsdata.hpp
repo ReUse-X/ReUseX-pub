@@ -26,7 +26,11 @@ namespace reusex::core {
 
 /// The field names, in form order: bbr_number, cadastral, client,
 /// client_contact, coordinator, municipality, demolition_start,
-/// demolished_floor_area_m2, screening_approved_at.
+/// demolished_floor_area_m2, screening_approved_at — then the register
+/// ids behind the texts (rux-frontend contract gap 17, filled by the ruxd
+/// lookups): husnummer_id (the DAR husnummer UUID the address was picked
+/// as), bfe_number (the ejendom's BFE-nummer) and bbr_building_id (BBR's
+/// id of the building the case is about).
 const std::vector<std::string> &sagsdata_fields();
 
 /// True when @p field is one of sagsdata_fields().
@@ -41,15 +45,18 @@ std::optional<std::string> sagsdata_value(const ProjectDB &db,
                                           std::string_view project_id,
                                           std::string_view field);
 
-/// Every field as JSON: a string, `demolished_floor_area_m2` as a number,
-/// null when unset (an unparsable stored area reads as null).
+/// Every field as JSON: a string, `demolished_floor_area_m2` and
+/// `bfe_number` as numbers, null when unset (an unparsable stored number
+/// reads as null).
 nlohmann::json sagsdata_json(const ProjectDB &db, std::string_view project_id);
 
 /// The text to store for @p field given its JSON value: "" for null (clears).
 /// `demolished_floor_area_m2` must be a finite non-negative number (stored as
 /// its JSON text, so it round-trips exactly); `demolition_start` a date
 /// (YYYY-MM-DD); `screening_approved_at` a date or an ISO 8601 date-time;
-/// every other field a string. An empty string also clears.
+/// `bfe_number` a positive integer (stored as its JSON text); `husnummer_id`
+/// and `bbr_building_id` lowercase UUIDs (8-4-4-4-12 hex, as DAR and BBR
+/// write them); every other field a string. An empty string also clears.
 /// @throws std::invalid_argument naming the field and the rule, or an
 ///         unknown field.
 std::string sagsdata_stored_value(std::string_view field,
