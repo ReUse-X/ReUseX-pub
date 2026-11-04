@@ -314,17 +314,26 @@ assign_space_guids(std::vector<SpaceRecord> &fresh,
   std::map<std::string, std::string> renamed; // placeholder -> GUID
   std::vector<bool> fresh_done(fresh.size(), false);
   std::vector<bool> stored_used(stored.size(), false);
+  // A locked stored row keeps its geometry (reusex-s4mm): the detection
+  // that matched it, or that lies inside it, is dropped.
+  std::vector<bool> fresh_dropped(fresh.size(), false);
+  constexpr size_t kNone = std::numeric_limits<size_t>::max();
+  std::vector<size_t> matched_by(stored.size(), kNone);
   auto take = [&](size_t i, size_t j) {
-    renamed[fresh[i].guid] = stored[j].guid;
-    fresh[i].guid = stored[j].guid;
-    if (named(stored[j])) {
-      inherit(fresh[i], stored[j]);
+    if (named(stored[j]))
       ++result.named_matched;
+    if (stored[j].locked) {
+      fresh_dropped[i] = true;
+      matched_by[j] = i;
+      ++result.locked_matched;
+    } else {
+      renamed[fresh[i].guid] = stored[j].guid;
+      fresh[i].guid = stored[j].guid;
+      if (named(stored[j]))
+        inherit(fresh[i], stored[j]);
     }
     fresh_done[i] = stored_used[j] = true;
     ++result.matched;
-    if (stored[j].locked)
-      ++result.locked_matched;
   };
   // Round 1 measures the overlap against the larger footprint (the same
   // room), round 2 against the smaller one (a split or merged room's
@@ -353,6 +362,20 @@ assign_space_guids(std::vector<SpaceRecord> &fresh,
     }
   }
 
+  // An unmatched detection mostly inside a locked stored room (the rest of
+  // a room split under it) is part of that room, not a space of its own.
+  for (size_t i = 0; i < fresh.size(); ++i) {
+    if (fresh_done[i] || !(fa[i] > 0.0))
+      continue;
+    for (size_t j = 0; j < stored.size(); ++j)
+      if (stored[j].locked && stored[j].storey == fresh[i].storey &&
+          overlap(ff[i], sf[j], kDy) >= opt.min_overlap * fa[i]) {
+        fresh_done[i] = fresh_dropped[i] = true;
+        ++result.inside_locked;
+        break;
+      }
+  }
+
   std::set<std::string> taken;
   for (const auto &s : stored)
     taken.insert(s.guid);
@@ -368,20 +391,48 @@ assign_space_guids(std::vector<SpaceRecord> &fresh,
     taken.insert(guid);
     ++result.minted;
   }
+  // Every locked stored space stays as stored: a matched one with the
+  // detection's link into today's rooms cloud and no "unmatched" flag, one
+  // nothing matched flagged "unmatched".
+  for (size_t j = 0; j < stored.size(); ++j) {
+    if (!stored[j].locked)
+      continue;
+    SpaceRecord k = stored[j];
+    if (matched_by[j] != kNone) {
+      k.room_label = fresh[matched_by[j]].room_label;
+      auto md = nlohmann::json::parse(k.metadata, nullptr, false);
+      if (md.is_object() && md.erase("unmatched") > 0)
+        k.metadata = md.empty() ? std::string() : md.dump();
+    } else if (stored_used[j]) {
+      continue;
+    } else {
+      auto md = metadata_object(k.metadata);
+      md["unmatched"] = true;
+      k.metadata = md.dump();
+      ++result.unmatched_locked;
+    }
+    result.kept.push_back(std::move(k));
+  }
+
+  // The dropped detections go, with their boundaries (still named by their
+  // placeholders); the others' boundaries take their GUIDs.
+  std::set<std::string> dropped;
+  for (size_t i = 0; i < fresh.size(); ++i)
+    if (fresh_dropped[i])
+      dropped.insert(fresh[i].guid);
+  if (!dropped.empty()) {
+    std::vector<SpaceRecord> left;
+    left.reserve(fresh.size() - dropped.size());
+    for (size_t i = 0; i < fresh.size(); ++i)
+      if (!fresh_dropped[i])
+        left.push_back(std::move(fresh[i]));
+    fresh = std::move(left);
+    std::erase_if(boundaries,
+                  [&](const auto &b) { return dropped.count(b.space) > 0; });
+  }
   for (auto &b : boundaries)
     if (const auto it = renamed.find(b.space); it != renamed.end())
       b.space = it->second;
-
-  // A locked stored space nothing matched stays as stored, flagged.
-  for (size_t j = 0; j < stored.size(); ++j) {
-    if (stored_used[j] || !stored[j].locked)
-      continue;
-    SpaceRecord k = stored[j];
-    auto md = metadata_object(k.metadata);
-    md["unmatched"] = true;
-    k.metadata = md.dump();
-    result.kept.push_back(std::move(k));
-  }
   return result;
 }
 

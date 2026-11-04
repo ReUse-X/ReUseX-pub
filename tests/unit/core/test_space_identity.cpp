@@ -81,11 +81,28 @@ TEST_CASE("SpaceIdentity_MovedOutline_KeepsTheStoredGuid",
   CHECK(r.matched == 1);
   CHECK(r.locked_matched == 1);
   CHECK(r.minted == 2);
-  CHECK(fresh[0].guid == "stored-guid");
+  // The stored row is locked: it is kept as stored (reusex-s4mm), and the
+  // detection that matched it goes, with its boundaries.
+  REQUIRE(fresh.size() == 2);
+  CHECK(fresh[0].guid != "stored-guid");
   CHECK(fresh[1].guid != "stored-guid");
-  CHECK(fresh[2].guid != "stored-guid");
-  CHECK(bounds[0].space == "stored-guid");
-  CHECK(bounds[1].space == fresh[2].guid);
+  REQUIRE(r.kept.size() == 1);
+  CHECK(r.kept[0].guid == "stored-guid");
+  CHECK(r.kept[0].polygon.outer == stored.polygon.outer);
+  CHECK(r.unmatched_locked == 0);
+  REQUIRE(bounds.size() == 1);
+  CHECK(bounds[0].space == fresh[1].guid);
+
+  // Unlocked, it hands its GUID to the new outline.
+  stored.locked = false;
+  std::vector<SpaceRecord> again{sp("p1", 0, 0.1, -0.05, 4.1, 4.0)};
+  std::vector<SpaceBoundaryRecord> b2{{"p1", "w", "a", 0, 4}};
+  const auto r2 = assign_space_guids(again, b2, {stored}, {}, kProject);
+  CHECK(r2.matched == 1);
+  CHECK(r2.kept.empty());
+  REQUIRE(again.size() == 1);
+  CHECK(again[0].guid == "stored-guid");
+  CHECK(b2[0].space == "stored-guid");
 }
 
 TEST_CASE("SpaceIdentity_SplitRoom_OnlyOneHalfInherits",
@@ -94,9 +111,10 @@ TEST_CASE("SpaceIdentity_SplitRoom_OnlyOneHalfInherits",
   // room by the first round (half the larger footprint, below 0.6; half the
   // stored area, below min_area_ratio), but each lies wholly inside it, so
   // the second round gives the identity to one of them, never both.
+  // Named but not locked (source manual): the name follows the detection.
   auto stored = sp("stored-guid", 0, 0, 0, 8, 4);
   stored.name = "Sal";
-  stored.locked = true;
+  stored.source = "manual";
   std::vector<SpaceRecord> fresh{sp("p1", 0, 0, 0, 4, 4),
                                  sp("p2", 0, 4, 0, 4, 4)};
   std::vector<SpaceBoundaryRecord> none;
@@ -108,11 +126,43 @@ TEST_CASE("SpaceIdentity_SplitRoom_OnlyOneHalfInherits",
   CHECK(r.matched == 1);
   CHECK(r.minted == 1);
   CHECK(r.kept.empty());
+  REQUIRE(fresh.size() == 2);
   CHECK(fresh[0].guid == "stored-guid"); // tie: the first new space
   CHECK(fresh[0].name == "Sal");
   CHECK(fresh[1].guid != "stored-guid");
   CHECK(fresh[1].name.empty());
   CHECK_FALSE(fresh[1].locked);
+}
+
+TEST_CASE("SpaceIdentity_SplitLockedRoom_StaysWholeNoPieceInsideIt",
+          "[core][spaces][identity]") {
+  // reusex-s4mm: the same split under a LOCKED room. The room is kept as
+  // stored; neither half becomes a space of its own on top of it.
+  auto stored = sp("stored-guid", 0, 0, 0, 8, 4);
+  stored.name = "Sal";
+  stored.source = "manual";
+  stored.locked = true;
+  std::vector<SpaceRecord> fresh{sp("p1", 0, 0, 0, 4, 4),
+                                 sp("p2", 0, 4, 0, 4, 4),
+                                 sp("p3", 0, 10, 0, 4, 4)}; // elsewhere
+  std::vector<SpaceBoundaryRecord> bounds{
+      {"p1", "w", "a", 0, 4}, {"p2", "w", "a", 4, 8}, {"p3", "w", "b", 10, 14}};
+  SpaceIdentityOptions opt;
+  opt.match_m = 3.0;
+  opt.min_area_ratio = 0.6;
+  opt.min_overlap = 0.6;
+  const auto r = assign_space_guids(fresh, bounds, {stored}, {}, kProject, opt);
+  CHECK(r.matched == 1);
+  CHECK(r.locked_matched == 1);
+  CHECK(r.inside_locked == 1);
+  CHECK(r.minted == 1);
+  REQUIRE(fresh.size() == 1);
+  CHECK(fresh[0].polygon.outer == sp("", 0, 10, 0, 4, 4).polygon.outer);
+  REQUIRE(bounds.size() == 1);
+  CHECK(bounds[0].space == fresh[0].guid);
+  REQUIRE(r.kept.size() == 1);
+  CHECK(r.kept[0].guid == "stored-guid");
+  CHECK(r.kept[0].polygon.outer == stored.polygon.outer);
 }
 
 TEST_CASE("SpaceIdentity_RejectsDuplicatePlaceholdersAndABadNamespace",
@@ -170,16 +220,74 @@ TEST_CASE("SpaceIdentity_OverlapArea_IsExact", "[core][spaces][identity]") {
   CHECK_THAT(space_overlap_area(a, reversed), WithinAbs(3.0, 0.02));
 }
 
-TEST_CASE("SpaceIdentity_NamedRoomRedetected_InheritsNameKindAndLock",
+TEST_CASE("SpaceIdentity_LockedRoomRedetected_IsKeptAsStored",
           "[core][spaces][identity]") {
-  // A long corridor, named and locked by hand; re-detected 1.5 m longer at
-  // one end, so its centroid moves 0.75 m and its area grows 15 %: same
-  // room by overlap.
+  // reusex-s4mm: a long corridor, named and locked by hand, with a sloped
+  // ceiling of its own; re-detected 1.5 m longer at one end with another
+  // ceiling. Same room by overlap, so the detection is dropped and the
+  // stored row is kept: outline, heights and ceiling planes as stored. Only
+  // the link into today's rooms cloud (room_label) is the detection's.
   auto stored = sp("corridor-guid", 0, 0, 0, 10, 2);
   stored.name = "S1-12 Gang";
   stored.kind = "corridor";
   stored.source = "manual";
   stored.locked = true;
+  stored.z_floor = 0.1;
+  stored.z_ceiling = 2.4;
+  stored.room_label = 7;
+  stored.ceiling_planes = {CeilingPlane{{1.0, 1.0, 2.2}, {0.1, 0.0}}};
+  stored.metadata = R"({"note":"by hand","pure_share":0.4,"unmatched":true})";
+  auto fresh_c = sp("p1", 0, 0, 0, 11.5, 2);
+  fresh_c.name = "Space 3";
+  fresh_c.kind = "room";
+  fresh_c.z_ceiling = 2.6;
+  fresh_c.room_label = 3;
+  fresh_c.metadata = R"({"pure_share":0.9})";
+  std::vector<SpaceRecord> fresh{fresh_c, sp("p2", 0, 0, 3, 4, 4)};
+  std::vector<SpaceBoundaryRecord> bounds{{"p1", "w", "a", 0, 10},
+                                          {"p2", "w", "a", 0, 4}};
+  const auto r = assign_space_guids(fresh, bounds, {stored},
+                                    {storey("st0", 0, -2.2, -1.7)}, kProject);
+  CHECK(r.matched == 1);
+  CHECK(r.locked_matched == 1);
+  CHECK(r.named_matched == 1);
+  CHECK(r.minted == 1);
+  CHECK(r.unmatched_locked == 0);
+  REQUIRE(fresh.size() == 1); // only the other room is new
+  CHECK(fresh[0].name.empty());
+  CHECK_FALSE(fresh[0].locked);
+  REQUIRE(bounds.size() == 1);
+  CHECK(bounds[0].space == fresh[0].guid);
+  REQUIRE(r.kept.size() == 1);
+  const auto &k = r.kept[0];
+  CHECK(k.guid == "corridor-guid");
+  CHECK(k.name == "S1-12 Gang");
+  CHECK(k.kind == "corridor");
+  CHECK(k.source == "manual");
+  CHECK(k.locked);
+  CHECK(k.polygon.outer == stored.polygon.outer);
+  CHECK(k.z_floor == stored.z_floor);
+  CHECK(k.z_ceiling == stored.z_ceiling);
+  REQUIRE(k.ceiling_planes.size() == 1);
+  CHECK(k.ceiling_planes[0].at == stored.ceiling_planes[0].at);
+  CHECK(k.ceiling_planes[0].slope == stored.ceiling_planes[0].slope);
+  CHECK(k.room_label == 3); // today's room
+  const auto md = nlohmann::json::parse(k.metadata);
+  CHECK(md.at("note") == "by hand");
+  CHECK(md.at("pure_share") == 0.4); // the stored row's, not the detection's
+  CHECK_FALSE(md.contains("unmatched")); // it matched
+}
+
+TEST_CASE("SpaceIdentity_NamedUnlockedRoomRedetected_InheritsNameAndKind",
+          "[core][spaces][identity]") {
+  // The same corridor named but unlocked (`rux set spaces.<id>.locked
+  // false` after naming): the name, kind and the person's metadata keys
+  // follow the new outline.
+  auto stored = sp("corridor-guid", 0, 0, 0, 10, 2);
+  stored.name = "S1-12 Gang";
+  stored.kind = "corridor";
+  stored.source = "manual";
+  stored.locked = false;
   stored.metadata = R"({"note":"by hand","pure_share":0.4})";
   auto fresh_c = sp("p1", 0, 0, 0, 11.5, 2);
   fresh_c.name = "Space 3";
@@ -190,14 +298,15 @@ TEST_CASE("SpaceIdentity_NamedRoomRedetected_InheritsNameKindAndLock",
   const auto r = assign_space_guids(fresh, none, {stored},
                                     {storey("st0", 0, -2.2, -1.7)}, kProject);
   CHECK(r.matched == 1);
-  CHECK(r.locked_matched == 1);
+  CHECK(r.locked_matched == 0);
   CHECK(r.named_matched == 1);
   CHECK(r.kept.empty());
+  REQUIRE(fresh.size() == 2);
   CHECK(fresh[0].guid == "corridor-guid");
   CHECK(fresh[0].name == "S1-12 Gang");
   CHECK(fresh[0].kind == "corridor");
   CHECK(fresh[0].source == "manual");
-  CHECK(fresh[0].locked);
+  CHECK_FALSE(fresh[0].locked);
   CHECK(fresh[0].polygon.outer == fresh_c.polygon.outer); // the new outline
   const auto md = nlohmann::json::parse(fresh[0].metadata);
   CHECK(md.at("note") == "by hand"); // the person's key stays
@@ -224,14 +333,19 @@ TEST_CASE("SpaceIdentity_UnmatchedLocked_IsKeptAndFlagged",
   CHECK(r.kept[0].locked);
   CHECK(nlohmann::json::parse(r.kept[0].metadata).at("unmatched") == true);
 
-  // Matched again on a later run: the flag goes.
+  CHECK(r.unmatched_locked == 1);
+
+  // Matched again on a later run: kept as stored, and the flag goes.
   auto flagged = r.kept[0];
   std::vector<SpaceRecord> again{sp("p1", 0, 20.1, 20, 3, 3)};
   const auto r2 = assign_space_guids(again, none, {flagged}, {}, kProject);
   CHECK(r2.matched == 1);
-  CHECK(r2.kept.empty());
-  CHECK(again[0].guid == "named-guid");
-  CHECK(again[0].metadata.find("unmatched") == std::string::npos);
+  CHECK(r2.unmatched_locked == 0);
+  CHECK(again.empty());
+  REQUIRE(r2.kept.size() == 1);
+  CHECK(r2.kept[0].guid == "named-guid");
+  CHECK(r2.kept[0].polygon.outer == named.polygon.outer);
+  CHECK(r2.kept[0].metadata.find("unmatched") == std::string::npos);
 }
 
 TEST_CASE("SpaceIdentity_TwoNewOverOneStored_NoDuplicateIdentity",
@@ -241,10 +355,10 @@ TEST_CASE("SpaceIdentity_TwoNewOverOneStored_NoDuplicateIdentity",
   // space, and no stored row survives next to its successor.
   auto a = sp("a-guid", 0, 0, 0, 4, 4);
   a.name = "A";
-  a.locked = true;
+  a.source = "manual";
   auto b = sp("b-guid", 0, 4, 0, 4, 4);
   b.name = "B";
-  b.locked = true;
+  b.source = "manual";
   std::vector<SpaceRecord> fresh{sp("p1", 0, 0.4, 0, 4, 4),
                                  sp("p2", 0, 4.4, 0, 4, 4),
                                  sp("p3", 0, 8.4, 0, 0.5, 4)};

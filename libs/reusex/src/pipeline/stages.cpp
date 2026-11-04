@@ -509,7 +509,11 @@ StageResult run_band_rooms(ProjectDB &db, const StageContext &ctx,
                               "--spaces-raster: band rooms' raster outlines";
     model.storeys = storeys;
     model.walls = plan.walls.empty() ? db.walls() : plan.walls;
-    auto sp = polygonise_with_guids(db, r.grids, storeys, model.walls, so);
+    core::SpaceIdentityResult ids;
+    auto sp =
+        polygonise_with_guids(db, r.grids, storeys, model.walls, so, &ids);
+    // Locked stored spaces as the spaces stage would keep them.
+    sp.spaces.insert(sp.spaces.end(), ids.kept.begin(), ids.kept.end());
     model.spaces = std::move(sp.spaces);
     model.space_boundaries = std::move(sp.boundaries);
     model.provided.spaces = true;
@@ -1723,9 +1727,9 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
     return StageResult::failure(e.what());
   }
   // Sloped ceilings (reusex-546): the classified ceiling planes over each
-  // detected space (one that carries a stored row's lock too: its outline
-  // and heights are the new ones). Optional inputs: without planes /
-  // plane_classes every ceiling stays flat.
+  // detected space (a locked stored row is not among them: it keeps its
+  // own, reusex-s4mm). Optional inputs: without planes / plane_classes every
+  // ceiling stays flat.
   if (so.spaces.fit_ceiling_planes) {
     if (!db.has_point_cloud("planes") || !db.has_plane_classes("planes")) {
       info("spaces: no 'planes' cloud with plane classes (run `rux create "
@@ -1748,12 +1752,13 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
                                       &walls);
     }
   }
-  info("spaces: {} matched a stored space by footprint ({} locked, {} took "
-       "a stored name), {} new GUID(s)",
-       ids.matched, ids.locked_matched, ids.named_matched, ids.minted);
+  info("spaces: {} matched a stored space by footprint ({} locked, kept as "
+       "stored; {} named), {} inside a locked space dropped, {} new GUID(s)",
+       ids.matched, ids.locked_matched, ids.named_matched, ids.inside_locked,
+       ids.minted);
   // Hand edits (reusex-yuja): a space edited in the Rediger editor keeps its
-  // outline (unlike a named / locked one, which takes the new outline), and
-  // a deleted one stays deleted.
+  // outline, and a deleted one stays deleted. An edited row is left in the
+  // table untouched, so it is not written back from `kept`.
   {
     const auto holds = core::model_holds(db, core::ModelElementKind::space);
     if (const size_t held =
@@ -1765,8 +1770,10 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
     std::erase_if(ids.kept,
                   [&](const auto &k) { return holds.edited.count(k.guid); });
   }
-  // A locked space nothing matched is written back as stored, flagged
-  // "unmatched" (reusex-djf). Its boundaries stay while their wall does.
+  // Every locked space is written back as stored (reusex-s4mm): outline,
+  // heights and ceiling planes; one nothing matched is flagged "unmatched"
+  // (reusex-djf). Its boundaries stay while their wall does.
+  size_t unmatched_kept = 0;
   if (!ids.kept.empty()) {
     std::set<std::string> wall_guids, kept_guids;
     for (const auto &w : walls)
@@ -1774,15 +1781,19 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
     std::vector<std::string> names;
     for (const auto &k : ids.kept) {
       kept_guids.insert(k.guid);
-      names.push_back(k.name.empty() ? k.guid : k.name);
+      if (k.metadata.find("\"unmatched\":true") != std::string::npos) {
+        ++unmatched_kept;
+        names.push_back(k.name.empty() ? k.guid : k.name);
+      }
     }
     for (const auto &b : db.space_boundaries())
       if (kept_guids.count(b.space) && wall_guids.count(b.wall))
         sp.boundaries.push_back(b);
     sp.spaces.insert(sp.spaces.end(), ids.kept.begin(), ids.kept.end());
-    warn("spaces: {} locked space(s) match no detected space and are kept as "
-         "stored, flagged \"unmatched\" in their metadata: {}",
-         ids.kept.size(), fmt::join(names, ", "));
+    if (unmatched_kept > 0)
+      warn("spaces: {} locked space(s) match no detected space and are kept "
+           "as stored, flagged \"unmatched\" in their metadata: {}",
+           unmatched_kept, fmt::join(names, ", "));
   }
   int lost = 0;
   double arrangement = 0.0, total = 0.0;
@@ -1815,7 +1826,7 @@ StageResult run_spaces(ProjectDB &db, const StageContext &ctx,
                   kinds["corridor"], kinds["open_plan"], total,
                   total > 0.0 ? 100.0 * arrangement / total : 0.0,
                   sp.boundaries.size(), lost, written, locked_kept,
-                  ids.named_matched, ids.kept.size()),
+                  ids.named_matched, unmatched_kept),
       {{"table", "spaces", static_cast<int64_t>(rows.size())},
        {"table", "space_boundaries",
         static_cast<int64_t>(db.space_boundaries().size())}});

@@ -724,9 +724,10 @@ tree — if a doc mentions `RTABMapDatabase`, that doc is stale.
   spaces`, `JobStage::spaces`; the polygon is a blob,
   `core/space_polygon.hpp`; a boundary goes with its space but names its
   wall by GUID; a re-detected space keeps the GUID of the stored one whose
-  footprint it overlaps in world coordinates, and a named / locked one's
-  name, kind and lock, else uuid5 of storey + centroid at 5 cm,
-  `core/space_identity.hpp`; the storeys stage moves stored spaces into the
+  footprint it overlaps in world coordinates, and an unlocked named one's
+  name and kind, else uuid5 of storey + centroid at 5 cm; a locked stored
+  space is kept as stored and the detection matching it dropped
+  (reusex-s4mm), `core/space_identity.hpp`; the storeys stage moves stored spaces into the
   new level frames, `core::reframe_spaces`, reusex-djf). An imported model (`rux edit plan
   --import`, `rux import speckle`, `rux import ifc`) goes into these four
   tables through

@@ -761,8 +761,7 @@ min(cap, planes) by `ceiling_min_gain`; then `z_ceiling` is the fitted cap:
 the flat part, or the highest point of the planes over the space, and
 `volume` is integrated under the sloped ceiling; the fit is in `metadata` as
 `ceiling_fit`; `fit_ceiling_planes` off, or no candidate, leaves the ceiling
-flat; a detected space that carries a stored row's lock is fitted too, a
-locked row kept as stored keeps its own; eaves, reusex-ow8p: a plane a
+flat; a locked row is kept as stored and keeps its own; eaves, reusex-ow8p: a plane a
 neighbour took (within 0.6 m) runs on into a space whose seen ceiling does
 not contradict it, `ceiling_fit.extended_from`, so the strip between a knee
 partition and the facade slopes down to the facade; then the roof is
@@ -807,13 +806,28 @@ overlap by at least `guid_min_overlap` (half) of the larger footprint, or
 whose centroids lie within `guid_match_m` (1 m) with areas within
 `guid_min_area_ratio` (half); then, among the rest, pairs that overlap by
 half of the smaller footprint (a split or merged room's remnant). Greedy,
-largest share first, one-to-one, so a stored space is never doubled. A space
-matched to a row a person named (`locked = 1` or `source = manual`) also
-takes its name, kind, source, lock and metadata keys; its outline, heights
-and boundaries are the new ones (the row is replaced in place). A locked row
-nothing matches is kept as stored, with its boundaries on walls that still
-exist, flagged `"unmatched": true` in `metadata` and named at `warn`. Only an
-unmatched new space gets a fresh GUID, `uuid5(project_guid,
+largest share first, one-to-one, so a stored space is never doubled.
+**A locked row is never overwritten** (reusex-s4mm), whether the lock
+came from the editor, `rux set` or an import: a new space that matches it
+is dropped, and so is an otherwise unmatched new space lying mostly
+(`guid_min_overlap` of its own area) inside it (the rest of a room split
+under it); the row is written back as stored — outline, `z_floor` /
+`z_ceiling`, `ceiling_planes`, area, name, metadata — with only
+`room_label` taken from the matching new space (the link into today's
+`rooms` cloud) and an old `"unmatched"` flag cleared, and its boundaries
+are the stored ones on walls that still exist (a boundary is not
+re-measured against a moved wall). A locked row nothing matches is kept
+the same way, flagged `"unmatched": true` in `metadata` and named at
+`warn`. A new space matched to an UNLOCKED row a person named (`source =
+manual`, `locked = 0`: named with `rux set`, then `rux set
+spaces.<id>.locked false`) takes its name, kind, source, lock and metadata
+keys; its outline, heights and boundaries are the new ones (the row is
+replaced). So to let detection re-measure a named room, unlock it. Before
+reusex-s4mm a named or locked row took the re-detected outline and
+ceiling (reusex-djf), and only a row edited in the editor kept its own;
+the S10 scenario of rux-frontend re-measured 70 of 135 such rooms on a
+re-run after one storey's edits. Only an unmatched new space gets a fresh
+GUID, `uuid5(project_guid,
 "spaces/<storey>/<cx>,<cy>")` (the polygon's centroid rounded to 5 cm),
 suffixed until unique. Writing the table deletes boundary rows whose space
 row is gone (a tool that deleted spaces with foreign keys off;
@@ -1128,8 +1142,9 @@ row primitives `ProjectDB::put_*_row` / `remove_*_row` (schema v41).
   `save_spaces` skip tombstoned GUIDs too (and joins / boundaries to them).
   The walls stage's plan regularisation and the openings stage's grid only
   move fresh detections; locked rows are kept as stored. A space edited
-  here keeps its outline, unlike one only named or locked (`rux set`),
-  which takes the re-detected outline (reusex-djf). An import writes a
+  here keeps its outline, and so does one only named or locked with `rux
+  set` (reusex-s4mm; before, it took the re-detected outline, reusex-djf).
+  An import writes a
   tombstoned element back and drops the tombstone.
 - **Revision**: every write to the four tables (whole-run writers, deletes,
   imports, each batch / undo / redo once) raises `model.revision`. A new

@@ -18,13 +18,24 @@
 /// The centroid rule of z1v.6.3 (centroids within `match_m`, areas within
 /// `min_area_ratio`) still makes a pair in the first round. Pairs are taken
 /// greedily, largest share first, so no stored space is matched twice and
-/// no new space takes two identities. A space matched to a stored row that
-/// a person named or locked (locked, or source manual) also inherits its
-/// name, kind, source, lock and metadata keys; its outline is the new one.
-/// A locked stored space that nothing matches is kept as stored, flagged
-/// `"unmatched": true` in its metadata. Only an unmatched space gets a fresh
-/// GUID, uuid5(project_guid, space_natural_key()), suffixed "#n" until it
-/// collides with no stored or assigned GUID.
+/// no new space takes two identities.
+///
+/// A LOCKED stored space is kept as stored (reusex-s4mm): outline, heights,
+/// ceiling planes, name and metadata. The new space that matched it is
+/// dropped (only its room_label, the link into today's rooms cloud, goes
+/// to the kept row, and an old `"unmatched"` flag is cleared), and so is an
+/// otherwise unmatched new space lying mostly (`min_overlap` of its own
+/// area) inside a locked stored space: the rest of a room split under it.
+/// A locked stored space that nothing matches is kept as stored too,
+/// flagged `"unmatched": true` in its metadata. Locked = a re-run never
+/// overwrites it, whether the lock came from the editor, `rux set` or an
+/// import.
+///
+/// A space matched to an UNLOCKED stored row a person named (source manual:
+/// named with `rux set`, then unlocked) inherits its name, kind, source,
+/// lock and metadata keys; its outline is the new one. Only an unmatched
+/// space gets a fresh GUID, uuid5(project_guid, space_natural_key()),
+/// suffixed "#n" until it collides with no stored or assigned GUID.
 ///
 /// reframe_spaces() moves stored spaces into a new storeys table's level
 /// frames through world coordinates: the storeys stage calls it, because a
@@ -53,12 +64,20 @@ struct SpaceIdentityOptions {
 };
 
 struct SpaceIdentityResult {
-  int matched = 0;        ///< new spaces that took a stored space's GUID
-  int minted = 0;         ///< new spaces that got a fresh GUID
-  int locked_matched = 0; ///< of the matched, those whose stored row is locked
-  int named_matched = 0;  ///< of the matched, those that took a stored name
-  /// Locked stored spaces no new space matched: the stored rows, flagged
-  /// `"unmatched": true` in their metadata, to be written back as they are.
+  int matched = 0; ///< new spaces that matched a stored space
+  int minted = 0;  ///< new spaces that got a fresh GUID
+  /// Of the matched, those whose stored row is locked: dropped from `fresh`,
+  /// the stored row is in `kept`.
+  int locked_matched = 0;
+  int named_matched = 0; ///< of the matched, those whose stored row is named
+  /// Unmatched new spaces dropped because they lie inside a locked stored
+  /// space.
+  int inside_locked = 0;
+  /// Of `kept`, the rows no new space matched (flagged "unmatched").
+  int unmatched_locked = 0;
+  /// Every locked stored space, to be written back as stored: those a new
+  /// space matched (room_label from that space, no "unmatched" flag) and
+  /// those none matched (flagged `"unmatched": true` in their metadata).
   std::vector<SpaceRecord> kept;
 };
 
@@ -71,10 +90,13 @@ std::string space_natural_key(const SpaceRecord &space);
 /// <room>"); on output a UUID: the GUID of the stored space it matches
 /// (same storey idx, footprint overlap in world coordinates through
 /// @p storeys' level frames, see the file comment), else
-/// uuid5(@p project_guid, space_natural_key()). A space matched to a named
-/// or locked stored row takes its name, kind, source, lock and metadata
-/// keys too. Each SpaceBoundaryRecord::space of @p boundaries that names a
-/// placeholder of @p fresh is rewritten to that space's GUID.
+/// uuid5(@p project_guid, space_natural_key()). A space matched to a locked
+/// stored row, or lying inside one, is REMOVED from @p fresh (with its
+/// boundaries) and the stored row returned in `kept`; a space matched to an
+/// unlocked named row (source manual) takes its name, kind, source, lock
+/// and metadata keys. Each SpaceBoundaryRecord::space of @p boundaries that
+/// names a placeholder of a space left in @p fresh is rewritten to that
+/// space's GUID.
 /// Deterministic: the same inputs give the same GUIDs. A space whose storey
 /// idx is not in @p storeys is compared in its level frame as is.
 /// @throws std::invalid_argument when @p project_guid is not a UUID, or two
